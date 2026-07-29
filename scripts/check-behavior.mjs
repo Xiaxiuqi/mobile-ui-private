@@ -3133,6 +3133,103 @@ try {
     globalThis.getComputedStyle = () => ({ display: 'flex', visibility: 'visible', opacity: '1' });
     window.addEventListener = () => {};
     window.removeEventListener = () => {};
+
+    const createCommandRetryFixture = ({ initialRegistration = false, initialTimerId = 1 } = {}) => {
+        const callbacks = new Map();
+        const cleared = [];
+        let nextId = initialTimerId;
+        const timers = {
+            setInterval(callback) {
+                const id = nextId++;
+                callbacks.set(id, callback);
+                return id;
+            },
+            clearInterval(id) {
+                cleared.push(id);
+                callbacks.delete(id);
+            },
+            setTimeout: globalThis.setTimeout,
+            clearTimeout: globalThis.clearTimeout,
+        };
+        const diagnostics = createLifecycleDiagnostics();
+        const appScope = createLifecycleScope({ label: 'command-retry-app', diagnostics, timers });
+        const runtime = createRuntimeState();
+        let registrations = 0;
+        const registeredContext = { registerSlashCommand() { registrations += 1; } };
+        let context = initialRegistration ? registeredContext : {};
+        const deps = {
+            ...lifecycleFixtureDeps,
+            runtime,
+            appLifecycleScope: appScope,
+            lifecycleDiagnostics: diagnostics,
+            getCtx: () => context,
+        };
+        return {
+            appScope, callbacks, cleared, deps, diagnostics, runtime,
+            enableRegistration() {
+                context = registeredContext;
+            },
+            registrations: () => registrations,
+            tick() {
+                for (const callback of [...callbacks.values()]) callback();
+            },
+        };
+    };
+
+    const immediateCommandRegistration = createCommandRetryFixture({ initialRegistration: true });
+    installPhoneLifecycle({ ...lifecycleFixtureState }, immediateCommandRegistration.deps);
+    assert.equal(immediateCommandRegistration.registrations(), 1, '斜杠命令首次注册成功时必须保留原有注册语义');
+    assert.equal(immediateCommandRegistration.callbacks.size, 0, '斜杠命令首次注册成功时不得启动重试 interval');
+    assert.equal(immediateCommandRegistration.runtime.phoneCommandRetry, null,
+        '斜杠命令首次注册成功时不得写入命令重试运行态');
+    assert.deepEqual(immediateCommandRegistration.diagnostics.snapshot(), { scope: 1 },
+        '斜杠命令首次注册成功时 app scope 不得新增重试资源');
+    immediateCommandRegistration.appScope.dispose('fixture-complete');
+
+    const successfulCommandRetry = createCommandRetryFixture();
+    installPhoneLifecycle({ ...lifecycleFixtureState }, successfulCommandRetry.deps);
+    assert.equal(successfulCommandRetry.callbacks.size, 1,
+        '斜杠命令首次注册失败时必须且只能启动一个 app-scope 重试 interval');
+    assert.deepEqual(successfulCommandRetry.diagnostics.snapshot(), { cleanup: 1, interval: 1, scope: 1 },
+        '命令重试期间诊断必须准确登记 interval 与运行态释放清理');
+    successfulCommandRetry.enableRegistration();
+    successfulCommandRetry.tick();
+    assert.equal(successfulCommandRetry.registrations(), 1, '宿主命令 API 可用后必须立即完成注册');
+    assert.equal(successfulCommandRetry.callbacks.size, 0, '注册成功后必须提前停止命令重试 interval');
+    assert.equal(successfulCommandRetry.runtime.phoneCommandRetry, null, '注册成功后必须清空命令重试运行态');
+    assert.deepEqual(successfulCommandRetry.diagnostics.snapshot(), { scope: 1 },
+        '注册成功后命令重试资源必须回到 app scope 基线');
+    successfulCommandRetry.appScope.dispose('fixture-complete');
+
+    const exhaustedCommandRetry = createCommandRetryFixture();
+    installPhoneLifecycle({ ...lifecycleFixtureState }, exhaustedCommandRetry.deps);
+    for (let attempt = 0; attempt < 30; attempt += 1) exhaustedCommandRetry.tick();
+    assert.equal(exhaustedCommandRetry.callbacks.size, 0, '命令注册连续失败 30 次后必须停止重试');
+    assert.equal(exhaustedCommandRetry.runtime.phoneCommandRetry, null, '达到重试上限后必须清空命令重试运行态');
+    assert.deepEqual(exhaustedCommandRetry.diagnostics.snapshot(), { scope: 1 },
+        '达到重试上限后资源诊断必须回到 app scope 基线');
+    exhaustedCommandRetry.appScope.dispose('fixture-complete');
+
+    const disposedCommandRetry = createCommandRetryFixture();
+    installPhoneLifecycle({ ...lifecycleFixtureState }, disposedCommandRetry.deps);
+    installPhoneLifecycle({ ...lifecycleFixtureState }, disposedCommandRetry.deps);
+    assert.equal(disposedCommandRetry.callbacks.size, 1, '同一 runtime 重复安装不得累加命令重试 interval');
+    disposedCommandRetry.appScope.dispose('fixture-app-disposed');
+    assert.equal(disposedCommandRetry.callbacks.size, 0, 'app scope dispose 必须停止尚未完成的命令重试');
+    assert.equal(disposedCommandRetry.runtime.phoneCommandRetry, null, 'app scope dispose 必须清空命令重试运行态');
+    assert.deepEqual(disposedCommandRetry.diagnostics.snapshot(), {}, 'app scope dispose 后不得残留命令重试资源');
+
+    const zeroIdCommandRetry = createCommandRetryFixture({ initialTimerId: 0 });
+    installPhoneLifecycle({ ...lifecycleFixtureState }, zeroIdCommandRetry.deps);
+    assert.equal(zeroIdCommandRetry.runtime.phoneCommandRetry?.id, 0, 'timer id=0 必须被保存为有效命令重试句柄');
+    zeroIdCommandRetry.enableRegistration();
+    zeroIdCommandRetry.tick();
+    assert.deepEqual(zeroIdCommandRetry.cleared, [0], 'timer id=0 的命令重试必须可被正常清理');
+    assert.equal(zeroIdCommandRetry.runtime.phoneCommandRetry, null, 'timer id=0 清理后必须清空命令重试运行态');
+    assert.deepEqual(zeroIdCommandRetry.diagnostics.snapshot(), { scope: 1 },
+        'timer id=0 清理后诊断必须回到 app scope 基线');
+    zeroIdCommandRetry.appScope.dispose('fixture-complete');
+
     const lifecycleFailureState = {
         ...lifecycleFixtureState, groupMembers: [], groupExtras: [], groupColorMap: {}, conversationHistory: [],
     };
@@ -3142,12 +3239,14 @@ try {
     let rejectInitialGroupMeta;
     lifecycleFailureDeps.loadGroupMeta = () => new Promise((resolve, reject) => { rejectInitialGroupMeta = reject; });
     lifecycleFailureDeps.runtime.firstOpen = false;
+    const timeoutCountBeforeFailureInstall = lifecycleTimeoutCallbacks.length;
     const hookCallsBeforeFailureInstall = lifecycleHookCalls;
     installPhoneLifecycle(lifecycleFailureState, lifecycleFailureDeps);
     assert.equal(lifecycleHookCalls, hookCallsBeforeFailureInstall + 1,
         '生命周期安装必须立即注册宿主事件，不能等本地存储恢复后才监听首个分支 CHAT_CHANGED');
-    assert.equal(lifecycleTimeoutCallbacks.length, 1, '生命周期安装必须安排一次有限的宿主事件延迟重试');
-    lifecycleTimeoutCallbacks.shift()();
+    assert.equal(lifecycleTimeoutCallbacks.length, timeoutCountBeforeFailureInstall + 1,
+        '生命周期安装必须安排一次有限的宿主事件延迟重试');
+    lifecycleTimeoutCallbacks[timeoutCountBeforeFailureInstall]();
     assert.equal(lifecycleHookCalls, hookCallsBeforeFailureInstall + 2,
         '延迟宿主事件重试不得等待群组元数据恢复完成');
     rejectInitialGroupMeta(new Error('fixture-group-meta-failed'));

@@ -9,6 +9,7 @@ export function createRuntimeState() {
         lastBranchInheritanceError: null,
         lastChatLength: 0,
         historyLoadPromise: null,
+        phoneCommandRetry: null,
         visibilityTimer: null,
         autoPokeArmed: false,
         automaticEpoch: 0,

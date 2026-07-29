@@ -11448,6 +11448,7 @@ ${lines}
       lastBranchInheritanceError: null,
       lastChatLength: 0,
       historyLoadPromise: null,
+      phoneCommandRetry: null,
       visibilityTimer: null,
       autoPokeArmed: false,
       automaticEpoch: 0,
@@ -16702,6 +16703,12 @@ ${lines}`;
         }
       }
     };
+    function stopPhoneCommandRetry() {
+      const retry = runtime.phoneCommandRetry;
+      if (!retry) return false;
+      runtime.phoneCommandRetry = null;
+      return retry.cancel();
+    }
     function registerPhoneCommand() {
       const ctx = getCtx();
       if (!ctx) return false;
@@ -16717,6 +16724,7 @@ ${lines}`;
         const SCP = window.SlashCommandParser || ctx.SlashCommandParser, SC = window.SlashCommand || ctx.SlashCommand;
         if (SCP && SC && typeof SCP.addCommandObject === "function" && typeof SC.fromProps === "function") {
           SCP.addCommandObject(SC.fromProps({ name: "phone", callback: cb, helpString: "\u6253\u5F00\u5929\u97F3\u5C0F\u7B3A" }));
+          stopPhoneCommandRetry();
           return true;
         }
       } catch (e) {
@@ -16724,18 +16732,30 @@ ${lines}`;
       try {
         if (typeof ctx.registerSlashCommand === "function") {
           ctx.registerSlashCommand("phone", cb, [], "\u6253\u5F00\u5929\u97F3\u5C0F\u7B3A", true, true);
+          stopPhoneCommandRetry();
           return true;
         }
       } catch (e) {
       }
       return false;
     }
-    if (!registerPhoneCommand()) {
-      let t = 0;
-      const i = setInterval(() => {
-        t++;
-        if (registerPhoneCommand() || t >= 30) clearInterval(i);
+    if (!registerPhoneCommand() && !runtime.phoneCommandRetry) {
+      if (!appLifecycleScope) throw new Error("Phone command retry requires an app lifecycle scope");
+      let attempts = 0;
+      const interval = appLifecycleScope.interval(() => {
+        attempts += 1;
+        if (registerPhoneCommand() || attempts >= 30) stopPhoneCommandRetry();
       }, 500);
+      const releaseState = appLifecycleScope.addCleanup(() => {
+        if (runtime.phoneCommandRetry?.id === interval.id) runtime.phoneCommandRetry = null;
+      });
+      runtime.phoneCommandRetry = Object.freeze({
+        id: interval.id,
+        cancel: () => {
+          releaseState();
+          return interval.cancel();
+        }
+      });
     }
     document.addEventListener("keydown", (e) => {
       if (e.key !== "Enter" || e.shiftKey) return;

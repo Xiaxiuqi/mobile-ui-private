@@ -508,17 +508,51 @@ export function installPhoneLifecycle(state, deps) {
 
 
 
+    function stopPhoneCommandRetry() {
+        const retry = runtime.phoneCommandRetry;
+        if (!retry) return false;
+        runtime.phoneCommandRetry = null;
+        return retry.cancel();
+    }
+
     function registerPhoneCommand() {
         const ctx = getCtx(); if (!ctx) return false;
         const cb = () => { try { window.__pmOpen(); } catch (e) { console.error('[phone-mode]', e); } return ''; };
         try {
             const SCP = window.SlashCommandParser || ctx.SlashCommandParser, SC = window.SlashCommand || ctx.SlashCommand;
-            if (SCP && SC && typeof SCP.addCommandObject === 'function' && typeof SC.fromProps === 'function') { SCP.addCommandObject(SC.fromProps({ name: 'phone', callback: cb, helpString: '打开天音小笺' })); return true; }
+            if (SCP && SC && typeof SCP.addCommandObject === 'function' && typeof SC.fromProps === 'function') {
+                SCP.addCommandObject(SC.fromProps({ name: 'phone', callback: cb, helpString: '打开天音小笺' }));
+                stopPhoneCommandRetry();
+                return true;
+            }
         } catch (e) {}
-        try { if (typeof ctx.registerSlashCommand === 'function') { ctx.registerSlashCommand('phone', cb, [], '打开天音小笺', true, true); return true; } } catch (e) {}
+        try {
+            if (typeof ctx.registerSlashCommand === 'function') {
+                ctx.registerSlashCommand('phone', cb, [], '打开天音小笺', true, true);
+                stopPhoneCommandRetry();
+                return true;
+            }
+        } catch (e) {}
         return false;
     }
-    if (!registerPhoneCommand()) { let t = 0; const i = setInterval(() => { t++; if (registerPhoneCommand() || t >= 30) clearInterval(i); }, 500); }
+    if (!registerPhoneCommand() && !runtime.phoneCommandRetry) {
+        if (!appLifecycleScope) throw new Error('Phone command retry requires an app lifecycle scope');
+        let attempts = 0;
+        const interval = appLifecycleScope.interval(() => {
+            attempts += 1;
+            if (registerPhoneCommand() || attempts >= 30) stopPhoneCommandRetry();
+        }, 500);
+        const releaseState = appLifecycleScope.addCleanup(() => {
+            if (runtime.phoneCommandRetry?.id === interval.id) runtime.phoneCommandRetry = null;
+        });
+        runtime.phoneCommandRetry = Object.freeze({
+            id: interval.id,
+            cancel: () => {
+                releaseState();
+                return interval.cancel();
+            },
+        });
+    }
 
     document.addEventListener('keydown', e => {
         if (e.key !== 'Enter' || e.shiftKey) return;
