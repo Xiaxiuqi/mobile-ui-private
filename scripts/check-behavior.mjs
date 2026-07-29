@@ -63,6 +63,7 @@ import {
     buildPokeGroupActivePrompt, buildPokeGroupPrompt, buildSingleInjectedInstruction, buildSingleSystemPrompt,
 } from '../src/chat-prompts.js';
 import { parseGroupResponse } from '../src/messaging.js';
+import { createLifecycleDiagnostics, createLifecycleScope } from '../src/infrastructure/lifecycle-scope.js';
 import {
     advanceAutoPokeCounters, commitAutomaticResult,
     createAutomaticTaskController, createRuntimeState, runAutoPokeCounterCycle,
@@ -2712,8 +2713,12 @@ const foundationState = {
     conversationHistory: [],
 };
 const lifecycleCalls = [];
+const foundationLifecycleDiagnostics = createLifecycleDiagnostics();
+const foundationAppLifecycleScope = createLifecycleScope({ label: 'app', diagnostics: foundationLifecycleDiagnostics });
 const foundationDeps = {
     runtime: createRuntimeState(),
+    appLifecycleScope: foundationAppLifecycleScope,
+    lifecycleDiagnostics: foundationLifecycleDiagnostics,
     getCtx: () => ({ registerSlashCommand() {} }),
     getStorageId: () => 'story',
     getUserPersona: () => ({ name: '用户' }),
@@ -3103,8 +3108,11 @@ const lifecycleFixtureState = {
     groupRandomNpcEnabled: false, groupNature: '', currentGroupKey: '', isGenerating: false,
 };
 let lifecycleHookCalls = 0;
+const lifecycleDiagnostics = createLifecycleDiagnostics();
+const lifecycleAppScope = createLifecycleScope({ label: 'app', diagnostics: lifecycleDiagnostics });
 const lifecycleFixtureDeps = {
     runtime: createRuntimeState(), getCtx: () => ({ registerSlashCommand() {} }),
+    appLifecycleScope: lifecycleAppScope, lifecycleDiagnostics,
     getStorageId: () => 'story', getUserPersona: () => ({ name: '用户' }),
     loadGroupMeta: async () => ({}),
     applyBidirectionalInjection: () => {}, clearBidirectionalInjection: () => {},
@@ -3155,6 +3163,17 @@ try {
     assert.equal(lifecycleHookCalls, hookCallsBeforeSuccessInstall + 1,
         '每个独立 runtime 安装时都必须同步尝试注册宿主事件');
     window.__pmTheme = structuredClone(baseTheme);
+    globalThis.setInterval = () => { throw new Error('fixture-interval-start-failed'); };
+    await assert.rejects(window.__pmOpen(), /fixture-interval-start-failed/);
+    assert.equal(lifecycleFixtureState.phoneActive, false,
+        '巡检 interval 启动失败时必须回滚已激活的手机状态，不能留下无法重试的半开 UI');
+    assert.equal(lifecycleFixtureState.phoneWindow, null,
+        '巡检 interval 启动失败时必须移除已创建的手机窗口');
+    assert.equal(lifecycleFixtureDeps.runtime.visibilityTimer, null,
+        '巡检 interval 启动失败时不得残留 timer 状态');
+    assert.deepEqual(lifecycleDiagnostics.snapshot(), { scope: 1 },
+        '巡检 interval 启动失败后资源诊断必须回到 app scope 基线');
+    globalThis.setInterval = () => { lifecycleIntervalIds.push(0); return 0; };
     await window.__pmOpen();
     assert.deepEqual(lifecycleIntervalIds, [0], '成功打开必须且只能启动一个可见性巡检定时器');
     assert.equal(lifecycleFixtureDeps.runtime.visibilityTimer, 0, '可见性巡检必须保存 setInterval 返回的 0 号 timer');
@@ -3163,6 +3182,18 @@ try {
     window.__pmEnd(true);
     assert.deepEqual(lifecycleClearedIds, [0], '关闭手机必须清理 timer id 为 0 的可见性巡检');
     assert.equal(lifecycleFixtureDeps.runtime.visibilityTimer, null, '关闭手机后可见性巡检状态必须恢复为空');
+    assert.deepEqual(lifecycleDiagnostics.snapshot(), { scope: 1 }, '关闭手机后必须只保留 app scope 基线');
+    for (let cycle = 0; cycle < 20; cycle += 1) {
+        lifecyclePhone.removed = false;
+        await window.__pmOpen();
+        assert.deepEqual(lifecycleDiagnostics.snapshot(), { 'child-scope': 1, interval: 1, scope: 2 },
+            `第 ${cycle + 1} 次打开后必须只有一个 phone scope 和一个巡检 interval`);
+        window.__pmEnd(true);
+        assert.deepEqual(lifecycleDiagnostics.snapshot(), { scope: 1 },
+            `第 ${cycle + 1} 次关闭后资源诊断必须回到 app scope 基线`);
+    }
+    assert.equal(lifecycleIntervalIds.length, 21, '20 次重新打开必须每次且只创建一个巡检 interval');
+    assert.equal(lifecycleClearedIds.length, 21, '20 次重新关闭必须每次且只释放一个巡检 interval');
 } finally {
     document.createElement = originalLifecycleCreateElement;
     document.body.appendChild = originalLifecycleAppendChild;
@@ -7373,14 +7404,18 @@ try {
 
     window.__pmDiagEnabled = true;
     const diagnosticRuntime = createRuntimeState();
+    const diagnosticLifecycle = createLifecycleDiagnostics();
+    const diagnosticAppScope = createLifecycleScope({ label: 'app', diagnostics: diagnosticLifecycle });
     diagnosticRuntime.eventHooked = true;
     diagnosticRuntime.hostEventRegistrations.add('resolved:CHAT_CHANGED');
     diagnosticRuntime.lastBranchInheritance = emptySourceResult;
     assert.equal(installDiagnosticApi({ runtime: diagnosticRuntime, getCtx: () => branchContext,
-        getStorageId: () => branchIds.target }), true, '显式打开诊断开关时必须挂载只读诊断面');
+        getStorageId: () => branchIds.target, lifecycleDiagnostics: diagnosticLifecycle }), true,
+    '显式打开诊断开关时必须挂载只读诊断面');
     const diagnosticSnapshot = window.__pmDiag.snapshot();
     assert.equal(Object.isFrozen(window.__pmDiag), true, '诊断 API 顶层对象必须冻结');
     assert.equal(Object.isFrozen(diagnosticSnapshot), true, '诊断快照必须冻结');
+    assert.deepEqual(diagnosticSnapshot.lifecycleResources, { scope: 1 }, '诊断面必须暴露脱敏的生命周期资源计数');
     assert.equal(diagnosticSnapshot.lastBranchInheritance.reason, 'source-empty',
         '诊断面必须暴露最后一次空来源跳过原因');
     assert.deepEqual(diagnosticSnapshot.lastBranchInheritance.sourcePresence.histories, { present: false, count: 0 },
@@ -7389,6 +7424,7 @@ try {
         '诊断面不得暴露消息正文');
     diagnosticRuntime.lastBranchInheritanceError = { name: 'Error', message: '潜在聊天正文不得经诊断 API 暴露' };
     assert.equal(window.__pmDiag.snapshot().lastBranchInheritanceError?.message, '', '诊断 API 必须剥离原始错误文本');
+    diagnosticAppScope.dispose('diagnostic-test-complete');
     delete window.__pmDiagEnabled;
     delete window.__pmDiag;
     delete window.__pmRetryBranch;

@@ -186,9 +186,11 @@ export function installPhoneLifecycle(state, deps) {
         migrateOldHistory, hookGenerationEvent,
         cancelGeneration, invalidateGeneration, disarmAutoPoke, syncGenerationControls, closeOverlay, closeControlCenter,
         refreshReplyCardAvailability,
+        appLifecycleScope,
     } = deps;
     let unbindSendGesture = null;
     let unbindIsland = null, unbindPhoneResize = null;
+    let phoneLifecycleScope = null;
     const pageController = createPhonePageController({
         getRoot: () => state.phoneWindow,
         closeTransientUi: () => { deps.closeContactSwitcher?.('page-change'); closeControlCenter?.(); },
@@ -301,6 +303,9 @@ export function installPhoneLifecycle(state, deps) {
         disarmAutoPoke('phone-closed');
         invalidateGeneration();
         ambientStatus.stop();
+        phoneLifecycleScope?.dispose(force ? 'phone-force-closed' : 'phone-closed');
+        phoneLifecycleScope = null;
+        runtime.visibilityTimer = null;
         unbindSendGesture?.();
         unbindSendGesture = null;
         unbindIsland?.();
@@ -320,7 +325,6 @@ export function installPhoneLifecycle(state, deps) {
         state.groupDisplayName = ''; state.groupRandomNpcEnabled = false; state.groupNature = ''; state.groupRandomNpcPrompt = ''; state.currentGroupKey = '';
         // 修复：关闭时重置冷启动标记，确保下次打开时（尤其是切换角色卡后）重新从 IDB 加载最新数据
         runtime.firstOpen = true;
-        if (runtime.visibilityTimer !== null) { clearInterval(runtime.visibilityTimer); runtime.visibilityTimer = null; }
     };
 
     function loadHistoriesOnce() {
@@ -480,7 +484,26 @@ export function installPhoneLifecycle(state, deps) {
                 });
         }
         // 初始化完成后才启动巡检；插件空闲或打开失败时不得保留后台定时器。
-        if (runtime.visibilityTimer === null && state.phoneActive && state.phoneWindow) runtime.visibilityTimer = setInterval(ensureVisibility, 2000);
+        if (runtime.visibilityTimer === null && state.phoneActive && state.phoneWindow) {
+            try {
+                if (!appLifecycleScope) throw new Error('Phone lifecycle requires an app lifecycle scope');
+                phoneLifecycleScope = appLifecycleScope.child('phone');
+                runtime.visibilityTimer = phoneLifecycleScope.interval(ensureVisibility, 2000).id;
+            } catch (error) {
+                try {
+                    phoneLifecycleScope?.dispose('visibility-timer-start-failed');
+                } catch (cleanupError) {
+                    console.error('[phone-mode] 可见性巡检启动失败后的资源清理失败', cleanupError);
+                }
+                phoneLifecycleScope = null;
+                runtime.visibilityTimer = null;
+                // 此时 UI 已标记为 active；必须完整回滚，否则下一次打开会命中快速返回，永久失去巡检。
+                try { window.__pmEnd(true); } catch (cleanupError) {
+                    console.error('[phone-mode] 手机打开失败后的回滚失败', cleanupError);
+                }
+                throw error;
+            }
+        }
     };
 
 

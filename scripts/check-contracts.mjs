@@ -1195,17 +1195,20 @@ for (const expected of [
 ]) requireText('phone-foundation.js', sourceModuleByName.get('phone-foundation.js')?.code || '', expected);
 for (const expected of [
   'pm-quote-preview', 'deleteSelectedMessages', 'refreshReplyCardAvailability?.()',
-  'if (runtime.visibilityTimer !== null) { clearInterval(runtime.visibilityTimer); runtime.visibilityTimer = null; }',
-  'if (runtime.visibilityTimer === null && state.phoneActive && state.phoneWindow) runtime.visibilityTimer = setInterval(ensureVisibility, 2000);',
+  "phoneLifecycleScope?.dispose(force ? 'phone-force-closed' : 'phone-closed')",
+  "phoneLifecycleScope = appLifecycleScope.child('phone')",
+  'runtime.visibilityTimer = phoneLifecycleScope.interval(ensureVisibility, 2000).id',
+  "phoneLifecycleScope?.dispose('visibility-timer-start-failed')",
+  'try { window.__pmEnd(true); }',
 ]) requireText('phone-lifecycle.js', sourceModuleByName.get('phone-lifecycle.js')?.code || '', expected);
 const lifecycleTimerCode = sourceModuleByName.get('phone-lifecycle.js')?.code || '';
-const visibilityTimerStart = lifecycleTimerCode.indexOf('runtime.visibilityTimer = setInterval(ensureVisibility, 2000)');
+const visibilityTimerStart = lifecycleTimerCode.indexOf('runtime.visibilityTimer = phoneLifecycleScope.interval(ensureVisibility, 2000).id');
 const phoneOpenStart = lifecycleTimerCode.indexOf('window.__pmOpen = async () => {');
 const phoneActiveStart = lifecycleTimerCode.indexOf('state.phoneActive = true;', phoneOpenStart);
-if (visibilityTimerStart < phoneActiveStart) {
+if (visibilityTimerStart < 0 || visibilityTimerStart < phoneActiveStart) {
   failures.push('phone-lifecycle.js: visibility timer must start only after phone initialization marks the window active');
 }
-if (lifecycleTimerCode.slice(0, phoneOpenStart).includes('runtime.visibilityTimer = setInterval(ensureVisibility, 2000)')) {
+if (lifecycleTimerCode.slice(0, phoneOpenStart).includes('phoneLifecycleScope.interval(ensureVisibility, 2000)')) {
   failures.push('phone-lifecycle.js: plugin installation must not start the visibility timer while no phone window exists');
 }
 const lifecycleAst = parseJavaScript(lifecycleTimerCode, 'module');
@@ -1774,6 +1777,7 @@ for (const expected of [
 for (const expected of ['hostEventSource: null', 'hostEventRegistrations: new Set()']) requireText('runtime.js', sourceModuleByName.get('runtime.js')?.code || '', expected);
 for (const expected of [
   'installDiagnosticApi(deps)', "globalThis.window?.__pmDiagEnabled !== true", 'window.__pmDiag = freeze({ snapshot, readLineage })',
+  'lifecycleResources: lifecycleDiagnostics?.snapshot?.() || null',
   'Object.freeze(Array.from(pendingByTarget.keys()))', "reason: 'source-empty'", 'sourcePresence', 'targetPresence', 'force = false',
 ]) requireText('branch inheritance diagnostics', [
   sourceModuleByName.get('main.js')?.code || '', sourceModuleByName.get('diagnostic.js')?.code || '',

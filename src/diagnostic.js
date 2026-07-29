@@ -59,7 +59,7 @@ function safeError(error) {
 
 export function installDiagnosticApi(deps) {
     if (globalThis.window?.__pmDiagEnabled !== true) return false;
-    const { runtime, getCtx, getStorageId } = deps;
+    const { runtime, getCtx, getStorageId, lifecycleDiagnostics } = deps;
     const snapshot = () => {
         const branch = resolveBranchInheritance(getCtx());
         return freeze({
@@ -71,6 +71,7 @@ export function installDiagnosticApi(deps) {
             lastBranchInheritanceError: safeError(runtime.lastBranchInheritanceError),
             pendingTargets: getPendingBranchInheritanceTargets(),
             currentStorageId: typeof getStorageId === 'function' ? getStorageId() : null,
+            lifecycleResources: lifecycleDiagnostics?.snapshot?.() || null,
         });
     };
     const readLineage = async targetId => {

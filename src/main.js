@@ -18,6 +18,7 @@ import { installPhoneDirectory } from './phone-directory.js';
 import { installPhoneFoundation } from './phone-foundation.js';
 import { installPhoneLifecycle } from './phone-lifecycle.js';
 import { ensureInitialPhoneQuickReplyWithRetry } from './quick-reply.js';
+import { createLifecycleDiagnostics, createLifecycleScope } from './infrastructure/lifecycle-scope.js';
 import { createRuntimeState } from './runtime.js';
 import { installSettingsUi } from './settings-ui.js';
 import { saveBudgetConfig, saveEmojis } from './storage.js';
@@ -26,6 +27,8 @@ import { saveBudgetConfig, saveEmojis } from './storage.js';
     await new Promise(resolve => setTimeout(resolve, 1000));
 
     const runtime = createRuntimeState();
+    const lifecycleDiagnostics = createLifecycleDiagnostics();
+    const appLifecycleScope = createLifecycleScope({ label: 'app', diagnostics: lifecycleDiagnostics });
     const state = {
         phoneActive: false,
         phoneWindow: null,
@@ -57,7 +60,10 @@ import { saveBudgetConfig, saveEmojis } from './storage.js';
         context ? () => context : getCtx,
         options,
     );
-    const deps = { runtime, getCtx, getStorageId, getUserPersona, gatherContext, saveBudgetConfig };
+    const deps = {
+        runtime, getCtx, getStorageId, getUserPersona, gatherContext, saveBudgetConfig,
+        lifecycleDiagnostics, appLifecycleScope,
+    };
     deps.callAI = createAiClient({
         getConfig: () => window.__pmConfig,
         getContext: getCtx,

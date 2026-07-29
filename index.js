@@ -8698,7 +8698,7 @@ ${entry2.content}` : entry2.content;
   }
   function installDiagnosticApi(deps) {
     if (globalThis.window?.__pmDiagEnabled !== true) return false;
-    const { runtime, getCtx, getStorageId: getStorageId2 } = deps;
+    const { runtime, getCtx, getStorageId: getStorageId2, lifecycleDiagnostics } = deps;
     const snapshot = () => {
       const branch = resolveBranchInheritance(getCtx());
       return freeze({
@@ -8709,7 +8709,8 @@ ${entry2.content}` : entry2.content;
         lastBranchInheritance: safeResult(runtime.lastBranchInheritance),
         lastBranchInheritanceError: safeError(runtime.lastBranchInheritanceError),
         pendingTargets: getPendingBranchInheritanceTargets(),
-        currentStorageId: typeof getStorageId2 === "function" ? getStorageId2() : null
+        currentStorageId: typeof getStorageId2 === "function" ? getStorageId2() : null,
+        lifecycleResources: lifecycleDiagnostics?.snapshot?.() || null
       });
     };
     const readLineage = async (targetId) => {
@@ -16334,10 +16335,12 @@ ${lines}`;
       syncGenerationControls,
       closeOverlay,
       closeControlCenter,
-      refreshReplyCardAvailability
+      refreshReplyCardAvailability,
+      appLifecycleScope
     } = deps;
     let unbindSendGesture = null;
     let unbindIsland = null, unbindPhoneResize = null;
+    let phoneLifecycleScope = null;
     const pageController = createPhonePageController({
       getRoot: () => state.phoneWindow,
       closeTransientUi: () => {
@@ -16452,6 +16455,9 @@ ${lines}`;
       disarmAutoPoke("phone-closed");
       invalidateGeneration();
       ambientStatus.stop();
+      phoneLifecycleScope?.dispose(force ? "phone-force-closed" : "phone-closed");
+      phoneLifecycleScope = null;
+      runtime.visibilityTimer = null;
       unbindSendGesture?.();
       unbindSendGesture = null;
       unbindIsland?.();
@@ -16486,10 +16492,6 @@ ${lines}`;
       state.groupRandomNpcPrompt = "";
       state.currentGroupKey = "";
       runtime.firstOpen = true;
-      if (runtime.visibilityTimer !== null) {
-        clearInterval(runtime.visibilityTimer);
-        runtime.visibilityTimer = null;
-      }
     };
     function loadHistoriesOnce() {
       if (!runtime.historyLoadPromise) {
@@ -16678,7 +16680,27 @@ ${lines}`;
           if (runtime.historyLoadPromise === historyLoad) runtime.historyLoadPromise = null;
         });
       }
-      if (runtime.visibilityTimer === null && state.phoneActive && state.phoneWindow) runtime.visibilityTimer = setInterval(ensureVisibility, 2e3);
+      if (runtime.visibilityTimer === null && state.phoneActive && state.phoneWindow) {
+        try {
+          if (!appLifecycleScope) throw new Error("Phone lifecycle requires an app lifecycle scope");
+          phoneLifecycleScope = appLifecycleScope.child("phone");
+          runtime.visibilityTimer = phoneLifecycleScope.interval(ensureVisibility, 2e3).id;
+        } catch (error) {
+          try {
+            phoneLifecycleScope?.dispose("visibility-timer-start-failed");
+          } catch (cleanupError) {
+            console.error("[phone-mode] \u53EF\u89C1\u6027\u5DE1\u68C0\u542F\u52A8\u5931\u8D25\u540E\u7684\u8D44\u6E90\u6E05\u7406\u5931\u8D25", cleanupError);
+          }
+          phoneLifecycleScope = null;
+          runtime.visibilityTimer = null;
+          try {
+            window.__pmEnd(true);
+          } catch (cleanupError) {
+            console.error("[phone-mode] \u624B\u673A\u6253\u5F00\u5931\u8D25\u540E\u7684\u56DE\u6EDA\u5931\u8D25", cleanupError);
+          }
+          throw error;
+        }
+      }
     };
     function registerPhoneCommand() {
       const ctx = getCtx();
@@ -16922,6 +16944,179 @@ ${lines}`;
     }
     throw new Error("Quick Reply \u521D\u59CB\u5316\u91CD\u8BD5\u8017\u5C3D");
   }
+
+  // src/infrastructure/lifecycle-scope.js
+  var LifecycleScopeDisposedError = class extends Error {
+    constructor(label) {
+      super(`Lifecycle scope is disposed: ${label}`);
+      this.name = "LifecycleScopeDisposedError";
+    }
+  };
+  function createLifecycleDiagnostics() {
+    const counts = /* @__PURE__ */ new Map();
+    const change = (kind, delta) => {
+      const next = (counts.get(kind) || 0) + delta;
+      if (next < 0) throw new Error(`Lifecycle diagnostic underflow: ${kind}`);
+      if (next === 0) counts.delete(kind);
+      else counts.set(kind, next);
+    };
+    return Object.freeze({
+      track(kind) {
+        change(kind, 1);
+        let active = true;
+        return () => {
+          if (!active) return false;
+          active = false;
+          change(kind, -1);
+          return true;
+        };
+      },
+      snapshot() {
+        return Object.freeze(Object.fromEntries([...counts.entries()].sort(([a], [b]) => a.localeCompare(b))));
+      }
+    });
+  }
+  function createLifecycleScope({
+    label = "anonymous",
+    parent = null,
+    diagnostics = parent?.diagnostics || createLifecycleDiagnostics(),
+    timers = globalThis
+  } = {}) {
+    const controller = new AbortController();
+    const cleanups = /* @__PURE__ */ new Set();
+    let disposed = false;
+    let releaseParent = null;
+    let untrackScope = diagnostics.track("scope");
+    const assertActive = () => {
+      if (disposed) throw new LifecycleScopeDisposedError(label);
+    };
+    const addCleanup = (cleanup, kind = "cleanup") => {
+      assertActive();
+      if (typeof cleanup !== "function") throw new TypeError("Lifecycle cleanup must be a function");
+      const untrack = diagnostics.track(kind);
+      let active = true;
+      const wrapped = () => {
+        if (!active) return false;
+        active = false;
+        cleanups.delete(wrapped);
+        try {
+          cleanup();
+        } finally {
+          untrack();
+        }
+        return true;
+      };
+      cleanups.add(wrapped);
+      return wrapped;
+    };
+    const listen = (target, type, handler, options) => {
+      assertActive();
+      if (!target?.addEventListener || !target?.removeEventListener) throw new TypeError("Lifecycle event target is invalid");
+      target.addEventListener(type, handler, options);
+      return addCleanup(() => target.removeEventListener(type, handler, options), "listener");
+    };
+    const timeout = (handler, delay, ...args) => {
+      assertActive();
+      const id2 = timers.setTimeout(() => {
+        cancel();
+        if (!disposed) handler(...args);
+      }, delay);
+      const cancel = addCleanup(() => timers.clearTimeout(id2), "timeout");
+      return Object.freeze({ id: id2, cancel });
+    };
+    const interval = (handler, delay, ...args) => {
+      assertActive();
+      const id2 = timers.setInterval(() => {
+        if (!disposed) handler(...args);
+      }, delay);
+      const cancel = addCleanup(() => timers.clearInterval(id2), "interval");
+      return Object.freeze({ id: id2, cancel });
+    };
+    const abortController = () => {
+      assertActive();
+      const childController = new AbortController();
+      const release = addCleanup(
+        () => childController.abort(controller.signal.reason || "scope-disposed"),
+        "controller"
+      );
+      childController.signal.addEventListener("abort", release, { once: true });
+      return childController;
+    };
+    const child = (childLabel) => {
+      assertActive();
+      return createLifecycleScope({
+        label: childLabel ? `${label}/${childLabel}` : `${label}/child`,
+        parent: scope,
+        diagnostics,
+        timers
+      });
+    };
+    const run = (task) => {
+      assertActive();
+      if (typeof task !== "function") throw new TypeError("Lifecycle task must be a function");
+      return Promise.resolve().then(() => {
+        assertActive();
+        return task(controller.signal);
+      });
+    };
+    const dispose = (reason = "scope-disposed") => {
+      if (disposed) return false;
+      disposed = true;
+      releaseParent?.();
+      controller.abort(reason);
+      const errors = [];
+      for (const cleanup of [...cleanups].reverse()) {
+        try {
+          cleanup();
+        } catch (error) {
+          errors.push(error);
+        }
+      }
+      untrackScope?.();
+      untrackScope = null;
+      if (errors.length) throw new AggregateError(errors, `Lifecycle scope disposal failed: ${label}`);
+      return true;
+    };
+    const scope = Object.freeze({
+      label,
+      signal: controller.signal,
+      diagnostics,
+      get isDisposed() {
+        return disposed;
+      },
+      addCleanup,
+      listen,
+      timeout,
+      interval,
+      abortController,
+      child,
+      run,
+      dispose
+    });
+    if (parent) {
+      try {
+        releaseParent = parent.addCleanup(
+          () => dispose(parent.signal.reason || "parent-disposed"),
+          "child-scope"
+        );
+      } catch (error) {
+        disposed = true;
+        controller.abort("parent-registration-failed");
+        untrackScope?.();
+        untrackScope = null;
+        throw error;
+      }
+    }
+    return scope;
+  }
+  var LIFECYCLE_SCOPE_RELATIONSHIPS = Object.freeze({
+    app: Object.freeze(["phone"]),
+    phone: Object.freeze(["overlay", "calendar-page", "community-page", "cropper"]),
+    overlay: Object.freeze([]),
+    "calendar-page": Object.freeze([]),
+    "community-page": Object.freeze([]),
+    cropper: Object.freeze([])
+  });
 
   // src/cropper.js
   function openCropper(imgDataUrl, { onCancel, onConfirm }) {
@@ -19053,6 +19248,8 @@ ${error.message}`);
   (async function bootstrapPhoneMode() {
     await new Promise((resolve) => setTimeout(resolve, 1e3));
     const runtime = createRuntimeState();
+    const lifecycleDiagnostics = createLifecycleDiagnostics();
+    const appLifecycleScope = createLifecycleScope({ label: "app", diagnostics: lifecycleDiagnostics });
     const state = {
       phoneActive: false,
       phoneWindow: null,
@@ -19083,7 +19280,16 @@ ${error.message}`);
       context ? () => context : getCtx,
       options
     );
-    const deps = { runtime, getCtx, getStorageId: getStorageId2, getUserPersona: getUserPersona2, gatherContext: gatherContext2, saveBudgetConfig };
+    const deps = {
+      runtime,
+      getCtx,
+      getStorageId: getStorageId2,
+      getUserPersona: getUserPersona2,
+      gatherContext: gatherContext2,
+      saveBudgetConfig,
+      lifecycleDiagnostics,
+      appLifecycleScope
+    };
     deps.callAI = createAiClient({
       getConfig: () => window.__pmConfig,
       getContext: getCtx
