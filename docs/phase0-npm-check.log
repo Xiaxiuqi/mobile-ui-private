@@ -1,0 +1,1943 @@
+
+> tianyin-xiaojian-st@1.5.0 check
+> npm run build && npm run check:syntax && npm run check:ai && npm run check:emoji && npm run check:behavior && npm run check:interactive && npm run check:pending && npm run check:press && npm run check:ambient && npm run check:calendar && npm run check:budget && npm run check:permissions && npm run check:contracts && npm run check:architecture && npm run check:lifecycle && npm run check:memory
+
+
+> tianyin-xiaojian-st@1.5.0 build
+> esbuild src/main.js --bundle --format=iife --platform=browser --target=es2020 --outfile=index.js --legal-comments=none
+
+
+  index.js  1011.9kb
+
+Done in 11ms
+
+> tianyin-xiaojian-st@1.5.0 check:syntax
+> node --check index.js
+
+
+> tianyin-xiaojian-st@1.5.0 check:ai
+> node scripts/check-ai.mjs
+
+[phone-mode] __pmAutoGenContacts 异常 Error: context-failed
+    at gatherContext (file:///d:/%E9%85%92%E9%A6%86%E9%A1%B9%E7%9B%AE/tavern_helper_template/public/mobile-ui-private/scripts/check-ai.mjs:292:44)
+    at window.__pmAutoGenContacts (file:///d:/%E9%85%92%E9%A6%86%E9%A1%B9%E7%9B%AE/tavern_helper_template/public/mobile-ui-private/src/contact-generator.js:208:35)
+    at file:///d:/%E9%85%92%E9%A6%86%E9%A1%B9%E7%9B%AE/tavern_helper_template/public/mobile-ui-private/scripts/check-ai.mjs:307:18
+AI client behavior verified.
+
+> tianyin-xiaojian-st@1.5.0 check:emoji
+> node scripts/check-emoji.mjs
+
+Emoji media safety verified.
+[phone-mode] 短信历史保存失败 Error: 聊天记录保存失败：IndexedDB 不可用
+    at persist (file:///d:/%E9%85%92%E9%A6%86%E9%A1%B9%E7%9B%AE/tavern_helper_template/public/mobile-ui-private/src/storage.js:64:27)
+[phone-mode] 短信历史保存失败 Error: 聊天记录保存失败：IndexedDB 不可用
+    at persist (file:///d:/%E9%85%92%E9%A6%86%E9%A1%B9%E7%9B%AE/tavern_helper_template/public/mobile-ui-private/src/storage.js:64:27)
+[phone-mode] 短信历史保存失败 Error: 聊天记录保存失败：IndexedDB 不可用
+    at persist (file:///d:/%E9%85%92%E9%A6%86%E9%A1%B9%E7%9B%AE/tavern_helper_template/public/mobile-ui-private/src/storage.js:64:27)
+[phone-mode] 短信历史保存失败 Error: 聊天记录保存失败：IndexedDB 不可用
+    at persist (file:///d:/%E9%85%92%E9%A6%86%E9%A1%B9%E7%9B%AE/tavern_helper_template/public/mobile-ui-private/src/storage.js:64:27)
+
+> tianyin-xiaojian-st@1.5.0 check:behavior
+> node scripts/check-behavior.mjs
+
+[phone-mode] hooked 4 injection events
+[phone-mode] 分支手机数据继承完成
+[phone-mode] hooked 4 injection events
+[phone-mode] 分支手机数据继承完成
+[phone-mode] hooked 4 injection events
+[phone-mode] hooked 4 injection events
+[phone-mode] v9.5.7 已加载：世界书预算改为读取ST实际上下文窗口大小
+[phone-mode] IDB 恢复失败，尝试 localStorage 兜底 Error: 无法枚举 IndexedDB
+    at loadHistoriesFromIDB (file:///d:/%E9%85%92%E9%A6%86%E9%A1%B9%E7%9B%AE/tavern_helper_template/public/mobile-ui-private/src/storage.js:103:41)
+[phone-mode] v9.5.7 已加载：世界书预算改为读取ST实际上下文窗口大小
+[phone-mode] IDB 恢复失败，尝试 localStorage 兜底 Error: 无法枚举 IndexedDB
+    at loadHistoriesFromIDB (file:///d:/%E9%85%92%E9%A6%86%E9%A1%B9%E7%9B%AE/tavern_helper_template/public/mobile-ui-private/src/storage.js:103:41)
+[phone-mode] IDB 恢复失败，尝试 localStorage 兜底 Error: 无法枚举 IndexedDB
+    at loadHistoriesFromIDB (file:///d:/%E9%85%92%E9%A6%86%E9%A1%B9%E7%9B%AE/tavern_helper_template/public/mobile-ui-private/src/storage.js:103:41)
+    at async window.__pmOpen (file:///d:/%E9%85%92%E9%A6%86%E9%A1%B9%E7%9B%AE/tavern_helper_template/public/mobile-ui-private/src/phone-lifecycle.js:349:13)
+    at async waitForActual (node:assert:646:5)
+    at async strict.rejects (node:assert:769:25)
+    at async file:///d:/%E9%85%92%E9%A6%86%E9%A1%B9%E7%9B%AE/tavern_helper_template/public/mobile-ui-private/scripts/check-behavior.mjs:3149:5
+[phone-mode] v9.5.7 已加载：世界书预算改为读取ST实际上下文窗口大小
+[phone-mode] IDB 恢复失败，尝试 localStorage 兜底 Error: 无法枚举 IndexedDB
+    at loadHistoriesFromIDB (file:///d:/%E9%85%92%E9%A6%86%E9%A1%B9%E7%9B%AE/tavern_helper_template/public/mobile-ui-private/src/storage.js:103:41)
+[phone-mode] IDB 恢复失败，尝试 localStorage 兜底 Error: 无法枚举 IndexedDB
+    at loadHistoriesFromIDB (file:///d:/%E9%85%92%E9%A6%86%E9%A1%B9%E7%9B%AE/tavern_helper_template/public/mobile-ui-private/src/storage.js:103:41)
+    at async window.__pmOpen (file:///d:/%E9%85%92%E9%A6%86%E9%A1%B9%E7%9B%AE/tavern_helper_template/public/mobile-ui-private/src/phone-lifecycle.js:349:13)
+    at async file:///d:/%E9%85%92%E9%A6%86%E9%A1%B9%E7%9B%AE/tavern_helper_template/public/mobile-ui-private/scripts/check-behavior.mjs:3158:5
+[phone-mode] 手机界面状态保存失败 Error: injected set failure
+    at Object.setItem (file:///d:/%E9%85%92%E9%A6%86%E9%A1%B9%E7%9B%AE/tavern_helper_template/public/mobile-ui-private/scripts/check-behavior.mjs:1290:60)
+    at savePhoneUiState (file:///d:/%E9%85%92%E9%A6%86%E9%A1%B9%E7%9B%AE/tavern_helper_template/public/mobile-ui-private/src/storage.js:553:22)
+    at persist (file:///d:/%E9%85%92%E9%A6%86%E9%A1%B9%E7%9B%AE/tavern_helper_template/public/mobile-ui-private/src/settings-backup.js:192:14)
+    at async runBackupTransaction (file:///d:/%E9%85%92%E9%A6%86%E9%A1%B9%E7%9B%AE/tavern_helper_template/public/mobile-ui-private/src/settings-backup.js:105:9)
+    at async waitForActual (node:assert:646:5)
+    at async strict.rejects (node:assert:769:25)
+    at async file:///d:/%E9%85%92%E9%A6%86%E9%A1%B9%E7%9B%AE/tavern_helper_template/public/mobile-ui-private/scripts/check-behavior.mjs:5622:1
+[phone-mode] 手机界面状态保存失败 Error: injected counted set failure
+    at Object.setItem (file:///d:/%E9%85%92%E9%A6%86%E9%A1%B9%E7%9B%AE/tavern_helper_template/public/mobile-ui-private/scripts/check-behavior.mjs:1288:19)
+    at savePhoneUiState (file:///d:/%E9%85%92%E9%A6%86%E9%A1%B9%E7%9B%AE/tavern_helper_template/public/mobile-ui-private/src/storage.js:553:22)
+    at persist (file:///d:/%E9%85%92%E9%A6%86%E9%A1%B9%E7%9B%AE/tavern_helper_template/public/mobile-ui-private/src/settings-backup.js:192:14)
+    at async runBackupTransaction (file:///d:/%E9%85%92%E9%A6%86%E9%A1%B9%E7%9B%AE/tavern_helper_template/public/mobile-ui-private/src/settings-backup.js:105:9)
+    at async waitForActual (node:assert:646:5)
+    at async strict.rejects (node:assert:769:25)
+    at async file:///d:/%E9%85%92%E9%A6%86%E9%A1%B9%E7%9B%AE/tavern_helper_template/public/mobile-ui-private/scripts/check-behavior.mjs:5644:1
+[phone-mode] 手机界面状态保存失败 Error: injected counted set failure
+    at Object.setItem (file:///d:/%E9%85%92%E9%A6%86%E9%A1%B9%E7%9B%AE/tavern_helper_template/public/mobile-ui-private/scripts/check-behavior.mjs:1288:19)
+    at savePhoneUiState (file:///d:/%E9%85%92%E9%A6%86%E9%A1%B9%E7%9B%AE/tavern_helper_template/public/mobile-ui-private/src/storage.js:553:22)
+    at persist (file:///d:/%E9%85%92%E9%A6%86%E9%A1%B9%E7%9B%AE/tavern_helper_template/public/mobile-ui-private/src/settings-backup.js:192:14)
+    at async runBackupTransaction (file:///d:/%E9%85%92%E9%A6%86%E9%A1%B9%E7%9B%AE/tavern_helper_template/public/mobile-ui-private/src/settings-backup.js:112:13)
+    at async waitForActual (node:assert:646:5)
+    at async strict.rejects (node:assert:769:25)
+    at async file:///d:/%E9%85%92%E9%A6%86%E9%A1%B9%E7%9B%AE/tavern_helper_template/public/mobile-ui-private/scripts/check-behavior.mjs:5644:1
+[phone-mode] IDB 恢复失败，尝试 localStorage 兜底 TypeError: Cannot read properties of undefined (reading 'getItem')
+    at loadHistoriesFromIDB (file:///d:/%E9%85%92%E9%A6%86%E9%A1%B9%E7%9B%AE/tavern_helper_template/public/mobile-ui-private/src/storage.js:106:46)
+    at async file:///d:/%E9%85%92%E9%A6%86%E9%A1%B9%E7%9B%AE/tavern_helper_template/public/mobile-ui-private/scripts/check-behavior.mjs:7535:18
+[phone-mode] hooked 4 injection events
+[phone-mode] 分支手机数据继承完成
+[phone-mode] 分支手机数据继承已跳过 already-cloned
+[phone-mode] 分支手机数据继承失败 Error
+Behavior configuration verified.
+
+> tianyin-xiaojian-st@1.5.0 check:interactive
+> node scripts/check-interactive.mjs
+
+[phone-mode] 手机界面状态读取失败 SyntaxError: Expected property name or '}' in JSON at position 1 (line 1 column 2)
+    at JSON.parse (<anonymous>)
+    at loadPhoneUiState (file:///d:/%E9%85%92%E9%A6%86%E9%A1%B9%E7%9B%AE/tavern_helper_template/public/mobile-ui-private/src/storage.js:530:43)
+    at file:///d:/%E9%85%92%E9%A6%86%E9%A1%B9%E7%9B%AE/tavern_helper_template/public/mobile-ui-private/scripts/check-interactive.mjs:1058:18
+[phone-mode] 互动场景后备数据读取失败 SyntaxError: Expected property name or '}' in JSON at position 1 (line 1 column 2)
+    at JSON.parse (<anonymous>)
+    at loadInteractiveScenes (file:///d:/%E9%85%92%E9%A6%86%E9%A1%B9%E7%9B%AE/tavern_helper_template/public/mobile-ui-private/src/storage.js:470:35)
+    at file:///d:/%E9%85%92%E9%A6%86%E9%A1%B9%E7%9B%AE/tavern_helper_template/public/mobile-ui-private/scripts/check-interactive.mjs:1061:20
+[phone-mode] 手机界面状态保存失败 Error: quota exceeded
+    at Object.setItem (file:///d:/%E9%85%92%E9%A6%86%E9%A1%B9%E7%9B%AE/tavern_helper_template/public/mobile-ui-private/scripts/check-interactive.mjs:1065:28)
+    at savePhoneUiState (file:///d:/%E9%85%92%E9%A6%86%E9%A1%B9%E7%9B%AE/tavern_helper_template/public/mobile-ui-private/src/storage.js:553:22)
+    at file:///d:/%E9%85%92%E9%A6%86%E9%A1%B9%E7%9B%AE/tavern_helper_template/public/mobile-ui-private/scripts/check-interactive.mjs:1069:14
+interactive scene checks passed
+
+> tianyin-xiaojian-st@1.5.0 check:pending
+> node scripts/check-pending.mjs
+
+Pending message state verified.
+
+> tianyin-xiaojian-st@1.5.0 check:press
+> node scripts/check-press-gesture.mjs
+
+Press gesture behavior verified.
+
+> tianyin-xiaojian-st@1.5.0 check:ambient
+> node scripts/check-ambient.mjs
+
+Ambient status lifecycle verified.
+
+> tianyin-xiaojian-st@1.5.0 check:calendar
+> node scripts/check-calendar.mjs
+
+[phone-mode] 生日与纪念日数据读取失败 SyntaxError: Expected property name or '}' in JSON at position 1 (line 1 column 2)
+    at JSON.parse (<anonymous>)
+    at loadStore (file:///d:/%E9%85%92%E9%A6%86%E9%A1%B9%E7%9B%AE/tavern_helper_template/public/mobile-ui-private/src/calendar-storage.js:17:37)
+    at loadCalendarOccasions (file:///d:/%E9%85%92%E9%A6%86%E9%A1%B9%E7%9B%AE/tavern_helper_template/public/mobile-ui-private/src/calendar-storage.js:61:49)
+    at file:///d:/%E9%85%92%E9%A6%86%E9%A1%B9%E7%9B%AE/tavern_helper_template/public/mobile-ui-private/scripts/check-calendar.mjs:428:18
+    at ModuleJob.run (node:internal/modules/esm/module_job:439:25)
+    at async node:internal/modules/esm/loader:643:26
+    at async asyncRunEntryPointWithESMLoader (node:internal/modules/run_main:101:5)
+[phone-mode] 生日与纪念日数据保存失败 Error: localStorage 不可用
+    at saveStore (file:///d:/%E9%85%92%E9%A6%86%E9%A1%B9%E7%9B%AE/tavern_helper_template/public/mobile-ui-private/src/calendar-storage.js:26:70)
+    at saveCalendarOccasions (file:///d:/%E9%85%92%E9%A6%86%E9%A1%B9%E7%9B%AE/tavern_helper_template/public/mobile-ui-private/src/calendar-storage.js:64:58)
+    at file:///d:/%E9%85%92%E9%A6%86%E9%A1%B9%E7%9B%AE/tavern_helper_template/public/mobile-ui-private/scripts/check-calendar.mjs:429:14
+    at ModuleJob.run (node:internal/modules/esm/module_job:439:25)
+    at async node:internal/modules/esm/loader:643:26
+    at async asyncRunEntryPointWithESMLoader (node:internal/modules/run_main:101:5)
+[phone-mode] 节假日缓存读取失败 SyntaxError: Expected property name or '}' in JSON at position 1 (line 1 column 2)
+    at JSON.parse (<anonymous>)
+    at loadStore (file:///d:/%E9%85%92%E9%A6%86%E9%A1%B9%E7%9B%AE/tavern_helper_template/public/mobile-ui-private/src/calendar-storage.js:17:37)
+    at loadCalendarHolidays (file:///d:/%E9%85%92%E9%A6%86%E9%A1%B9%E7%9B%AE/tavern_helper_template/public/mobile-ui-private/src/calendar-storage.js:67:48)
+    at file:///d:/%E9%85%92%E9%A6%86%E9%A1%B9%E7%9B%AE/tavern_helper_template/public/mobile-ui-private/scripts/check-calendar.mjs:853:31
+    at getActual (node:assert:611:5)
+    at strict.doesNotThrow (node:assert:779:32)
+    at file:///d:/%E9%85%92%E9%A6%86%E9%A1%B9%E7%9B%AE/tavern_helper_template/public/mobile-ui-private/scripts/check-calendar.mjs:853:12
+[phone-mode] 天气数据读取失败 SyntaxError: Expected property name or '}' in JSON at position 1 (line 1 column 2)
+    at JSON.parse (<anonymous>)
+    at loadStore (file:///d:/%E9%85%92%E9%A6%86%E9%A1%B9%E7%9B%AE/tavern_helper_template/public/mobile-ui-private/src/calendar-storage.js:17:37)
+    at loadCalendarWeather (file:///d:/%E9%85%92%E9%A6%86%E9%A1%B9%E7%9B%AE/tavern_helper_template/public/mobile-ui-private/src/calendar-storage.js:73:47)
+    at file:///d:/%E9%85%92%E9%A6%86%E9%A1%B9%E7%9B%AE/tavern_helper_template/public/mobile-ui-private/scripts/check-calendar.mjs:853:31
+    at getActual (node:assert:611:5)
+    at strict.doesNotThrow (node:assert:779:32)
+    at file:///d:/%E9%85%92%E9%A6%86%E9%A1%B9%E7%9B%AE/tavern_helper_template/public/mobile-ui-private/scripts/check-calendar.mjs:853:12
+[phone-mode] 生理周期数据读取失败 SyntaxError: Expected property name or '}' in JSON at position 1 (line 1 column 2)
+    at JSON.parse (<anonymous>)
+    at loadStore (file:///d:/%E9%85%92%E9%A6%86%E9%A1%B9%E7%9B%AE/tavern_helper_template/public/mobile-ui-private/src/calendar-storage.js:17:37)
+    at loadCalendarCycles (file:///d:/%E9%85%92%E9%A6%86%E9%A1%B9%E7%9B%AE/tavern_helper_template/public/mobile-ui-private/src/calendar-storage.js:79:46)
+    at file:///d:/%E9%85%92%E9%A6%86%E9%A1%B9%E7%9B%AE/tavern_helper_template/public/mobile-ui-private/scripts/check-calendar.mjs:853:31
+    at getActual (node:assert:611:5)
+    at strict.doesNotThrow (node:assert:779:32)
+    at file:///d:/%E9%85%92%E9%A6%86%E9%A1%B9%E7%9B%AE/tavern_helper_template/public/mobile-ui-private/scripts/check-calendar.mjs:853:12
+[phone-mode] 菜谱数据读取失败 SyntaxError: Expected property name or '}' in JSON at position 1 (line 1 column 2)
+    at JSON.parse (<anonymous>)
+    at loadStore (file:///d:/%E9%85%92%E9%A6%86%E9%A1%B9%E7%9B%AE/tavern_helper_template/public/mobile-ui-private/src/calendar-storage.js:17:37)
+    at loadCalendarRecipes (file:///d:/%E9%85%92%E9%A6%86%E9%A1%B9%E7%9B%AE/tavern_helper_template/public/mobile-ui-private/src/calendar-storage.js:85:47)
+    at file:///d:/%E9%85%92%E9%A6%86%E9%A1%B9%E7%9B%AE/tavern_helper_template/public/mobile-ui-private/scripts/check-calendar.mjs:853:31
+    at getActual (node:assert:611:5)
+    at strict.doesNotThrow (node:assert:779:32)
+    at file:///d:/%E9%85%92%E9%A6%86%E9%A1%B9%E7%9B%AE/tavern_helper_template/public/mobile-ui-private/scripts/check-calendar.mjs:853:12
+[phone-mode] 生日与纪念日数据保存失败 Error: occasion rollback blocked
+    at storage.setItem (file:///d:/%E9%85%92%E9%A6%86%E9%A1%B9%E7%9B%AE/tavern_helper_template/public/mobile-ui-private/scripts/check-calendar.mjs:1846:84)
+    at saveStore (file:///d:/%E9%85%92%E9%A6%86%E9%A1%B9%E7%9B%AE/tavern_helper_template/public/mobile-ui-private/src/calendar-storage.js:27:17)
+    at saveCalendarOccasions (file:///d:/%E9%85%92%E9%A6%86%E9%A1%B9%E7%9B%AE/tavern_helper_template/public/mobile-ui-private/src/calendar-storage.js:64:58)
+    at file:///d:/%E9%85%92%E9%A6%86%E9%A1%B9%E7%9B%AE/tavern_helper_template/public/mobile-ui-private/src/calendar-commit.js:202:18
+    at async waitForActual (node:assert:646:5)
+    at async strict.rejects (node:assert:769:25)
+    at async file:///d:/%E9%85%92%E9%A6%86%E9%A1%B9%E7%9B%AE/tavern_helper_template/public/mobile-ui-private/scripts/check-calendar.mjs:1857:9
+[phone-mode] 生日与纪念日数据保存失败 Error: occasion write blocked
+    at storage.setItem (file:///d:/%E9%85%92%E9%A6%86%E9%A1%B9%E7%9B%AE/tavern_helper_template/public/mobile-ui-private/scripts/check-calendar.mjs:1879:58)
+    at saveStore (file:///d:/%E9%85%92%E9%A6%86%E9%A1%B9%E7%9B%AE/tavern_helper_template/public/mobile-ui-private/src/calendar-storage.js:27:17)
+    at saveCalendarOccasions (file:///d:/%E9%85%92%E9%A6%86%E9%A1%B9%E7%9B%AE/tavern_helper_template/public/mobile-ui-private/src/calendar-storage.js:64:58)
+    at file:///d:/%E9%85%92%E9%A6%86%E9%A1%B9%E7%9B%AE/tavern_helper_template/public/mobile-ui-private/src/calendar-commit.js:244:18
+[phone-mode] 生日与纪念日数据保存失败 Error: occasion write blocked
+    at storage.setItem (file:///d:/%E9%85%92%E9%A6%86%E9%A1%B9%E7%9B%AE/tavern_helper_template/public/mobile-ui-private/scripts/check-calendar.mjs:1879:58)
+    at saveStore (file:///d:/%E9%85%92%E9%A6%86%E9%A1%B9%E7%9B%AE/tavern_helper_template/public/mobile-ui-private/src/calendar-storage.js:27:17)
+    at saveCalendarOccasions (file:///d:/%E9%85%92%E9%A6%86%E9%A1%B9%E7%9B%AE/tavern_helper_template/public/mobile-ui-private/src/calendar-storage.js:64:58)
+    at file:///d:/%E9%85%92%E9%A6%86%E9%A1%B9%E7%9B%AE/tavern_helper_template/public/mobile-ui-private/src/calendar-commit.js:253:41
+[phone-mode] 日历数据保存失败 Error: calendar rollback blocked
+    at storage.setItem (file:///d:/%E9%85%92%E9%A6%86%E9%A1%B9%E7%9B%AE/tavern_helper_template/public/mobile-ui-private/scripts/check-calendar.mjs:1908:75)
+    at saveStore (file:///d:/%E9%85%92%E9%A6%86%E9%A1%B9%E7%9B%AE/tavern_helper_template/public/mobile-ui-private/src/calendar-storage.js:27:17)
+    at saveCalendar (file:///d:/%E9%85%92%E9%A6%86%E9%A1%B9%E7%9B%AE/tavern_helper_template/public/mobile-ui-private/src/calendar-storage.js:38:49)
+    at file:///d:/%E9%85%92%E9%A6%86%E9%A1%B9%E7%9B%AE/tavern_helper_template/public/mobile-ui-private/src/calendar-commit.js:252:40
+    at async waitForActual (node:assert:646:5)
+    at async strict.rejects (node:assert:769:25)
+    at async file:///d:/%E9%85%92%E9%A6%86%E9%A1%B9%E7%9B%AE/tavern_helper_template/public/mobile-ui-private/scripts/check-calendar.mjs:1923:9
+Calendar checks passed.
+
+> tianyin-xiaojian-st@1.5.0 check:budget
+> node scripts/check-budget.mjs
+
+Context budget verified.
+
+> tianyin-xiaojian-st@1.5.0 check:permissions
+> node scripts/check-permissions.mjs
+
+
+> tianyin-xiaojian-st@1.5.0 check:contracts
+> node scripts/check-contracts.mjs
+
+Static contracts verified.
+
+> tianyin-xiaojian-st@1.5.0 check:architecture
+> node scripts/check-architecture.mjs
+
+{
+  "mode": "baseline-only",
+  "sourceModules": 77,
+  "mainImports": [
+    "./ai.js",
+    "./calendar.js",
+    "./contact-generator.js",
+    "./conversation.js",
+    "./diagnostic.js",
+    "./emoji-ui.js",
+    "./interactive-scenes.js",
+    "./host-context.js",
+    "./phone-chat.js",
+    "./phone-chat-poke.js",
+    "./phone-control-center.js",
+    "./phone-context-injection.js",
+    "./phone-directory.js",
+    "./phone-foundation.js",
+    "./phone-lifecycle.js",
+    "./quick-reply.js",
+    "./runtime.js",
+    "./settings-ui.js",
+    "./storage.js"
+  ],
+  "mainInstallerReferences": [
+    "installPhoneFoundation",
+    "installConversation",
+    "installEmojiUi",
+    "installInteractiveScenes",
+    "installCalendar",
+    "installSettingsUi",
+    "installPhoneChat",
+    "installPhoneContextInjection",
+    "installPhoneControlCenter",
+    "installPhoneDirectory",
+    "installContactGenerator",
+    "installPhoneChatPoke",
+    "installPhoneLifecycle",
+    "installDiagnosticApi"
+  ],
+  "publicGlobalCount": 139,
+  "publicGlobals": [
+    {
+      "name": "window.__pmAddEmojiImage",
+      "files": [
+        "emoji-ui.js"
+      ]
+    },
+    {
+      "name": "window.__pmAddEmojiSet",
+      "files": [
+        "emoji-ui.js"
+      ]
+    },
+    {
+      "name": "window.__pmArmAutoPoke",
+      "files": [
+        "phone-chat-poke.js"
+      ]
+    },
+    {
+      "name": "window.__pmAutoGenContacts",
+      "files": [
+        "contact-generator.js"
+      ]
+    },
+    {
+      "name": "window.__pmAutoPoke",
+      "files": [
+        "phone-chat-poke.js",
+        "phone-chat.js"
+      ]
+    },
+    {
+      "name": "window.__pmBeforeUnloadRegistered",
+      "files": [
+        "diagnostic.js"
+      ]
+    },
+    {
+      "name": "window.__pmBgGlobal",
+      "files": [
+        "phone-appearance.js",
+        "phone-foundation.js",
+        "settings-backup.js",
+        "settings-ui.js",
+        "storage-background.js"
+      ]
+    },
+    {
+      "name": "window.__pmBgLocal",
+      "files": [
+        "branch-scope-inheritance.js",
+        "phone-appearance.js",
+        "phone-directory.js",
+        "phone-foundation.js",
+        "settings-backup.js",
+        "settings-ui.js",
+        "storage-background.js"
+      ]
+    },
+    {
+      "name": "window.__pmBgUrl",
+      "files": [
+        "settings-ui.js"
+      ]
+    },
+    {
+      "name": "window.__pmBidirectional",
+      "files": [
+        "branch-scope-inheritance.js",
+        "phone-context-injection.js",
+        "phone-directory.js",
+        "phone-foundation.js",
+        "settings-backup.js",
+        "storage.js"
+      ]
+    },
+    {
+      "name": "window.__pmBranchLineage",
+      "files": [
+        "settings-backup.js"
+      ]
+    },
+    {
+      "name": "window.__pmBudgetConfig",
+      "files": [
+        "branch-scope-inheritance.js",
+        "interactive-scenes.js",
+        "phone-foundation.js",
+        "settings-ui.js",
+        "storage.js"
+      ]
+    },
+    {
+      "name": "window.__pmCancelGeneration",
+      "files": [
+        "phone-lifecycle.js"
+      ]
+    },
+    {
+      "name": "window.__pmCancelPendingEdit",
+      "files": [
+        "phone-control-center.js"
+      ]
+    },
+    {
+      "name": "window.__pmCharacterBehavior",
+      "files": [
+        "branch-scope-inheritance.js",
+        "phone-chat-poke.js",
+        "phone-chat.js",
+        "phone-foundation.js",
+        "settings-backup.js",
+        "storage.js"
+      ]
+    },
+    {
+      "name": "window.__pmClearAllData",
+      "files": [
+        "settings-templates.js",
+        "settings-ui.js"
+      ]
+    },
+    {
+      "name": "window.__pmClearBg",
+      "files": [
+        "settings-ui.js"
+      ]
+    },
+    {
+      "name": "window.__pmClearCustomColor",
+      "files": [
+        "settings-templates.js",
+        "settings-ui.js"
+      ]
+    },
+    {
+      "name": "window.__pmClearPending",
+      "files": [
+        "phone-control-center.js"
+      ]
+    },
+    {
+      "name": "window.__pmClearPhoneQuickReply",
+      "files": [
+        "settings-quick-reply.js",
+        "settings-templates.js"
+      ]
+    },
+    {
+      "name": "window.__pmCloseOverlay",
+      "files": [
+        "emoji-ui.js",
+        "phone-chat-poke.js",
+        "phone-context-injection.js",
+        "phone-control-center.js",
+        "phone-directory.js",
+        "phone-foundation.js",
+        "settings-templates.js"
+      ]
+    },
+    {
+      "name": "window.__pmConfig",
+      "files": [
+        "main.js",
+        "phone-chat.js",
+        "phone-foundation.js",
+        "phone-lifecycle.js",
+        "settings-backup.js",
+        "settings-ui.js"
+      ]
+    },
+    {
+      "name": "window.__pmConfirmAddEmojiImage",
+      "files": [
+        "emoji-ui.js"
+      ]
+    },
+    {
+      "name": "window.__pmConfirmAddEmojiSet",
+      "files": [
+        "emoji-ui.js"
+      ]
+    },
+    {
+      "name": "window.__pmConfirmAutoGen",
+      "files": [
+        "contact-generator.js",
+        "phone-directory.js"
+      ]
+    },
+    {
+      "name": "window.__pmConfirmGroup",
+      "files": [
+        "phone-directory.js"
+      ]
+    },
+    {
+      "name": "window.__pmConversationInjectionEnabled",
+      "files": [
+        "phone-context-injection.js",
+        "phone-directory.js"
+      ]
+    },
+    {
+      "name": "window.__pmConversationInjectionSummary",
+      "files": [
+        "phone-context-injection.js"
+      ]
+    },
+    {
+      "name": "window.__pmCurrentConversationInjectionEnabled",
+      "files": [
+        "phone-context-injection.js"
+      ]
+    },
+    {
+      "name": "window.__pmDel",
+      "files": [
+        "phone-directory.js"
+      ]
+    },
+    {
+      "name": "window.__pmDeleteEmojiImage",
+      "files": [
+        "emoji-ui.js"
+      ]
+    },
+    {
+      "name": "window.__pmDeleteEmojiSet",
+      "files": [
+        "emoji-ui.js"
+      ]
+    },
+    {
+      "name": "window.__pmDeletePending",
+      "files": [
+        "phone-control-center.js"
+      ]
+    },
+    {
+      "name": "window.__pmDeleteProfile",
+      "files": [
+        "settings-ui.js"
+      ]
+    },
+    {
+      "name": "window.__pmDeleteSelected",
+      "files": [
+        "phone-lifecycle.js"
+      ]
+    },
+    {
+      "name": "window.__pmDelGroup",
+      "files": [
+        "phone-directory.js"
+      ]
+    },
+    {
+      "name": "window.__pmDesktopBg",
+      "files": [
+        "phone-appearance.js",
+        "phone-foundation.js",
+        "settings-backup.js",
+        "settings-ui.js",
+        "storage-background.js"
+      ]
+    },
+    {
+      "name": "window.__pmDiag",
+      "files": [
+        "diagnostic.js"
+      ]
+    },
+    {
+      "name": "window.__pmEditGroup",
+      "files": [
+        "phone-chat-poke.js",
+        "phone-control-center.js",
+        "phone-directory.js",
+        "settings-worldbook.js"
+      ]
+    },
+    {
+      "name": "window.__pmEditPending",
+      "files": [
+        "phone-control-center.js"
+      ]
+    },
+    {
+      "name": "window.__pmEmoFileRead",
+      "files": [
+        "emoji-ui.js"
+      ]
+    },
+    {
+      "name": "window.__pmEmojis",
+      "files": [
+        "emoji-ui.js",
+        "phone-chat-poke.js",
+        "phone-chat.js",
+        "phone-directory.js",
+        "phone-foundation.js",
+        "settings-backup.js",
+        "storage.js"
+      ]
+    },
+    {
+      "name": "window.__pmEmojiSetDot",
+      "files": [
+        "emoji-ui.js"
+      ]
+    },
+    {
+      "name": "window.__pmEnd",
+      "files": [
+        "interactive-scenes.js",
+        "main.js",
+        "phone-foundation.js",
+        "phone-island-gesture.js",
+        "phone-lifecycle.js"
+      ]
+    },
+    {
+      "name": "window.__pmEnsurePhoneQuickReply",
+      "files": [
+        "settings-quick-reply.js",
+        "settings-templates.js"
+      ]
+    },
+    {
+      "name": "window.__pmExportData",
+      "files": [
+        "settings-templates.js",
+        "settings-ui.js"
+      ]
+    },
+    {
+      "name": "window.__pmGroupInputChanged",
+      "files": [
+        "phone-directory.js"
+      ]
+    },
+    {
+      "name": "window.__pmGroupMeta",
+      "files": [
+        "branch-scope-inheritance.js",
+        "contact-generator.js",
+        "conversation.js",
+        "interactive-scenes.js",
+        "phone-chat-poke.js",
+        "phone-context-injection.js",
+        "phone-directory.js",
+        "phone-foundation.js",
+        "settings-backup.js",
+        "storage.js"
+      ]
+    },
+    {
+      "name": "window.__pmHistories",
+      "files": [
+        "branch-scope-inheritance.js",
+        "contact-generator.js",
+        "conversation.js",
+        "interactive-scenes.js",
+        "phone-appearance.js",
+        "phone-chat-poke.js",
+        "phone-context-injection.js",
+        "phone-directory.js",
+        "phone-foundation.js",
+        "phone-lifecycle.js",
+        "settings-backup.js",
+        "storage.js"
+      ]
+    },
+    {
+      "name": "window.__pmImportData",
+      "files": [
+        "settings-templates.js",
+        "settings-ui.js"
+      ]
+    },
+    {
+      "name": "window.__pmIncrementCounters",
+      "files": [
+        "phone-chat.js",
+        "phone-foundation.js"
+      ]
+    },
+    {
+      "name": "window.__pmInjectionConfig",
+      "files": [
+        "phone-context-injection.js",
+        "phone-foundation.js",
+        "settings-backup.js",
+        "storage.js"
+      ]
+    },
+    {
+      "name": "window.__pmInsertEmoji",
+      "files": [
+        "emoji-ui.js"
+      ]
+    },
+    {
+      "name": "window.__pmLoadMoreWorldBooks",
+      "files": [
+        "settings-worldbook.js"
+      ]
+    },
+    {
+      "name": "window.__pmOpen",
+      "files": [
+        "phone-lifecycle.js"
+      ]
+    },
+    {
+      "name": "window.__pmOpenForumMode",
+      "files": [
+        "interactive-scenes.js"
+      ]
+    },
+    {
+      "name": "window.__pmOpenSettingsTab",
+      "files": [
+        "interactive-scenes.js",
+        "phone-control-center.js"
+      ]
+    },
+    {
+      "name": "window.__pmPhoneUiState",
+      "files": [
+        "branch-scope-inheritance.js",
+        "settings-backup.js"
+      ]
+    },
+    {
+      "name": "window.__pmPickProfile",
+      "files": [
+        "settings-ui.js"
+      ]
+    },
+    {
+      "name": "window.__pmPoke",
+      "files": [
+        "phone-chat-poke.js"
+      ]
+    },
+    {
+      "name": "window.__pmPokeConfig",
+      "files": [
+        "auto-poke-config.js",
+        "branch-scope-inheritance.js",
+        "phone-chat-poke.js",
+        "phone-chat.js",
+        "phone-directory.js",
+        "phone-foundation.js",
+        "settings-backup.js",
+        "storage.js"
+      ]
+    },
+    {
+      "name": "window.__pmPokeCurrent",
+      "files": [
+        "phone-chat-poke.js",
+        "phone-lifecycle.js"
+      ]
+    },
+    {
+      "name": "window.__pmPokeGroup",
+      "files": [
+        "phone-chat-poke.js"
+      ]
+    },
+    {
+      "name": "window.__pmProfiles",
+      "files": [
+        "phone-foundation.js",
+        "settings-backup.js",
+        "settings-ui.js",
+        "storage.js"
+      ]
+    },
+    {
+      "name": "window.__pmRefreshControlCenter",
+      "files": [
+        "phone-chat.js",
+        "phone-control-center.js"
+      ]
+    },
+    {
+      "name": "window.__pmRenderEmojiSetList",
+      "files": [
+        "emoji-ui.js"
+      ]
+    },
+    {
+      "name": "window.__pmResetBudgetConfig",
+      "files": [
+        "settings-ui.js"
+      ]
+    },
+    {
+      "name": "window.__pmResetPendingEditor",
+      "files": [
+        "phone-control-center.js"
+      ]
+    },
+    {
+      "name": "window.__pmResetWorldBookColumnOverride",
+      "files": [
+        "settings-worldbook.js"
+      ]
+    },
+    {
+      "name": "window.__pmResetWorldBookConfig",
+      "files": [
+        "settings-worldbook.js"
+      ]
+    },
+    {
+      "name": "window.__pmRetryBranch",
+      "files": [
+        "diagnostic.js"
+      ]
+    },
+    {
+      "name": "window.__pmReturnToCalendarDataSource",
+      "files": [
+        "calendar-outfit-runtime.js",
+        "calendar.js"
+      ]
+    },
+    {
+      "name": "window.__pmReturnToCommunityDataSource",
+      "files": [
+        "interactive-scenes.js"
+      ]
+    },
+    {
+      "name": "window.__pmReturnToControlCenter",
+      "files": [
+        "phone-chat-poke.js",
+        "phone-control-center.js",
+        "phone-directory.js"
+      ]
+    },
+    {
+      "name": "window.__pmReturnToDesktop",
+      "files": [
+        "phone-lifecycle.js"
+      ]
+    },
+    {
+      "name": "window.__pmSaveAndCloseContactConfig",
+      "files": [
+        "phone-chat-poke.js"
+      ]
+    },
+    {
+      "name": "window.__pmSaveAndCloseGroupEdit",
+      "files": [
+        "phone-directory.js"
+      ]
+    },
+    {
+      "name": "window.__pmSaveBudgetConfig",
+      "files": [
+        "settings-ui.js"
+      ]
+    },
+    {
+      "name": "window.__pmSaveConfig",
+      "files": [
+        "settings-ui.js"
+      ]
+    },
+    {
+      "name": "window.__pmSaveContactConfig",
+      "files": [
+        "phone-chat-poke.js"
+      ]
+    },
+    {
+      "name": "window.__pmSaveConversationInjection",
+      "files": [
+        "phone-context-injection.js"
+      ]
+    },
+    {
+      "name": "window.__pmSaveCurrentAutoPokeProbability",
+      "files": [
+        "phone-control-center.js"
+      ]
+    },
+    {
+      "name": "window.__pmSaveGroupRandomNpcSettings",
+      "files": [
+        "phone-directory.js"
+      ]
+    },
+    {
+      "name": "window.__pmSavePendingEdit",
+      "files": [
+        "phone-control-center.js"
+      ]
+    },
+    {
+      "name": "window.__pmSaveWorldBookColumns",
+      "files": [
+        "settings-worldbook.js"
+      ]
+    },
+    {
+      "name": "window.__pmSaveWorldBookConfig",
+      "files": [
+        "settings-worldbook.js"
+      ]
+    },
+    {
+      "name": "window.__pmSearchWorldBooks",
+      "files": [
+        "settings-worldbook.js"
+      ]
+    },
+    {
+      "name": "window.__pmSend",
+      "files": [
+        "phone-chat.js",
+        "phone-lifecycle.js"
+      ]
+    },
+    {
+      "name": "window.__pmSetAmbientStatus",
+      "files": [
+        "phone-lifecycle.js",
+        "settings-templates.js"
+      ]
+    },
+    {
+      "name": "window.__pmSetBorderColor",
+      "files": [
+        "settings-templates.js",
+        "settings-ui.js"
+      ]
+    },
+    {
+      "name": "window.__pmSetCustomAccent",
+      "files": [
+        "settings-templates.js",
+        "settings-ui.js"
+      ]
+    },
+    {
+      "name": "window.__pmSetCustomColor",
+      "files": [
+        "settings-templates.js",
+        "settings-ui.js"
+      ]
+    },
+    {
+      "name": "window.__pmSetCustomTitle",
+      "files": [
+        "settings-templates.js",
+        "settings-ui.js"
+      ]
+    },
+    {
+      "name": "window.__pmSetDarkMode",
+      "files": [
+        "settings-templates.js",
+        "settings-ui.js"
+      ]
+    },
+    {
+      "name": "window.__pmSetGroupMemberPrivateMemory",
+      "files": [
+        "settings-worldbook.js"
+      ]
+    },
+    {
+      "name": "window.__pmSetMode",
+      "files": [
+        "settings-templates.js",
+        "settings-ui.js"
+      ]
+    },
+    {
+      "name": "window.__pmSetPreset",
+      "files": [
+        "settings-ui.js"
+      ]
+    },
+    {
+      "name": "window.__pmSetWorldBookColumn",
+      "files": [
+        "settings-worldbook.js"
+      ]
+    },
+    {
+      "name": "window.__pmSetWorldBookEnabled",
+      "files": [
+        "settings-worldbook.js"
+      ]
+    },
+    {
+      "name": "window.__pmSetWorldBookEntry",
+      "files": [
+        "settings-worldbook.js"
+      ]
+    },
+    {
+      "name": "window.__pmShowAddContact",
+      "files": [
+        "contact-generator.js",
+        "phone-directory.js"
+      ]
+    },
+    {
+      "name": "window.__pmShowAutoPokeSettings",
+      "files": [
+        "phone-control-center.js"
+      ]
+    },
+    {
+      "name": "window.__pmShowCharacterBehavior",
+      "files": [
+        "phone-chat-poke.js"
+      ]
+    },
+    {
+      "name": "window.__pmShowConfig",
+      "files": [
+        "phone-context-injection.js",
+        "phone-control-center.js",
+        "settings-quick-reply.js",
+        "settings-templates.js",
+        "settings-ui.js",
+        "settings-worldbook.js"
+      ]
+    },
+    {
+      "name": "window.__pmShowControlCenter",
+      "files": [
+        "phone-control-center.js",
+        "phone-lifecycle.js"
+      ]
+    },
+    {
+      "name": "window.__pmShowConversationInjection",
+      "files": [
+        "phone-context-injection.js",
+        "settings-templates.js"
+      ]
+    },
+    {
+      "name": "window.__pmShowConversationSettings",
+      "files": [
+        "phone-chat-poke.js",
+        "phone-control-center.js"
+      ]
+    },
+    {
+      "name": "window.__pmShowEmojiManager",
+      "files": [
+        "emoji-ui.js",
+        "phone-control-center.js"
+      ]
+    },
+    {
+      "name": "window.__pmShowEmojiPicker",
+      "files": [
+        "emoji-ui.js"
+      ]
+    },
+    {
+      "name": "window.__pmShowGroupCreate",
+      "files": [
+        "phone-directory.js"
+      ]
+    },
+    {
+      "name": "window.__pmShowGroupMemberSettings",
+      "files": [
+        "phone-chat-poke.js",
+        "phone-control-center.js",
+        "phone-directory.js"
+      ]
+    },
+    {
+      "name": "window.__pmShowGroupRandomNpcSettings",
+      "files": [
+        "phone-chat-poke.js",
+        "phone-directory.js"
+      ]
+    },
+    {
+      "name": "window.__pmShowList",
+      "files": [
+        "interactive-scenes.js",
+        "phone-directory.js"
+      ]
+    },
+    {
+      "name": "window.__pmShowModelPicker",
+      "files": [
+        "settings-templates.js",
+        "settings-ui.js"
+      ]
+    },
+    {
+      "name": "window.__pmShowPhonePage",
+      "files": [
+        "interactive-scenes.js",
+        "phone-lifecycle.js"
+      ]
+    },
+    {
+      "name": "window.__pmShowWorldBookColumns",
+      "files": [
+        "interactive-scenes.js",
+        "phone-chat-poke.js",
+        "phone-directory.js",
+        "settings-worldbook.js"
+      ]
+    },
+    {
+      "name": "window.__pmStartDeleteMode",
+      "files": [
+        "phone-control-center.js"
+      ]
+    },
+    {
+      "name": "window.__pmSubmitPending",
+      "files": [
+        "phone-chat.js",
+        "phone-lifecycle.js"
+      ]
+    },
+    {
+      "name": "window.__pmSwitch",
+      "files": [
+        "conversation.js",
+        "interactive-scenes.js",
+        "phone-directory.js",
+        "phone-lifecycle.js"
+      ]
+    },
+    {
+      "name": "window.__pmSwitchContact",
+      "files": [
+        "conversation.js",
+        "interactive-scenes.js",
+        "phone-chat-poke.js",
+        "phone-directory.js"
+      ]
+    },
+    {
+      "name": "window.__pmTempText",
+      "files": [
+        "emoji-ui.js"
+      ]
+    },
+    {
+      "name": "window.__pmTestApi",
+      "files": [
+        "settings-templates.js",
+        "settings-ui.js"
+      ]
+    },
+    {
+      "name": "window.__pmTestModel",
+      "files": [
+        "settings-templates.js",
+        "settings-ui.js"
+      ]
+    },
+    {
+      "name": "window.__pmTheme",
+      "files": [
+        "emoji-ui.js",
+        "phone-directory.js",
+        "phone-foundation.js",
+        "phone-lifecycle.js",
+        "settings-backup.js",
+        "settings-model-picker.js",
+        "settings-quick-reply.js",
+        "settings-ui.js",
+        "storage.js"
+      ]
+    },
+    {
+      "name": "window.__pmToggleBidirectional",
+      "files": [
+        "phone-foundation.js"
+      ]
+    },
+    {
+      "name": "window.__pmToggleContactSwitcher",
+      "files": [
+        "phone-directory.js",
+        "phone-lifecycle.js"
+      ]
+    },
+    {
+      "name": "window.__pmToggleConversationInjection",
+      "files": [
+        "phone-context-injection.js",
+        "phone-directory.js",
+        "phone-foundation.js"
+      ]
+    },
+    {
+      "name": "window.__pmToggleCurrentAutoPoke",
+      "files": [
+        "phone-control-center.js"
+      ]
+    },
+    {
+      "name": "window.__pmToggleCurrentConversationInjection",
+      "files": [
+        "phone-context-injection.js"
+      ]
+    },
+    {
+      "name": "window.__pmToggleGroupMemberPrivateMemory",
+      "files": [
+        "phone-directory.js",
+        "settings-worldbook.js"
+      ]
+    },
+    {
+      "name": "window.__pmToggleMin",
+      "files": [
+        "phone-island-gesture.js",
+        "phone-lifecycle.js"
+      ]
+    },
+    {
+      "name": "window.__pmToggleOtherWorldBooks",
+      "files": [
+        "settings-worldbook.js"
+      ]
+    },
+    {
+      "name": "window.__pmToggleSelect",
+      "files": [
+        "phone-control-center.js",
+        "phone-lifecycle.js"
+      ]
+    },
+    {
+      "name": "window.__pmToggleVoice",
+      "files": [
+        "messaging.js"
+      ]
+    },
+    {
+      "name": "window.__pmToggleWordyLimit",
+      "files": [
+        "settings-templates.js",
+        "settings-ui.js"
+      ]
+    },
+    {
+      "name": "window.__pmToggleWorldBookDetails",
+      "files": [
+        "settings-worldbook.js"
+      ]
+    },
+    {
+      "name": "window.__pmUploadBg",
+      "files": [
+        "settings-ui.js"
+      ]
+    },
+    {
+      "name": "window.__pmWordyLimit",
+      "files": [
+        "phone-chat-poke.js",
+        "phone-chat.js",
+        "phone-foundation.js",
+        "settings-backup.js",
+        "settings-templates.js",
+        "settings-ui.js",
+        "storage.js"
+      ]
+    },
+    {
+      "name": "window.__pmWorldBookConfig",
+      "files": [
+        "phone-directory.js",
+        "settings-backup.js",
+        "settings-worldbook.js",
+        "storage.js"
+      ]
+    }
+  ],
+  "directStorageModules": [
+    "branch-scope-inheritance.js",
+    "phone-appearance.js",
+    "phone-lifecycle.js",
+    "pm-idb.js",
+    "settings-backup.js",
+    "settings-ui.js",
+    "storage-background.js",
+    "storage.js"
+  ]
+}
+Architecture baseline collected; findings are not migration-pass claims.
+
+> tianyin-xiaojian-st@1.5.0 check:lifecycle
+> node scripts/check-lifecycle.mjs
+
+{
+  "mode": "baseline-only",
+  "totals": {
+    "addEventListener": 74,
+    "removeEventListener": 31,
+    "setTimeout": 20,
+    "clearTimeout": 5,
+    "setInterval": 3,
+    "clearInterval": 3,
+    "abortController": 10,
+    "abort": 16
+  },
+  "files": [
+    {
+      "name": "ai.js",
+      "addEventListener": 1,
+      "removeEventListener": 2,
+      "setTimeout": 0,
+      "clearTimeout": 0,
+      "setInterval": 0,
+      "clearInterval": 0,
+      "abortController": 0,
+      "abort": 0
+    },
+    {
+      "name": "calendar-holiday.js",
+      "addEventListener": 0,
+      "removeEventListener": 0,
+      "setTimeout": 1,
+      "clearTimeout": 1,
+      "setInterval": 0,
+      "clearInterval": 0,
+      "abortController": 1,
+      "abort": 3
+    },
+    {
+      "name": "calendar-outfit-controller.js",
+      "addEventListener": 2,
+      "removeEventListener": 0,
+      "setTimeout": 0,
+      "clearTimeout": 0,
+      "setInterval": 0,
+      "clearInterval": 0,
+      "abortController": 0,
+      "abort": 0
+    },
+    {
+      "name": "calendar-recipe-controller.js",
+      "addEventListener": 2,
+      "removeEventListener": 0,
+      "setTimeout": 0,
+      "clearTimeout": 0,
+      "setInterval": 0,
+      "clearInterval": 0,
+      "abortController": 0,
+      "abort": 0
+    },
+    {
+      "name": "calendar-task-controller.js",
+      "addEventListener": 0,
+      "removeEventListener": 0,
+      "setTimeout": 0,
+      "clearTimeout": 0,
+      "setInterval": 0,
+      "clearInterval": 0,
+      "abortController": 1,
+      "abort": 3
+    },
+    {
+      "name": "calendar-weather.js",
+      "addEventListener": 0,
+      "removeEventListener": 0,
+      "setTimeout": 1,
+      "clearTimeout": 1,
+      "setInterval": 0,
+      "clearInterval": 0,
+      "abortController": 1,
+      "abort": 2
+    },
+    {
+      "name": "calendar.js",
+      "addEventListener": 3,
+      "removeEventListener": 0,
+      "setTimeout": 0,
+      "clearTimeout": 0,
+      "setInterval": 0,
+      "clearInterval": 0,
+      "abortController": 0,
+      "abort": 0
+    },
+    {
+      "name": "cropper.js",
+      "addEventListener": 13,
+      "removeEventListener": 0,
+      "setTimeout": 0,
+      "clearTimeout": 0,
+      "setInterval": 0,
+      "clearInterval": 0,
+      "abortController": 0,
+      "abort": 0
+    },
+    {
+      "name": "emoji-ui.js",
+      "addEventListener": 4,
+      "removeEventListener": 0,
+      "setTimeout": 2,
+      "clearTimeout": 0,
+      "setInterval": 0,
+      "clearInterval": 0,
+      "abortController": 0,
+      "abort": 0
+    },
+    {
+      "name": "interactive-scene-phone.js",
+      "addEventListener": 6,
+      "removeEventListener": 0,
+      "setTimeout": 0,
+      "clearTimeout": 0,
+      "setInterval": 0,
+      "clearInterval": 0,
+      "abortController": 0,
+      "abort": 0
+    },
+    {
+      "name": "interactive-scenes.js",
+      "addEventListener": 0,
+      "removeEventListener": 0,
+      "setTimeout": 0,
+      "clearTimeout": 0,
+      "setInterval": 0,
+      "clearInterval": 0,
+      "abortController": 1,
+      "abort": 1
+    },
+    {
+      "name": "main.js",
+      "addEventListener": 0,
+      "removeEventListener": 0,
+      "setTimeout": 1,
+      "clearTimeout": 0,
+      "setInterval": 0,
+      "clearInterval": 0,
+      "abortController": 0,
+      "abort": 0
+    },
+    {
+      "name": "phone-chat-poke.js",
+      "addEventListener": 0,
+      "removeEventListener": 0,
+      "setTimeout": 5,
+      "clearTimeout": 0,
+      "setInterval": 0,
+      "clearInterval": 0,
+      "abortController": 0,
+      "abort": 0
+    },
+    {
+      "name": "phone-chat.js",
+      "addEventListener": 0,
+      "removeEventListener": 0,
+      "setTimeout": 3,
+      "clearTimeout": 0,
+      "setInterval": 0,
+      "clearInterval": 0,
+      "abortController": 0,
+      "abort": 0
+    },
+    {
+      "name": "phone-control-center.js",
+      "addEventListener": 3,
+      "removeEventListener": 2,
+      "setTimeout": 0,
+      "clearTimeout": 0,
+      "setInterval": 0,
+      "clearInterval": 0,
+      "abortController": 0,
+      "abort": 0
+    },
+    {
+      "name": "phone-directory.js",
+      "addEventListener": 4,
+      "removeEventListener": 2,
+      "setTimeout": 2,
+      "clearTimeout": 0,
+      "setInterval": 0,
+      "clearInterval": 0,
+      "abortController": 0,
+      "abort": 0
+    },
+    {
+      "name": "phone-foundation.js",
+      "addEventListener": 13,
+      "removeEventListener": 8,
+      "setTimeout": 1,
+      "clearTimeout": 1,
+      "setInterval": 0,
+      "clearInterval": 0,
+      "abortController": 1,
+      "abort": 2
+    },
+    {
+      "name": "phone-island-gesture.js",
+      "addEventListener": 8,
+      "removeEventListener": 8,
+      "setTimeout": 0,
+      "clearTimeout": 0,
+      "setInterval": 0,
+      "clearInterval": 0,
+      "abortController": 0,
+      "abort": 0
+    },
+    {
+      "name": "phone-lifecycle.js",
+      "addEventListener": 4,
+      "removeEventListener": 0,
+      "setTimeout": 1,
+      "clearTimeout": 0,
+      "setInterval": 3,
+      "clearInterval": 3,
+      "abortController": 0,
+      "abort": 0
+    },
+    {
+      "name": "press-gesture.js",
+      "addEventListener": 8,
+      "removeEventListener": 8,
+      "setTimeout": 0,
+      "clearTimeout": 0,
+      "setInterval": 0,
+      "clearInterval": 0,
+      "abortController": 0,
+      "abort": 0
+    },
+    {
+      "name": "settings-model-picker.js",
+      "addEventListener": 3,
+      "removeEventListener": 1,
+      "setTimeout": 1,
+      "clearTimeout": 0,
+      "setInterval": 0,
+      "clearInterval": 0,
+      "abortController": 0,
+      "abort": 0
+    },
+    {
+      "name": "settings-ui.js",
+      "addEventListener": 0,
+      "removeEventListener": 0,
+      "setTimeout": 2,
+      "clearTimeout": 2,
+      "setInterval": 0,
+      "clearInterval": 0,
+      "abortController": 2,
+      "abort": 2
+    },
+    {
+      "name": "settings-worldbook.js",
+      "addEventListener": 0,
+      "removeEventListener": 0,
+      "setTimeout": 0,
+      "clearTimeout": 0,
+      "setInterval": 0,
+      "clearInterval": 0,
+      "abortController": 3,
+      "abort": 3
+    }
+  ]
+}
+Lifecycle baseline collected; static counts do not prove resources are released.
+
+> tianyin-xiaojian-st@1.5.0 check:memory
+> node scripts/check-memory-budget.mjs
+
+{
+  "mode": "baseline-only",
+  "sourceModules": 77,
+  "sourceBytes": 1057130,
+  "bundleBytes": 1036141,
+  "totals": {
+    "maps": 26,
+    "sets": 87,
+    "jsonDeepClones": 17,
+    "objectUrls": 2
+  },
+  "knownWorkingSets": [
+    "calendar.js:viewByStorage",
+    "calendar.js:statusByStorage",
+    "calendar.js:statusTimerByStorage",
+    "runtime.js:automaticTasks",
+    "runtime.js:pendingMessages",
+    "storage.js:branchLineageRevisions"
+  ],
+  "files": [
+    {
+      "name": "auto-poke-config.js",
+      "bytes": 3356,
+      "maps": 0,
+      "sets": 0,
+      "jsonDeepClones": 1,
+      "objectUrls": 0
+    },
+    {
+      "name": "behavior-config.js",
+      "bytes": 10570,
+      "maps": 1,
+      "sets": 4,
+      "jsonDeepClones": 0,
+      "objectUrls": 0
+    },
+    {
+      "name": "branch-scope-inheritance.js",
+      "bytes": 33272,
+      "maps": 2,
+      "sets": 0,
+      "jsonDeepClones": 0,
+      "objectUrls": 0
+    },
+    {
+      "name": "calendar-commit.js",
+      "bytes": 17282,
+      "maps": 0,
+      "sets": 0,
+      "jsonDeepClones": 1,
+      "objectUrls": 0
+    },
+    {
+      "name": "calendar-dom.js",
+      "bytes": 3120,
+      "maps": 0,
+      "sets": 1,
+      "jsonDeepClones": 0,
+      "objectUrls": 0
+    },
+    {
+      "name": "calendar-holiday.js",
+      "bytes": 19752,
+      "maps": 0,
+      "sets": 3,
+      "jsonDeepClones": 0,
+      "objectUrls": 0
+    },
+    {
+      "name": "calendar-model.js",
+      "bytes": 33971,
+      "maps": 0,
+      "sets": 11,
+      "jsonDeepClones": 0,
+      "objectUrls": 0
+    },
+    {
+      "name": "calendar-occasion-model.js",
+      "bytes": 9975,
+      "maps": 0,
+      "sets": 3,
+      "jsonDeepClones": 0,
+      "objectUrls": 0
+    },
+    {
+      "name": "calendar-outfit-model.js",
+      "bytes": 10460,
+      "maps": 1,
+      "sets": 1,
+      "jsonDeepClones": 0,
+      "objectUrls": 0
+    },
+    {
+      "name": "calendar-outfit-runtime.js",
+      "bytes": 1802,
+      "maps": 0,
+      "sets": 1,
+      "jsonDeepClones": 0,
+      "objectUrls": 0
+    },
+    {
+      "name": "calendar-page-view.js",
+      "bytes": 14084,
+      "maps": 1,
+      "sets": 0,
+      "jsonDeepClones": 0,
+      "objectUrls": 0
+    },
+    {
+      "name": "calendar-recipe-model.js",
+      "bytes": 12814,
+      "maps": 2,
+      "sets": 1,
+      "jsonDeepClones": 0,
+      "objectUrls": 0
+    },
+    {
+      "name": "calendar-task-controller.js",
+      "bytes": 1949,
+      "maps": 1,
+      "sets": 0,
+      "jsonDeepClones": 0,
+      "objectUrls": 0
+    },
+    {
+      "name": "calendar.js",
+      "bytes": 47033,
+      "maps": 3,
+      "sets": 3,
+      "jsonDeepClones": 0,
+      "objectUrls": 0
+    },
+    {
+      "name": "chat-message-model.js",
+      "bytes": 7672,
+      "maps": 2,
+      "sets": 1,
+      "jsonDeepClones": 0,
+      "objectUrls": 0
+    },
+    {
+      "name": "community-injection.js",
+      "bytes": 1848,
+      "maps": 0,
+      "sets": 1,
+      "jsonDeepClones": 0,
+      "objectUrls": 0
+    },
+    {
+      "name": "contact-generator.js",
+      "bytes": 13841,
+      "maps": 0,
+      "sets": 2,
+      "jsonDeepClones": 1,
+      "objectUrls": 0
+    },
+    {
+      "name": "conversation.js",
+      "bytes": 9744,
+      "maps": 0,
+      "sets": 0,
+      "jsonDeepClones": 1,
+      "objectUrls": 0
+    },
+    {
+      "name": "directory-save-coordinator.js",
+      "bytes": 3947,
+      "maps": 2,
+      "sets": 3,
+      "jsonDeepClones": 0,
+      "objectUrls": 0
+    },
+    {
+      "name": "host-context.js",
+      "bytes": 5948,
+      "maps": 0,
+      "sets": 2,
+      "jsonDeepClones": 0,
+      "objectUrls": 0
+    },
+    {
+      "name": "interactive-scene-model.js",
+      "bytes": 44237,
+      "maps": 1,
+      "sets": 7,
+      "jsonDeepClones": 0,
+      "objectUrls": 0
+    },
+    {
+      "name": "interactive-scene-phone.js",
+      "bytes": 22549,
+      "maps": 0,
+      "sets": 1,
+      "jsonDeepClones": 0,
+      "objectUrls": 0
+    },
+    {
+      "name": "interactive-scene-scheduler.js",
+      "bytes": 12975,
+      "maps": 0,
+      "sets": 1,
+      "jsonDeepClones": 0,
+      "objectUrls": 0
+    },
+    {
+      "name": "interactive-scene-views.js",
+      "bytes": 21452,
+      "maps": 0,
+      "sets": 2,
+      "jsonDeepClones": 0,
+      "objectUrls": 0
+    },
+    {
+      "name": "interactive-scenes.js",
+      "bytes": 42892,
+      "maps": 0,
+      "sets": 0,
+      "jsonDeepClones": 2,
+      "objectUrls": 0
+    },
+    {
+      "name": "messaging.js",
+      "bytes": 14002,
+      "maps": 1,
+      "sets": 1,
+      "jsonDeepClones": 0,
+      "objectUrls": 0
+    },
+    {
+      "name": "pending-messages.js",
+      "bytes": 5693,
+      "maps": 1,
+      "sets": 2,
+      "jsonDeepClones": 0,
+      "objectUrls": 0
+    },
+    {
+      "name": "permissions.js",
+      "bytes": 14889,
+      "maps": 0,
+      "sets": 3,
+      "jsonDeepClones": 0,
+      "objectUrls": 0
+    },
+    {
+      "name": "phone-chat-poke.js",
+      "bytes": 34397,
+      "maps": 0,
+      "sets": 0,
+      "jsonDeepClones": 2,
+      "objectUrls": 0
+    },
+    {
+      "name": "phone-chat.js",
+      "bytes": 22263,
+      "maps": 0,
+      "sets": 3,
+      "jsonDeepClones": 0,
+      "objectUrls": 0
+    },
+    {
+      "name": "phone-context-injection.js",
+      "bytes": 12119,
+      "maps": 0,
+      "sets": 1,
+      "jsonDeepClones": 1,
+      "objectUrls": 0
+    },
+    {
+      "name": "phone-directory.js",
+      "bytes": 46624,
+      "maps": 0,
+      "sets": 1,
+      "jsonDeepClones": 5,
+      "objectUrls": 0
+    },
+    {
+      "name": "phone-foundation.js",
+      "bytes": 37403,
+      "maps": 0,
+      "sets": 3,
+      "jsonDeepClones": 0,
+      "objectUrls": 0
+    },
+    {
+      "name": "phone-injection.js",
+      "bytes": 20052,
+      "maps": 1,
+      "sets": 7,
+      "jsonDeepClones": 0,
+      "objectUrls": 0
+    },
+    {
+      "name": "phone-lifecycle.js",
+      "bytes": 27770,
+      "maps": 0,
+      "sets": 2,
+      "jsonDeepClones": 0,
+      "objectUrls": 0
+    },
+    {
+      "name": "runtime.js",
+      "bytes": 7496,
+      "maps": 2,
+      "sets": 2,
+      "jsonDeepClones": 0,
+      "objectUrls": 0
+    },
+    {
+      "name": "settings-backup-validate.js",
+      "bytes": 22484,
+      "maps": 1,
+      "sets": 4,
+      "jsonDeepClones": 1,
+      "objectUrls": 0
+    },
+    {
+      "name": "settings-backup.js",
+      "bytes": 12422,
+      "maps": 0,
+      "sets": 0,
+      "jsonDeepClones": 1,
+      "objectUrls": 0
+    },
+    {
+      "name": "settings-ui.js",
+      "bytes": 35221,
+      "maps": 0,
+      "sets": 1,
+      "jsonDeepClones": 1,
+      "objectUrls": 2
+    },
+    {
+      "name": "settings-worldbook.js",
+      "bytes": 27081,
+      "maps": 0,
+      "sets": 4,
+      "jsonDeepClones": 0,
+      "objectUrls": 0
+    },
+    {
+      "name": "storage-background.js",
+      "bytes": 10610,
+      "maps": 0,
+      "sets": 1,
+      "jsonDeepClones": 0,
+      "objectUrls": 0
+    },
+    {
+      "name": "storage.js",
+      "bytes": 31941,
+      "maps": 3,
+      "sets": 0,
+      "jsonDeepClones": 0,
+      "objectUrls": 0
+    },
+    {
+      "name": "worldbook-config.js",
+      "bytes": 9531,
+      "maps": 1,
+      "sets": 3,
+      "jsonDeepClones": 0,
+      "objectUrls": 0
+    },
+    {
+      "name": "worldbook-context.js",
+      "bytes": 6221,
+      "maps": 0,
+      "sets": 1,
+      "jsonDeepClones": 0,
+      "objectUrls": 0
+    }
+  ]
+}
+Memory baseline collected; heap and retained-object budgets require browser profiling.
+
+
+--- Phase 0 evidence footer (recorded after command completion) ---
+Recorded date: 2026-07-29
+Command: npm run check
+Exit code: 0
+Node: v24.18.0
+npm: 11.16.0
+HEAD: ae8284e2fbd0a07e903108e33924fef58b36c1d7
+index.js HEAD blob: 7548fee3f2bf833ef4beec39eec809dc0149fddf
+index.js worktree blob: 7548fee3f2bf833ef4beec39eec809dc0149fddf
+Post-run verification: src/** and index.js have no content diff from HEAD.
+Result: PASS. Static Node checks passed; real SillyTavern host regression remains unexecuted.

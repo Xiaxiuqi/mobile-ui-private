@@ -18,7 +18,10 @@
     "check:budget": "node scripts/check-budget.mjs",
     "check:permissions": "node scripts/check-permissions.mjs",
     "check:contracts": "node scripts/check-contracts.mjs",
-    "check": "npm run build && npm run check:syntax && npm run check:ai && npm run check:emoji && npm run check:behavior && npm run check:interactive && npm run check:pending && npm run check:press && npm run check:ambient && npm run check:calendar && npm run check:budget && npm run check:permissions && npm run check:contracts"
+    "check:architecture": "node scripts/check-architecture.mjs",
+    "check:lifecycle": "node scripts/check-lifecycle.mjs",
+    "check:memory": "node scripts/check-memory-budget.mjs",
+    "check": "npm run build && npm run check:syntax && npm run check:ai && npm run check:emoji && npm run check:behavior && npm run check:interactive && npm run check:pending && npm run check:press && npm run check:ambient && npm run check:calendar && npm run check:budget && npm run check:permissions && npm run check:contracts && npm run check:architecture && npm run check:lifecycle && npm run check:memory"
   },
   "devDependencies": {
     "acorn": "8.15.0",

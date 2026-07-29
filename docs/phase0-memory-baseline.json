@@ -1,0 +1,374 @@
+{
+  "mode": "baseline-only",
+  "sourceModules": 77,
+  "sourceBytes": 1057130,
+  "bundleBytes": 1055255,
+  "totals": {
+    "maps": 26,
+    "sets": 87,
+    "jsonDeepClones": 17,
+    "objectUrls": 2
+  },
+  "knownWorkingSets": [
+    "calendar.js:viewByStorage",
+    "calendar.js:statusByStorage",
+    "calendar.js:statusTimerByStorage",
+    "runtime.js:automaticTasks",
+    "runtime.js:pendingMessages",
+    "storage.js:branchLineageRevisions"
+  ],
+  "files": [
+    {
+      "name": "auto-poke-config.js",
+      "bytes": 3356,
+      "maps": 0,
+      "sets": 0,
+      "jsonDeepClones": 1,
+      "objectUrls": 0
+    },
+    {
+      "name": "behavior-config.js",
+      "bytes": 10570,
+      "maps": 1,
+      "sets": 4,
+      "jsonDeepClones": 0,
+      "objectUrls": 0
+    },
+    {
+      "name": "branch-scope-inheritance.js",
+      "bytes": 33272,
+      "maps": 2,
+      "sets": 0,
+      "jsonDeepClones": 0,
+      "objectUrls": 0
+    },
+    {
+      "name": "calendar-commit.js",
+      "bytes": 17282,
+      "maps": 0,
+      "sets": 0,
+      "jsonDeepClones": 1,
+      "objectUrls": 0
+    },
+    {
+      "name": "calendar-dom.js",
+      "bytes": 3120,
+      "maps": 0,
+      "sets": 1,
+      "jsonDeepClones": 0,
+      "objectUrls": 0
+    },
+    {
+      "name": "calendar-holiday.js",
+      "bytes": 19752,
+      "maps": 0,
+      "sets": 3,
+      "jsonDeepClones": 0,
+      "objectUrls": 0
+    },
+    {
+      "name": "calendar-model.js",
+      "bytes": 33971,
+      "maps": 0,
+      "sets": 11,
+      "jsonDeepClones": 0,
+      "objectUrls": 0
+    },
+    {
+      "name": "calendar-occasion-model.js",
+      "bytes": 9975,
+      "maps": 0,
+      "sets": 3,
+      "jsonDeepClones": 0,
+      "objectUrls": 0
+    },
+    {
+      "name": "calendar-outfit-model.js",
+      "bytes": 10460,
+      "maps": 1,
+      "sets": 1,
+      "jsonDeepClones": 0,
+      "objectUrls": 0
+    },
+    {
+      "name": "calendar-outfit-runtime.js",
+      "bytes": 1802,
+      "maps": 0,
+      "sets": 1,
+      "jsonDeepClones": 0,
+      "objectUrls": 0
+    },
+    {
+      "name": "calendar-page-view.js",
+      "bytes": 14084,
+      "maps": 1,
+      "sets": 0,
+      "jsonDeepClones": 0,
+      "objectUrls": 0
+    },
+    {
+      "name": "calendar-recipe-model.js",
+      "bytes": 12814,
+      "maps": 2,
+      "sets": 1,
+      "jsonDeepClones": 0,
+      "objectUrls": 0
+    },
+    {
+      "name": "calendar-task-controller.js",
+      "bytes": 1949,
+      "maps": 1,
+      "sets": 0,
+      "jsonDeepClones": 0,
+      "objectUrls": 0
+    },
+    {
+      "name": "calendar.js",
+      "bytes": 47033,
+      "maps": 3,
+      "sets": 3,
+      "jsonDeepClones": 0,
+      "objectUrls": 0
+    },
+    {
+      "name": "chat-message-model.js",
+      "bytes": 7672,
+      "maps": 2,
+      "sets": 1,
+      "jsonDeepClones": 0,
+      "objectUrls": 0
+    },
+    {
+      "name": "community-injection.js",
+      "bytes": 1848,
+      "maps": 0,
+      "sets": 1,
+      "jsonDeepClones": 0,
+      "objectUrls": 0
+    },
+    {
+      "name": "contact-generator.js",
+      "bytes": 13841,
+      "maps": 0,
+      "sets": 2,
+      "jsonDeepClones": 1,
+      "objectUrls": 0
+    },
+    {
+      "name": "conversation.js",
+      "bytes": 9744,
+      "maps": 0,
+      "sets": 0,
+      "jsonDeepClones": 1,
+      "objectUrls": 0
+    },
+    {
+      "name": "directory-save-coordinator.js",
+      "bytes": 3947,
+      "maps": 2,
+      "sets": 3,
+      "jsonDeepClones": 0,
+      "objectUrls": 0
+    },
+    {
+      "name": "host-context.js",
+      "bytes": 5948,
+      "maps": 0,
+      "sets": 2,
+      "jsonDeepClones": 0,
+      "objectUrls": 0
+    },
+    {
+      "name": "interactive-scene-model.js",
+      "bytes": 44237,
+      "maps": 1,
+      "sets": 7,
+      "jsonDeepClones": 0,
+      "objectUrls": 0
+    },
+    {
+      "name": "interactive-scene-phone.js",
+      "bytes": 22549,
+      "maps": 0,
+      "sets": 1,
+      "jsonDeepClones": 0,
+      "objectUrls": 0
+    },
+    {
+      "name": "interactive-scene-scheduler.js",
+      "bytes": 12975,
+      "maps": 0,
+      "sets": 1,
+      "jsonDeepClones": 0,
+      "objectUrls": 0
+    },
+    {
+      "name": "interactive-scene-views.js",
+      "bytes": 21452,
+      "maps": 0,
+      "sets": 2,
+      "jsonDeepClones": 0,
+      "objectUrls": 0
+    },
+    {
+      "name": "interactive-scenes.js",
+      "bytes": 42892,
+      "maps": 0,
+      "sets": 0,
+      "jsonDeepClones": 2,
+      "objectUrls": 0
+    },
+    {
+      "name": "messaging.js",
+      "bytes": 14002,
+      "maps": 1,
+      "sets": 1,
+      "jsonDeepClones": 0,
+      "objectUrls": 0
+    },
+    {
+      "name": "pending-messages.js",
+      "bytes": 5693,
+      "maps": 1,
+      "sets": 2,
+      "jsonDeepClones": 0,
+      "objectUrls": 0
+    },
+    {
+      "name": "permissions.js",
+      "bytes": 14889,
+      "maps": 0,
+      "sets": 3,
+      "jsonDeepClones": 0,
+      "objectUrls": 0
+    },
+    {
+      "name": "phone-chat-poke.js",
+      "bytes": 34397,
+      "maps": 0,
+      "sets": 0,
+      "jsonDeepClones": 2,
+      "objectUrls": 0
+    },
+    {
+      "name": "phone-chat.js",
+      "bytes": 22263,
+      "maps": 0,
+      "sets": 3,
+      "jsonDeepClones": 0,
+      "objectUrls": 0
+    },
+    {
+      "name": "phone-context-injection.js",
+      "bytes": 12119,
+      "maps": 0,
+      "sets": 1,
+      "jsonDeepClones": 1,
+      "objectUrls": 0
+    },
+    {
+      "name": "phone-directory.js",
+      "bytes": 46624,
+      "maps": 0,
+      "sets": 1,
+      "jsonDeepClones": 5,
+      "objectUrls": 0
+    },
+    {
+      "name": "phone-foundation.js",
+      "bytes": 37403,
+      "maps": 0,
+      "sets": 3,
+      "jsonDeepClones": 0,
+      "objectUrls": 0
+    },
+    {
+      "name": "phone-injection.js",
+      "bytes": 20052,
+      "maps": 1,
+      "sets": 7,
+      "jsonDeepClones": 0,
+      "objectUrls": 0
+    },
+    {
+      "name": "phone-lifecycle.js",
+      "bytes": 27770,
+      "maps": 0,
+      "sets": 2,
+      "jsonDeepClones": 0,
+      "objectUrls": 0
+    },
+    {
+      "name": "runtime.js",
+      "bytes": 7496,
+      "maps": 2,
+      "sets": 2,
+      "jsonDeepClones": 0,
+      "objectUrls": 0
+    },
+    {
+      "name": "settings-backup-validate.js",
+      "bytes": 22484,
+      "maps": 1,
+      "sets": 4,
+      "jsonDeepClones": 1,
+      "objectUrls": 0
+    },
+    {
+      "name": "settings-backup.js",
+      "bytes": 12422,
+      "maps": 0,
+      "sets": 0,
+      "jsonDeepClones": 1,
+      "objectUrls": 0
+    },
+    {
+      "name": "settings-ui.js",
+      "bytes": 35221,
+      "maps": 0,
+      "sets": 1,
+      "jsonDeepClones": 1,
+      "objectUrls": 2
+    },
+    {
+      "name": "settings-worldbook.js",
+      "bytes": 27081,
+      "maps": 0,
+      "sets": 4,
+      "jsonDeepClones": 0,
+      "objectUrls": 0
+    },
+    {
+      "name": "storage-background.js",
+      "bytes": 10610,
+      "maps": 0,
+      "sets": 1,
+      "jsonDeepClones": 0,
+      "objectUrls": 0
+    },
+    {
+      "name": "storage.js",
+      "bytes": 31941,
+      "maps": 3,
+      "sets": 0,
+      "jsonDeepClones": 0,
+      "objectUrls": 0
+    },
+    {
+      "name": "worldbook-config.js",
+      "bytes": 9531,
+      "maps": 1,
+      "sets": 3,
+      "jsonDeepClones": 0,
+      "objectUrls": 0
+    },
+    {
+      "name": "worldbook-context.js",
+      "bytes": 6221,
+      "maps": 0,
+      "sets": 1,
+      "jsonDeepClones": 0,
+      "objectUrls": 0
+    }
+  ]
+}
