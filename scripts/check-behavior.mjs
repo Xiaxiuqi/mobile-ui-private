@@ -63,7 +63,10 @@ import {
     buildPokeGroupActivePrompt, buildPokeGroupPrompt, buildSingleInjectedInstruction, buildSingleSystemPrompt,
 } from '../src/chat-prompts.js';
 import { parseGroupResponse } from '../src/messaging.js';
-import { createLifecycleDiagnostics, createLifecycleScope } from '../src/infrastructure/lifecycle-scope.js';
+import {
+    createLifecycleDiagnostics, createLifecycleScope, LifecycleScopeDisposedError,
+} from '../src/infrastructure/lifecycle-scope.js';
+import { installAppTeardown } from '../src/main.js';
 import {
     advanceAutoPokeCounters, commitAutomaticResult,
     createAutomaticTaskController, createRuntimeState, runAutoPokeCounterCycle,
@@ -3136,12 +3139,14 @@ try {
 
     const createCommandRetryFixture = ({ initialRegistration = false, initialTimerId = 1 } = {}) => {
         const callbacks = new Map();
+        const scheduledCallbacks = new Map();
         const cleared = [];
         let nextId = initialTimerId;
         const timers = {
             setInterval(callback) {
                 const id = nextId++;
                 callbacks.set(id, callback);
+                scheduledCallbacks.set(id, callback);
                 return id;
             },
             clearInterval(id) {
@@ -3165,7 +3170,7 @@ try {
             getCtx: () => context,
         };
         return {
-            appScope, callbacks, cleared, deps, diagnostics, runtime,
+            appScope, callbacks, cleared, deps, diagnostics, runtime, scheduledCallbacks,
             enableRegistration() {
                 context = registeredContext;
             },
@@ -3182,23 +3187,23 @@ try {
     assert.equal(immediateCommandRegistration.callbacks.size, 0, '斜杠命令首次注册成功时不得启动重试 interval');
     assert.equal(immediateCommandRegistration.runtime.phoneCommandRetry, null,
         '斜杠命令首次注册成功时不得写入命令重试运行态');
-    assert.deepEqual(immediateCommandRegistration.diagnostics.snapshot(), { scope: 1 },
-        '斜杠命令首次注册成功时 app scope 不得新增重试资源');
+    assert.deepEqual(immediateCommandRegistration.diagnostics.snapshot(), { cleanup: 1, scope: 1, timeout: 1 },
+        '斜杠命令首次注册成功时只能保留独立的宿主事件重试 timeout');
     immediateCommandRegistration.appScope.dispose('fixture-complete');
 
     const successfulCommandRetry = createCommandRetryFixture();
     installPhoneLifecycle({ ...lifecycleFixtureState }, successfulCommandRetry.deps);
     assert.equal(successfulCommandRetry.callbacks.size, 1,
         '斜杠命令首次注册失败时必须且只能启动一个 app-scope 重试 interval');
-    assert.deepEqual(successfulCommandRetry.diagnostics.snapshot(), { cleanup: 1, interval: 1, scope: 1 },
-        '命令重试期间诊断必须准确登记 interval 与运行态释放清理');
+    assert.deepEqual(successfulCommandRetry.diagnostics.snapshot(), { cleanup: 2, interval: 1, scope: 1, timeout: 1 },
+        '命令重试期间诊断必须分别登记 interval、宿主事件 timeout 与运行态释放清理');
     successfulCommandRetry.enableRegistration();
     successfulCommandRetry.tick();
     assert.equal(successfulCommandRetry.registrations(), 1, '宿主命令 API 可用后必须立即完成注册');
     assert.equal(successfulCommandRetry.callbacks.size, 0, '注册成功后必须提前停止命令重试 interval');
     assert.equal(successfulCommandRetry.runtime.phoneCommandRetry, null, '注册成功后必须清空命令重试运行态');
-    assert.deepEqual(successfulCommandRetry.diagnostics.snapshot(), { scope: 1 },
-        '注册成功后命令重试资源必须回到 app scope 基线');
+    assert.deepEqual(successfulCommandRetry.diagnostics.snapshot(), { cleanup: 1, scope: 1, timeout: 1 },
+        '注册成功后命令重试资源必须回到包含宿主事件 timeout 的 app scope 基线');
     successfulCommandRetry.appScope.dispose('fixture-complete');
 
     const exhaustedCommandRetry = createCommandRetryFixture();
@@ -3206,8 +3211,8 @@ try {
     for (let attempt = 0; attempt < 30; attempt += 1) exhaustedCommandRetry.tick();
     assert.equal(exhaustedCommandRetry.callbacks.size, 0, '命令注册连续失败 30 次后必须停止重试');
     assert.equal(exhaustedCommandRetry.runtime.phoneCommandRetry, null, '达到重试上限后必须清空命令重试运行态');
-    assert.deepEqual(exhaustedCommandRetry.diagnostics.snapshot(), { scope: 1 },
-        '达到重试上限后资源诊断必须回到 app scope 基线');
+    assert.deepEqual(exhaustedCommandRetry.diagnostics.snapshot(), { cleanup: 1, scope: 1, timeout: 1 },
+        '达到重试上限后资源诊断必须回到包含宿主事件 timeout 的 app scope 基线');
     exhaustedCommandRetry.appScope.dispose('fixture-complete');
 
     const disposedCommandRetry = createCommandRetryFixture();
@@ -3226,9 +3231,183 @@ try {
     zeroIdCommandRetry.tick();
     assert.deepEqual(zeroIdCommandRetry.cleared, [0], 'timer id=0 的命令重试必须可被正常清理');
     assert.equal(zeroIdCommandRetry.runtime.phoneCommandRetry, null, 'timer id=0 清理后必须清空命令重试运行态');
-    assert.deepEqual(zeroIdCommandRetry.diagnostics.snapshot(), { scope: 1 },
-        'timer id=0 清理后诊断必须回到 app scope 基线');
+    assert.deepEqual(zeroIdCommandRetry.diagnostics.snapshot(), { cleanup: 1, scope: 1, timeout: 1 },
+        'timer id=0 清理后诊断必须回到包含宿主事件 timeout 的 app scope 基线');
     zeroIdCommandRetry.appScope.dispose('fixture-complete');
+
+    const createHostEventRetryFixture = ({ initialTimerId = 1 } = {}) => {
+        const callbacks = new Map();
+        const scheduledCallbacks = new Map();
+        const cleared = [];
+        let nextId = initialTimerId;
+        let hookCalls = 0;
+        let groupMetaLoads = 0;
+        const continuationCalls = [];
+        const timers = {
+            setTimeout(callback) {
+                const id = nextId++;
+                callbacks.set(id, callback);
+                scheduledCallbacks.set(id, callback);
+                return id;
+            },
+            clearTimeout(id) {
+                cleared.push(id);
+                callbacks.delete(id);
+            },
+            setInterval: globalThis.setInterval,
+            clearInterval: globalThis.clearInterval,
+        };
+        const diagnostics = createLifecycleDiagnostics();
+        const appScope = createLifecycleScope({ label: 'host-event-retry-app', diagnostics, timers });
+        const runtime = createRuntimeState();
+        const deps = {
+            ...lifecycleFixtureDeps,
+            runtime,
+            appLifecycleScope: appScope,
+            lifecycleDiagnostics: diagnostics,
+            hookGenerationEvent: () => { hookCalls += 1; },
+            loadGroupMeta: async () => { groupMetaLoads += 1; return {}; },
+            migrateOldHistory: () => continuationCalls.push('migrate'),
+            applyBidirectionalInjection: () => continuationCalls.push('inject'),
+        };
+        return {
+            appScope, callbacks, cleared, continuationCalls, deps, diagnostics, runtime, scheduledCallbacks,
+            groupMetaLoads: () => groupMetaLoads,
+            hookCalls: () => hookCalls,
+            fire(id = callbacks.keys().next().value) {
+                callbacks.get(id)?.();
+            },
+        };
+    };
+
+    const completedHostEventRetry = createHostEventRetryFixture();
+    installPhoneLifecycle({ ...lifecycleFixtureState }, completedHostEventRetry.deps);
+    assert.equal(completedHostEventRetry.hookCalls(), 1, '安装时必须立即注册一次宿主事件');
+    assert.equal(completedHostEventRetry.callbacks.size, 1, '安装时必须且只能安排一个 1500ms 宿主事件重试 timeout');
+    assert.deepEqual(completedHostEventRetry.diagnostics.snapshot(), { cleanup: 1, scope: 1, timeout: 1 },
+        '宿主事件重试等待期间必须准确登记 timeout 与运行态清理');
+    completedHostEventRetry.fire();
+    await Promise.resolve();
+    assert.equal(completedHostEventRetry.hookCalls(), 2, '1500ms timeout 触发后必须再次注册宿主事件');
+    assert.deepEqual(completedHostEventRetry.continuationCalls, ['migrate', 'inject'],
+        '宿主事件重试触发后必须等待所属 metadata load 再执行迁移与注入');
+    assert.equal(completedHostEventRetry.callbacks.size, 0, '宿主事件重试触发后必须释放 timeout');
+    assert.equal(completedHostEventRetry.runtime.hostEventRetry, null, '宿主事件重试触发后必须清空运行态');
+    assert.deepEqual(completedHostEventRetry.diagnostics.snapshot(), { scope: 1 },
+        '宿主事件重试触发后资源诊断必须回到 app scope 基线');
+    completedHostEventRetry.appScope.dispose('fixture-complete');
+
+    const disposedHostEventRetry = createHostEventRetryFixture();
+    for (let install = 0; install < 20; install += 1) {
+        installPhoneLifecycle({ ...lifecycleFixtureState }, disposedHostEventRetry.deps);
+        assert.equal(disposedHostEventRetry.callbacks.size, 1,
+            `同一 runtime 第 ${install + 1} 次安装不得累加宿主事件重试 timeout`);
+        assert.equal(disposedHostEventRetry.groupMetaLoads(), 1,
+            `同一 runtime 第 ${install + 1} 次安装不得创建未被 timeout 所有的 metadata load`);
+        assert.deepEqual(disposedHostEventRetry.diagnostics.snapshot(), { cleanup: 1, scope: 1, timeout: 1 },
+            `同一 runtime 第 ${install + 1} 次安装的 timeout 资源不得增长`);
+    }
+    const hookCallsBeforeDispose = disposedHostEventRetry.hookCalls();
+    const staleCallback = disposedHostEventRetry.scheduledCallbacks.values().next().value;
+    disposedHostEventRetry.appScope.dispose('fixture-app-disposed');
+    staleCallback();
+    assert.equal(disposedHostEventRetry.hookCalls(), hookCallsBeforeDispose, 'app scope dispose 后旧 timeout 回调不得执行');
+    assert.deepEqual(disposedHostEventRetry.continuationCalls, [], 'app scope dispose 后旧 timeout continuation 不得执行');
+    assert.equal(disposedHostEventRetry.runtime.hostEventRetry, null, 'app scope dispose 必须清空宿主事件重试运行态');
+    assert.deepEqual(disposedHostEventRetry.diagnostics.snapshot(), {}, 'app scope dispose 后不得残留宿主事件重试资源');
+
+    const zeroIdHostEventRetry = createHostEventRetryFixture({ initialTimerId: 0 });
+    installPhoneLifecycle({ ...lifecycleFixtureState }, zeroIdHostEventRetry.deps);
+    assert.equal(zeroIdHostEventRetry.runtime.hostEventRetry?.id, 0, 'timer id=0 必须被保存为有效宿主事件重试句柄');
+    zeroIdHostEventRetry.fire(0);
+    await Promise.resolve();
+    assert.deepEqual(zeroIdHostEventRetry.cleared, [0], 'timer id=0 的宿主事件重试必须可被正常清理');
+    assert.equal(zeroIdHostEventRetry.runtime.hostEventRetry, null, 'timer id=0正常触发后必须清空运行态');
+    assert.equal(zeroIdHostEventRetry.hookCalls(), 2, 'timer id=0 正常触发时必须执行且只执行一次延迟 hook');
+    assert.deepEqual(zeroIdHostEventRetry.diagnostics.snapshot(), { scope: 1 }, 'timer id=0 正常触发后必须回到 app scope 基线');
+    zeroIdHostEventRetry.appScope.dispose('fixture-complete');
+
+    const teardownHostEventRetry = createHostEventRetryFixture();
+    const pagehideListeners = new Map();
+    const pagehideTarget = {
+        addEventListener(type, listener) {
+            pagehideListeners.set(type, listener);
+        },
+        removeEventListener(type, listener) {
+            if (pagehideListeners.get(type) === listener) pagehideListeners.delete(type);
+        },
+    };
+    installAppTeardown({
+        windowRef: pagehideTarget,
+        appLifecycleScope: teardownHostEventRetry.appScope,
+    });
+    installPhoneLifecycle({ ...lifecycleFixtureState }, teardownHostEventRetry.deps);
+    const phoneLifecycleScope = teardownHostEventRetry.appScope.child('phone');
+    let phoneCleanupCalls = 0;
+    phoneLifecycleScope.addCleanup(() => { phoneCleanupCalls += 1; });
+    const pagehideHandler = pagehideListeners.get('pagehide');
+    const teardownStaleCallback = teardownHostEventRetry.scheduledCallbacks.values().next().value;
+    const teardownHookCallsBeforeDispose = teardownHostEventRetry.hookCalls();
+
+    assert.equal(typeof pagehideHandler, 'function', 'main 装配 helper 必须注册 pagehide teardown 入口');
+    pagehideHandler({ persisted: true });
+    assert.equal(teardownHostEventRetry.appScope.isDisposed, false, 'BFCache pagehide 不得销毁 app scope');
+    assert.equal(phoneLifecycleScope.isDisposed, false, 'BFCache pagehide 不得级联销毁 phone scope');
+    assert.notEqual(teardownHostEventRetry.runtime.hostEventRetry, null, 'BFCache pagehide 不得清理宿主事件重试');
+
+    pagehideHandler({ persisted: false });
+    assert.equal(teardownHostEventRetry.appScope.isDisposed, true, 'terminal pagehide 必须销毁 app scope');
+    assert.equal(teardownHostEventRetry.appScope.signal.reason, 'pagehide', 'terminal pagehide 必须保留明确的销毁原因');
+    assert.equal(phoneLifecycleScope.isDisposed, true, 'terminal pagehide 必须级联销毁 phone scope');
+    assert.equal(phoneCleanupCalls, 1, 'terminal pagehide 必须且只能执行一次 phone scope cleanup');
+    assert.equal(teardownHostEventRetry.runtime.hostEventRetry, null, 'terminal pagehide 必须清空宿主事件重试运行态');
+    assert.equal(pagehideListeners.has('pagehide'), false, 'terminal pagehide 后必须移除 teardown listener');
+    for (let repeat = 0; repeat < 20; repeat += 1) pagehideHandler({ persisted: false });
+    teardownStaleCallback();
+    assert.equal(phoneCleanupCalls, 1, '重复 20 次 terminal pagehide 不得重复执行 phone scope cleanup');
+    assert.equal(teardownHostEventRetry.hookCalls(), teardownHookCallsBeforeDispose, 'teardown 后旧 timeout 回调不得再次注册宿主事件');
+    assert.deepEqual(teardownHostEventRetry.continuationCalls, [], 'teardown 后旧 timeout continuation 不得执行');
+    assert.deepEqual(teardownHostEventRetry.diagnostics.snapshot(), {}, '重复 teardown 后生命周期诊断不得残留或下溢');
+    assert.throws(
+        () => teardownHostEventRetry.appScope.timeout(() => {}, 1),
+        LifecycleScopeDisposedError,
+        'teardown 后 app scope 必须拒绝注册新任务',
+    );
+
+    const teardownCommandRetry = createCommandRetryFixture();
+    const commandPagehideListeners = new Map();
+    const commandPagehideTarget = {
+        addEventListener(type, listener) { commandPagehideListeners.set(type, listener); },
+        removeEventListener(type, listener) {
+            if (commandPagehideListeners.get(type) === listener) commandPagehideListeners.delete(type);
+        },
+    };
+    installAppTeardown({ windowRef: commandPagehideTarget, appLifecycleScope: teardownCommandRetry.appScope });
+    installPhoneLifecycle({ ...lifecycleFixtureState }, teardownCommandRetry.deps);
+    const commandStaleCallback = teardownCommandRetry.scheduledCallbacks.values().next().value;
+    const commandRegistrationsBeforeDispose = teardownCommandRetry.registrations();
+    assert.notEqual(teardownCommandRetry.runtime.phoneCommandRetry, null, 'terminal pagehide 前必须存在待释放的命令重试');
+    commandPagehideListeners.get('pagehide')({ persisted: false });
+    commandStaleCallback();
+    assert.equal(teardownCommandRetry.runtime.phoneCommandRetry, null, 'terminal pagehide 必须清空命令重试运行态');
+    assert.equal(teardownCommandRetry.callbacks.size, 0, 'terminal pagehide 必须清除命令重试 interval');
+    assert.equal(teardownCommandRetry.registrations(), commandRegistrationsBeforeDispose, 'teardown 后旧 interval callback 不得注册命令');
+    assert.deepEqual(teardownCommandRetry.diagnostics.snapshot(), {}, '命令重试 teardown 后诊断必须归零');
+
+    const completedThenTeardown = createHostEventRetryFixture();
+    const completedPagehideListeners = new Map();
+    const completedPagehideTarget = {
+        addEventListener(type, listener) { completedPagehideListeners.set(type, listener); },
+        removeEventListener(type, listener) {
+            if (completedPagehideListeners.get(type) === listener) completedPagehideListeners.delete(type);
+        },
+    };
+    installAppTeardown({ windowRef: completedPagehideTarget, appLifecycleScope: completedThenTeardown.appScope });
+    installPhoneLifecycle({ ...lifecycleFixtureState }, completedThenTeardown.deps);
+    completedThenTeardown.fire();
+    await Promise.resolve();
+    completedPagehideListeners.get('pagehide')({ persisted: false });
+    assert.deepEqual(completedThenTeardown.diagnostics.snapshot(), {}, 'timeout 正常触发后再 teardown 不得重复清理或残留资源');
 
     const lifecycleFailureState = {
         ...lifecycleFixtureState, groupMembers: [], groupExtras: [], groupColorMap: {}, conversationHistory: [],
@@ -3270,8 +3449,8 @@ try {
         '巡检 interval 启动失败时必须移除已创建的手机窗口');
     assert.equal(lifecycleFixtureDeps.runtime.visibilityTimer, null,
         '巡检 interval 启动失败时不得残留 timer 状态');
-    assert.deepEqual(lifecycleDiagnostics.snapshot(), { scope: 1 },
-        '巡检 interval 启动失败后资源诊断必须回到 app scope 基线');
+    assert.deepEqual(lifecycleDiagnostics.snapshot(), { cleanup: 1, scope: 1, timeout: 1 },
+        '巡检 interval 启动失败后必须只保留 app-scope 宿主事件重试基线');
     globalThis.setInterval = () => { lifecycleIntervalIds.push(0); return 0; };
     await window.__pmOpen();
     assert.deepEqual(lifecycleIntervalIds, [0], '成功打开必须且只能启动一个可见性巡检定时器');
@@ -3281,15 +3460,15 @@ try {
     window.__pmEnd(true);
     assert.deepEqual(lifecycleClearedIds, [0], '关闭手机必须清理 timer id 为 0 的可见性巡检');
     assert.equal(lifecycleFixtureDeps.runtime.visibilityTimer, null, '关闭手机后可见性巡检状态必须恢复为空');
-    assert.deepEqual(lifecycleDiagnostics.snapshot(), { scope: 1 }, '关闭手机后必须只保留 app scope 基线');
+    assert.deepEqual(lifecycleDiagnostics.snapshot(), { cleanup: 1, scope: 1, timeout: 1 }, '关闭手机后必须只保留 app-scope 宿主事件重试基线');
     for (let cycle = 0; cycle < 20; cycle += 1) {
         lifecyclePhone.removed = false;
         await window.__pmOpen();
-        assert.deepEqual(lifecycleDiagnostics.snapshot(), { 'child-scope': 1, interval: 1, scope: 2 },
-            `第 ${cycle + 1} 次打开后必须只有一个 phone scope 和一个巡检 interval`);
+        assert.deepEqual(lifecycleDiagnostics.snapshot(), { 'child-scope': 1, cleanup: 1, interval: 1, scope: 2, timeout: 1 },
+            `第 ${cycle + 1} 次打开后必须只有一个 app timeout、一个 phone scope 和一个巡检 interval`);
         window.__pmEnd(true);
-        assert.deepEqual(lifecycleDiagnostics.snapshot(), { scope: 1 },
-            `第 ${cycle + 1} 次关闭后资源诊断必须回到 app scope 基线`);
+        assert.deepEqual(lifecycleDiagnostics.snapshot(), { cleanup: 1, scope: 1, timeout: 1 },
+            `第 ${cycle + 1} 次关闭后资源诊断必须回到 app-scope 宿主事件重试基线`);
     }
     assert.equal(lifecycleIntervalIds.length, 21, '20 次重新打开必须每次且只创建一个巡检 interval');
     assert.equal(lifecycleClearedIds.length, 21, '20 次重新关闭必须每次且只释放一个巡检 interval');

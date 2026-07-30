@@ -23,7 +23,14 @@ import { createRuntimeState } from './runtime.js';
 import { installSettingsUi } from './settings-ui.js';
 import { saveBudgetConfig, saveEmojis } from './storage.js';
 
-(async function bootstrapPhoneMode() {
+export function installAppTeardown({ windowRef, appLifecycleScope }) {
+    return appLifecycleScope.listen(windowRef, 'pagehide', event => {
+        if (event.persisted === true) return;
+        appLifecycleScope.dispose('pagehide');
+    });
+}
+
+export async function bootstrapPhoneMode() {
     await new Promise(resolve => setTimeout(resolve, 1000));
 
     const runtime = createRuntimeState();
@@ -64,6 +71,7 @@ import { saveBudgetConfig, saveEmojis } from './storage.js';
         runtime, getCtx, getStorageId, getUserPersona, gatherContext, saveBudgetConfig,
         lifecycleDiagnostics, appLifecycleScope,
     };
+    installAppTeardown({ windowRef: window, appLifecycleScope });
     deps.callAI = createAiClient({
         getConfig: () => window.__pmConfig,
         getContext: getCtx,
@@ -91,4 +99,8 @@ import { saveBudgetConfig, saveEmojis } from './storage.js';
     ensureInitialPhoneQuickReplyWithRetry().catch(error => {
         console.warn('[phone-mode] 首次创建手机入口失败，有限重试已结束', error);
     });
-})();
+}
+
+if (typeof window !== 'undefined' && typeof document !== 'undefined') {
+    bootstrapPhoneMode();
+}

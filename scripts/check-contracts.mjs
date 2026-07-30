@@ -1089,11 +1089,22 @@ for (const [label, , result] of analyzedFiles) {
 
 const mainFile = sourceModuleByName.get('main.js');
 if (mainFile) {
+  const mainInspection = inspectModule(mainFile.code);
+  for (const expectedExport of ['installAppTeardown', 'bootstrapPhoneMode']) {
+    if (!mainInspection.exports.has(expectedExport)) failures.push(`main.js: missing exported ${expectedExport}`);
+  }
+  requireText('main.js', mainFile.code, 'await new Promise(resolve => setTimeout(resolve, 1000));');
+  requireText(
+    'main.js',
+    mainFile.code,
+    "if (typeof window !== 'undefined' && typeof document !== 'undefined') {\n    bootstrapPhoneMode();\n}",
+  );
   const assignments = analyze(mainFile.code, 'module').windowAssignments;
   for (const entry of assignments) {
     if (entry.startsWith('__pm')) failures.push(`main.js: composition root must not define window.${entry}`);
   }
   const expectedInstallerCalls = [
+    'installAppTeardown({ windowRef: window, appLifecycleScope })',
     'installPhoneFoundation(state, deps)', 'installConversation(state, deps)',
     'installInteractiveScenes(state, deps)', 'installCalendar(state, deps)', 'installSettingsUi(deps)',
     'installPhoneChat(state, deps)', 'installPhoneContextInjection(state, deps)', 'installPhoneControlCenter(state, deps)', 'installPhoneDirectory(state, deps)',
@@ -1110,7 +1121,7 @@ if (mainFile) {
   installerOrder.sort((a, b) => a.start - b.start);
   const actualOrder = installerOrder.map(item => item.name);
   const expectedOrder = [
-    'installPhoneFoundation', 'installConversation', 'installEmojiUi', 'installInteractiveScenes', 'installCalendar',
+    'installAppTeardown', 'installPhoneFoundation', 'installConversation', 'installEmojiUi', 'installInteractiveScenes', 'installCalendar',
     'installSettingsUi', 'installPhoneChat', 'installPhoneContextInjection', 'installPhoneControlCenter', 'installPhoneDirectory', 'installContactGenerator',
     'installPhoneChatPoke', 'installPhoneLifecycle', 'installDiagnosticApi',
   ];
@@ -1221,21 +1232,110 @@ const isDirectCall = (statement, name) => statement?.type === 'ExpressionStateme
   && statement.expression.callee?.type === 'Identifier'
   && statement.expression.callee.name === name;
 const directHostHookIndex = lifecycleInstallStatements.findIndex(statement => isDirectCall(statement, 'hookGenerationEvent'));
-const initialGroupMetaIndex = lifecycleInstallStatements.findIndex(statement => statement.type === 'VariableDeclaration'
-  && statement.declarations.some(declaration => declaration.id?.type === 'Identifier'
-    && declaration.id.name === 'initialGroupMetaLoad'));
-if (directHostHookIndex < 0 || initialGroupMetaIndex < 0 || directHostHookIndex > initialGroupMetaIndex) {
+const isRuntimeHostEventRetry = node => node?.type === 'MemberExpression'
+  && node.object?.type === 'Identifier' && node.object.name === 'runtime'
+  && memberName(node) === 'hostEventRetry';
+const hostEventRetryGuardIndex = lifecycleInstallStatements.findIndex(statement => statement.type === 'IfStatement'
+  && statement.test?.type === 'UnaryExpression' && statement.test.operator === '!'
+  && isRuntimeHostEventRetry(statement.test.argument));
+if (directHostHookIndex < 0 || hostEventRetryGuardIndex < 0 || directHostHookIndex > hostEventRetryGuardIndex) {
   failures.push('phone-lifecycle.js: host events must be hooked before initial local metadata recovery starts');
 }
-const delayedRetryStatement = lifecycleInstallStatements.find(statement => statement.type === 'ExpressionStatement'
-  && statement.expression?.type === 'CallExpression'
-  && statement.expression.callee?.type === 'Identifier'
-  && statement.expression.callee.name === 'setTimeout');
-const delayedRetryCallback = delayedRetryStatement?.expression?.arguments?.[0];
+const hostEventRetryGuard = lifecycleInstallStatements[hostEventRetryGuardIndex];
+const hostEventRetryStatements = hostEventRetryGuard?.consequent?.type === 'BlockStatement'
+  ? hostEventRetryGuard.consequent.body : [];
+const findVariable = name => hostEventRetryStatements.flatMap(statement => statement.type === 'VariableDeclaration'
+  ? statement.declarations : []).find(declaration => declaration.id?.type === 'Identifier' && declaration.id.name === name);
+const initialGroupMetaDeclaration = findVariable('initialGroupMetaLoad');
+const timeoutDeclaration = findVariable('timeout');
+const releaseStateDeclaration = findVariable('releaseState');
+const isIdentifier = (node, name) => node?.type === 'Identifier' && node.name === name;
+const unwrapChain = node => node?.type === 'ChainExpression' ? node.expression : node;
+const isMember = (node, objectName, propertyName) => node?.type === 'MemberExpression'
+  && isIdentifier(node.object, objectName) && memberName(node) === propertyName;
+const isCall = (node, calleeName) => node?.type === 'CallExpression' && isIdentifier(node.callee, calleeName);
+const isTimeoutId = node => isMember(node, 'timeout', 'id');
+const isOwnerId = node => unwrapChain(node)?.type === 'MemberExpression'
+  && isRuntimeHostEventRetry(unwrapChain(node).object) && memberName(unwrapChain(node)) === 'id';
+const isOwnerIdentityTest = node => node?.type === 'BinaryExpression' && node.operator === '==='
+  && ((isOwnerId(node.left) && isTimeoutId(node.right))
+    || (isTimeoutId(node.left) && isOwnerId(node.right)));
+const getConsequentExpression = statement => statement?.consequent?.type === 'ExpressionStatement'
+  ? statement.consequent.expression : null;
+const isOwnerClearIf = statement => {
+  const assignment = getConsequentExpression(statement);
+  return statement?.type === 'IfStatement'
+    && isOwnerIdentityTest(statement.test)
+    && assignment?.type === 'AssignmentExpression'
+    && isRuntimeHostEventRetry(assignment.left)
+    && assignment.right?.type === 'Literal'
+    && assignment.right.value === null;
+};
+const delayedRetryCall = timeoutDeclaration?.init;
+if (!initialGroupMetaDeclaration || !delayedRetryCall || delayedRetryCall.type !== 'CallExpression'
+    || delayedRetryCall.callee?.type !== 'MemberExpression'
+    || delayedRetryCall.callee.object?.type !== 'Identifier'
+    || delayedRetryCall.callee.object.name !== 'appLifecycleScope'
+    || memberName(delayedRetryCall.callee) !== 'timeout'
+    || delayedRetryCall.arguments?.[1]?.value !== 1500) {
+  failures.push('phone-lifecycle.js: guarded host-event retry must own one 1500ms appLifecycleScope.timeout');
+}
+const metadataInit = initialGroupMetaDeclaration?.init;
+if (!metadataInit || metadataInit.type !== 'CallExpression'
+    || metadataInit.callee?.type !== 'LogicalExpression' || metadataInit.callee.operator !== '||'
+    || !isMember(metadataInit.callee.left, 'deps', 'loadGroupMeta')
+    || !isIdentifier(metadataInit.callee.right, 'loadGroupMeta')) {
+  failures.push('phone-lifecycle.js: host-event retry metadata load must be created inside its owner guard');
+}
+if (!releaseStateDeclaration?.init || releaseStateDeclaration.init.type !== 'CallExpression'
+    || releaseStateDeclaration.init.callee?.type !== 'MemberExpression'
+    || releaseStateDeclaration.init.callee.object?.name !== 'appLifecycleScope'
+    || memberName(releaseStateDeclaration.init.callee) !== 'addCleanup') {
+  failures.push('phone-lifecycle.js: host-event retry runtime state must have app-scope cleanup ownership');
+}
+const releaseCallback = releaseStateDeclaration?.init?.arguments?.[0];
+const releaseStatements = releaseCallback?.type === 'ArrowFunctionExpression'
+  && releaseCallback.body?.type === 'BlockStatement' ? releaseCallback.body.body : [];
+if (!releaseStatements.some(isOwnerClearIf)) {
+  failures.push('phone-lifecycle.js: host-event retry cleanup must clear only its own runtime handle');
+}
+const hostEventRetryAssignment = hostEventRetryStatements
+  .filter(statement => statement.type === 'ExpressionStatement')
+  .map(statement => statement.expression)
+  .find(expression => expression?.type === 'AssignmentExpression'
+    && isRuntimeHostEventRetry(expression.left));
+const ownerFreezeCall = hostEventRetryAssignment?.right;
+const ownerObject = ownerFreezeCall?.type === 'CallExpression'
+  && isMember(ownerFreezeCall.callee, 'Object', 'freeze') ? ownerFreezeCall.arguments?.[0] : null;
+const ownerProperties = ownerObject?.type === 'ObjectExpression' ? ownerObject.properties : [];
+const ownerIdProperty = ownerProperties.find(property => propertyName(property) === 'id');
+const ownerCancelProperty = ownerProperties.find(property => propertyName(property) === 'cancel');
+if (!hostEventRetryAssignment || !isTimeoutId(ownerIdProperty?.value)) {
+  failures.push('phone-lifecycle.js: host-event timeout handle must store timeout.id in runtime.hostEventRetry');
+}
+const cancelFunction = ownerCancelProperty?.value;
+const cancelStatements = cancelFunction?.type === 'ArrowFunctionExpression'
+  && cancelFunction.body?.type === 'BlockStatement' ? cancelFunction.body.body : [];
+const cancelReleaseIndex = cancelStatements.findIndex(statement => statement.type === 'ExpressionStatement'
+  && isCall(statement.expression, 'releaseState'));
+const cancelTimeoutIndex = cancelStatements.findIndex(statement => statement.type === 'ReturnStatement'
+  && statement.argument?.type === 'CallExpression' && isMember(statement.argument.callee, 'timeout', 'cancel'));
+if (cancelReleaseIndex < 0 || cancelTimeoutIndex < 0 || cancelReleaseIndex > cancelTimeoutIndex) {
+  failures.push('phone-lifecycle.js: host-event retry cancel must release owner state before cancelling timeout');
+}
+if (!delayedRetryCall) failures.push('phone-lifecycle.js: 1500ms host-event retry must be owned by appLifecycleScope.timeout');
+const delayedRetryCallback = delayedRetryCall?.arguments?.[0];
 const delayedRetryStatements = delayedRetryCallback?.type === 'ArrowFunctionExpression'
   && delayedRetryCallback.body?.type === 'BlockStatement'
   ? delayedRetryCallback.body.body : [];
+const delayedOwnerClearIndex = delayedRetryStatements.findIndex(isOwnerClearIf);
+const delayedReleaseIndex = delayedRetryStatements.findIndex(statement => statement.type === 'ExpressionStatement'
+  && isCall(statement.expression, 'releaseState'));
 const delayedDirectHookIndex = delayedRetryStatements.findIndex(statement => isDirectCall(statement, 'hookGenerationEvent'));
+if (delayedOwnerClearIndex < 0 || delayedReleaseIndex < 0 || delayedDirectHookIndex < 0
+    || delayedOwnerClearIndex > delayedReleaseIndex || delayedReleaseIndex > delayedDirectHookIndex) {
+  failures.push('phone-lifecycle.js: delayed retry must clear owner and release cleanup before hooking host events');
+}
 const delayedMetadataIndex = delayedRetryStatements.findIndex(statement => {
   let hasMetadataThen = false;
   walk(statement, node => {

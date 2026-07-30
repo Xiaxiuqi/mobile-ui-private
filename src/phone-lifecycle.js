@@ -571,16 +571,31 @@ export function installPhoneLifecycle(state, deps) {
     try { window.__pmHistories = window.__pmHistories || {}; } catch (e) {}
     loadBidirectional(); loadInjectionConfig(); loadPokeConfig(); loadCharacterBehavior(); loadWordyLimit();
     loadBudgetConfig(); loadWorldBookConfig();
-    const initialGroupMetaLoad = (deps.loadGroupMeta || loadGroupMeta)();
     loadHistoriesOnce(); // 首次打开复用同一个恢复任务，避免并发读取用旧快照覆盖内存
     // 宿主事件重试不能依赖本地数据恢复成功；否则 IDB 故障会永久漏掉 CHAT_CHANGED。
-    setTimeout(() => {
-        hookGenerationEvent();
-        initialGroupMetaLoad.then(() => {
-            migrateOldHistory();
-            applyBidirectionalInjection();
-        }).catch(() => {});
-    }, 1500);
+    if (!runtime.hostEventRetry) {
+        if (!appLifecycleScope) throw new Error('Host event retry requires an app lifecycle scope');
+        const initialGroupMetaLoad = (deps.loadGroupMeta || loadGroupMeta)();
+        const timeout = appLifecycleScope.timeout(() => {
+            if (runtime.hostEventRetry?.id === timeout.id) runtime.hostEventRetry = null;
+            releaseState();
+            hookGenerationEvent();
+            initialGroupMetaLoad.then(() => {
+                migrateOldHistory();
+                applyBidirectionalInjection();
+            }).catch(() => {});
+        }, 1500);
+        const releaseState = appLifecycleScope.addCleanup(() => {
+            if (runtime.hostEventRetry?.id === timeout.id) runtime.hostEventRetry = null;
+        });
+        runtime.hostEventRetry = Object.freeze({
+            id: timeout.id,
+            cancel: () => {
+                releaseState();
+                return timeout.cancel();
+            },
+        });
+    }
 
     console.log('[phone-mode] v9.5.7 已加载：世界书预算改为读取ST实际上下文窗口大小');
 }

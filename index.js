@@ -11449,6 +11449,7 @@ ${lines}
       lastChatLength: 0,
       historyLoadPromise: null,
       phoneCommandRetry: null,
+      hostEventRetry: null,
       visibilityTimer: null,
       autoPokeArmed: false,
       automaticEpoch: 0,
@@ -16792,16 +16793,31 @@ ${lines}`;
     loadWordyLimit();
     loadBudgetConfig();
     loadWorldBookConfig();
-    const initialGroupMetaLoad = (deps.loadGroupMeta || loadGroupMeta)();
     loadHistoriesOnce();
-    setTimeout(() => {
-      hookGenerationEvent();
-      initialGroupMetaLoad.then(() => {
-        migrateOldHistory();
-        applyBidirectionalInjection();
-      }).catch(() => {
+    if (!runtime.hostEventRetry) {
+      if (!appLifecycleScope) throw new Error("Host event retry requires an app lifecycle scope");
+      const initialGroupMetaLoad = (deps.loadGroupMeta || loadGroupMeta)();
+      const timeout = appLifecycleScope.timeout(() => {
+        if (runtime.hostEventRetry?.id === timeout.id) runtime.hostEventRetry = null;
+        releaseState();
+        hookGenerationEvent();
+        initialGroupMetaLoad.then(() => {
+          migrateOldHistory();
+          applyBidirectionalInjection();
+        }).catch(() => {
+        });
+      }, 1500);
+      const releaseState = appLifecycleScope.addCleanup(() => {
+        if (runtime.hostEventRetry?.id === timeout.id) runtime.hostEventRetry = null;
       });
-    }, 1500);
+      runtime.hostEventRetry = Object.freeze({
+        id: timeout.id,
+        cancel: () => {
+          releaseState();
+          return timeout.cancel();
+        }
+      });
+    }
     console.log("[phone-mode] v9.5.7 \u5DF2\u52A0\u8F7D\uFF1A\u4E16\u754C\u4E66\u9884\u7B97\u6539\u4E3A\u8BFB\u53D6ST\u5B9E\u9645\u4E0A\u4E0B\u6587\u7A97\u53E3\u5927\u5C0F");
   }
 
@@ -19265,7 +19281,13 @@ ${error.message}`);
   }
 
   // src/main.js
-  (async function bootstrapPhoneMode() {
+  function installAppTeardown({ windowRef, appLifecycleScope }) {
+    return appLifecycleScope.listen(windowRef, "pagehide", (event) => {
+      if (event.persisted === true) return;
+      appLifecycleScope.dispose("pagehide");
+    });
+  }
+  async function bootstrapPhoneMode() {
     await new Promise((resolve) => setTimeout(resolve, 1e3));
     const runtime = createRuntimeState();
     const lifecycleDiagnostics = createLifecycleDiagnostics();
@@ -19310,6 +19332,7 @@ ${error.message}`);
       lifecycleDiagnostics,
       appLifecycleScope
     };
+    installAppTeardown({ windowRef: window, appLifecycleScope });
     deps.callAI = createAiClient({
       getConfig: () => window.__pmConfig,
       getContext: getCtx
@@ -19336,5 +19359,8 @@ ${error.message}`);
     ensureInitialPhoneQuickReplyWithRetry().catch((error) => {
       console.warn("[phone-mode] \u9996\u6B21\u521B\u5EFA\u624B\u673A\u5165\u53E3\u5931\u8D25\uFF0C\u6709\u9650\u91CD\u8BD5\u5DF2\u7ED3\u675F", error);
     });
-  })();
+  }
+  if (typeof window !== "undefined" && typeof document !== "undefined") {
+    bootstrapPhoneMode();
+  }
 })();

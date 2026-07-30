@@ -10,6 +10,7 @@ export function createRuntimeState() {
         lastChatLength: 0,
         historyLoadPromise: null,
         phoneCommandRetry: null,
+        hostEventRetry: null,
         visibilityTimer: null,
         autoPokeArmed: false,
         automaticEpoch: 0,
