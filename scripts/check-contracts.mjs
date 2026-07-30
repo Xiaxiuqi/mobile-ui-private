@@ -1211,8 +1211,16 @@ for (const expected of [
   'runtime.visibilityTimer = phoneLifecycleScope.interval(ensureVisibility, 2000).id',
   "phoneLifecycleScope?.dispose('visibility-timer-start-failed')",
   'try { window.__pmEnd(true); }',
+  'if (!runtime.documentCaptureListeners)',
+  "appLifecycleScope.listen(document, 'keydown', handleKeydown, true)",
+  "appLifecycleScope.listen(document, 'click', handleClick, true)",
+  'runtime.documentCaptureListeners = owner',
+  'if (runtime.documentCaptureListeners === owner) runtime.documentCaptureListeners = null',
 ]) requireText('phone-lifecycle.js', sourceModuleByName.get('phone-lifecycle.js')?.code || '', expected);
 const lifecycleTimerCode = sourceModuleByName.get('phone-lifecycle.js')?.code || '';
+for (const forbidden of ["document.addEventListener('keydown'", "document.addEventListener('click'"]) {
+  if (lifecycleTimerCode.includes(forbidden)) failures.push(`phone-lifecycle.js: document capture listener must be owned by appLifecycleScope.listen: ${forbidden}`);
+}
 const visibilityTimerStart = lifecycleTimerCode.indexOf('runtime.visibilityTimer = phoneLifecycleScope.interval(ensureVisibility, 2000).id');
 const phoneOpenStart = lifecycleTimerCode.indexOf('window.__pmOpen = async () => {');
 const phoneActiveStart = lifecycleTimerCode.indexOf('state.phoneActive = true;', phoneOpenStart);

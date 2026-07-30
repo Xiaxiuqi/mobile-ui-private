@@ -554,17 +554,55 @@ export function installPhoneLifecycle(state, deps) {
         });
     }
 
-    document.addEventListener('keydown', e => {
-        if (e.key !== 'Enter' || e.shiftKey) return;
-        const ta = document.getElementById('send_textarea');
-        if (!ta || document.activeElement !== ta) return;
-        if (ta.value.trim() === '/phone') { e.preventDefault(); e.stopImmediatePropagation(); ta.value = ''; window.__pmOpen(); }
-    }, true);
-    document.addEventListener('click', e => {
-        const btn = e.target.closest?.('#send_but'); if (!btn) return;
-        const ta = document.getElementById('send_textarea'); if (!ta) return;
-        if (ta.value.trim() === '/phone') { e.preventDefault(); e.stopImmediatePropagation(); ta.value = ''; window.__pmOpen(); }
-    }, true);
+    if (!runtime.documentCaptureListeners) {
+        if (!appLifecycleScope) throw new Error('Document capture listeners require an app lifecycle scope');
+        const handleKeydown = event => {
+            if (event.key !== 'Enter' || event.shiftKey) return;
+            const textarea = document.getElementById('send_textarea');
+            if (!textarea || document.activeElement !== textarea) return;
+            if (textarea.value.trim() !== '/phone') return;
+            event.preventDefault();
+            event.stopImmediatePropagation();
+            textarea.value = '';
+            window.__pmOpen();
+        };
+        const handleClick = event => {
+            const button = event.target.closest?.('#send_but');
+            if (!button) return;
+            const textarea = document.getElementById('send_textarea');
+            if (!textarea || textarea.value.trim() !== '/phone') return;
+            event.preventDefault();
+            event.stopImmediatePropagation();
+            textarea.value = '';
+            window.__pmOpen();
+        };
+        let releaseKeydown = null;
+        let releaseClick = null;
+        let releaseState = null;
+        let owner = null;
+        try {
+            releaseKeydown = appLifecycleScope.listen(document, 'keydown', handleKeydown, true);
+            releaseClick = appLifecycleScope.listen(document, 'click', handleClick, true);
+            releaseState = appLifecycleScope.addCleanup(() => {
+                if (runtime.documentCaptureListeners === owner) runtime.documentCaptureListeners = null;
+            });
+            owner = Object.freeze({
+                cancel: () => {
+                    if (runtime.documentCaptureListeners === owner) runtime.documentCaptureListeners = null;
+                    const stateReleased = releaseState();
+                    const clickReleased = releaseClick();
+                    const keydownReleased = releaseKeydown();
+                    return stateReleased || clickReleased || keydownReleased;
+                },
+            });
+            runtime.documentCaptureListeners = owner;
+        } catch (error) {
+            releaseState?.();
+            releaseClick?.();
+            releaseKeydown?.();
+            throw error;
+        }
+    }
 
     // 宿主分支在切换聊天后立即发出 CHAT_CHANGED；事件监听不能被本地存储恢复阻塞。
     hookGenerationEvent();

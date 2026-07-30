@@ -11,6 +11,7 @@ export function createRuntimeState() {
         historyLoadPromise: null,
         phoneCommandRetry: null,
         hostEventRetry: null,
+        documentCaptureListeners: null,
         visibilityTimer: null,
         autoPokeArmed: false,
         automaticEpoch: 0,
