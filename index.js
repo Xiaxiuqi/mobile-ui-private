@@ -15786,7 +15786,8 @@ ${lines}`;
       const isGroup = Object.hasOwn(window.__pmGroupMeta?.[id2] || {}, targetKey);
       return window.__pmToggleConversationInjection?.(id2, targetKey, isGroup) || Promise.resolve(false);
     };
-    function bindPhoneResize(el, handle) {
+    function bindPhoneResize(el, handle, lifecycleScope) {
+      if (!lifecycleScope) throw new Error("Phone resize requires a phone lifecycle scope");
       let resizing = false;
       let pointerId = null;
       let startX = 0;
@@ -15835,25 +15836,33 @@ ${lines}`;
         handle.setPointerCapture?.(pointerId);
         if (event.cancelable) event.preventDefault();
       };
-      handle.addEventListener("pointerdown", onPointerDown);
-      handle.addEventListener("lostpointercapture", finish);
-      window.addEventListener("pointermove", onPointerMove, { passive: false });
-      window.addEventListener("pointerup", finish);
-      window.addEventListener("pointercancel", finish);
-      window.addEventListener("blur", finish);
-      window.addEventListener("resize", onViewportResize);
-      visualViewport?.addEventListener("resize", onViewportResize);
-      applyPhoneScale(el);
+      const releases = [];
+      try {
+        releases.push(lifecycleScope.listen(handle, "pointerdown", onPointerDown));
+        releases.push(lifecycleScope.listen(handle, "lostpointercapture", finish));
+        releases.push(lifecycleScope.listen(window, "pointermove", onPointerMove, { passive: false }));
+        releases.push(lifecycleScope.listen(window, "pointerup", finish));
+        releases.push(lifecycleScope.listen(window, "pointercancel", finish));
+        releases.push(lifecycleScope.listen(window, "blur", finish));
+        releases.push(lifecycleScope.listen(window, "resize", onViewportResize));
+        if (visualViewport) releases.push(lifecycleScope.listen(visualViewport, "resize", onViewportResize));
+        releases.push(lifecycleScope.addCleanup(() => finish()));
+        applyPhoneScale(el);
+      } catch (error) {
+        for (const release of releases.reverse()) {
+          try {
+            release();
+          } catch (cleanupError) {
+            console.error("[phone-mode] \u624B\u673A\u5C3A\u5BF8\u76D1\u542C\u5668\u5B89\u88C5\u5931\u8D25\u540E\u7684\u6E05\u7406\u5931\u8D25", cleanupError);
+          }
+        }
+        throw error;
+      }
       return () => {
         finish();
-        handle.removeEventListener("pointerdown", onPointerDown);
-        handle.removeEventListener("lostpointercapture", finish);
-        window.removeEventListener("pointermove", onPointerMove);
-        window.removeEventListener("pointerup", finish);
-        window.removeEventListener("pointercancel", finish);
-        window.removeEventListener("blur", finish);
-        window.removeEventListener("resize", onViewportResize);
-        visualViewport?.removeEventListener("resize", onViewportResize);
+        let released = false;
+        for (const release of releases.reverse()) released = release() || released;
+        return released;
       };
     }
     function applyBubbleMetadata(node, metadata) {
@@ -16646,7 +16655,28 @@ ${lines}`;
         }
       });
       unbindIsland = bindIsland2(state.phoneWindow, state.phoneWindow.querySelector(".pm-island"));
-      unbindPhoneResize = bindPhoneResize(state.phoneWindow, state.phoneWindow.querySelector(".pm-phone-resize-handle"));
+      try {
+        if (!appLifecycleScope) throw new Error("Phone lifecycle requires an app lifecycle scope");
+        phoneLifecycleScope = appLifecycleScope.child("phone");
+        unbindPhoneResize = bindPhoneResize(
+          state.phoneWindow,
+          state.phoneWindow.querySelector(".pm-phone-resize-handle"),
+          phoneLifecycleScope
+        );
+      } catch (error) {
+        try {
+          phoneLifecycleScope?.dispose("phone-resize-start-failed");
+        } catch (cleanupError) {
+          console.error("[phone-mode] \u624B\u673A\u5C3A\u5BF8\u76D1\u542C\u5668\u542F\u52A8\u5931\u8D25\u540E\u7684\u8D44\u6E90\u6E05\u7406\u5931\u8D25", cleanupError);
+        }
+        phoneLifecycleScope = null;
+        try {
+          window.__pmEnd(true);
+        } catch (cleanupError) {
+          console.error("[phone-mode] \u624B\u673A\u6253\u5F00\u5931\u8D25\u540E\u7684\u56DE\u6EDA\u5931\u8D25", cleanupError);
+        }
+        throw error;
+      }
       applyTheme();
       applyBackground();
       state.isGroupChat = false;
@@ -16685,8 +16715,7 @@ ${lines}`;
       }
       if (runtime.visibilityTimer === null && state.phoneActive && state.phoneWindow) {
         try {
-          if (!appLifecycleScope) throw new Error("Phone lifecycle requires an app lifecycle scope");
-          phoneLifecycleScope = appLifecycleScope.child("phone");
+          if (!phoneLifecycleScope) throw new Error("Phone lifecycle scope is unavailable");
           runtime.visibilityTimer = phoneLifecycleScope.interval(ensureVisibility, 2e3).id;
         } catch (error) {
           try {

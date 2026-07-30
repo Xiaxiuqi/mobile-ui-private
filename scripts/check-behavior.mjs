@@ -1418,6 +1418,8 @@ assert.equal(JSON.parse(localValues.get('ST_SMS_API_PROFILES'))[0].apiUrl, 'http
 const makeClassList = initial => {
     const values = new Set(initial);
     return {
+        add: (...items) => items.forEach(item => values.add(item)),
+        remove: (...items) => items.forEach(item => values.delete(item)),
         contains: value => values.has(value),
         toggle: (value, force) => { if (force) values.add(value); else values.delete(value); return !!force; },
     };
@@ -2889,6 +2891,8 @@ window.__pmEnd = realEndPhone;
 
 const resizeWindowListeners = new Map();
 const visualViewportListeners = new Map();
+const resizeDiagnostics = createLifecycleDiagnostics();
+const resizeScope = createLifecycleScope({ label: 'phone-resize', diagnostics: resizeDiagnostics });
 window.addEventListener = (type, listener) => resizeWindowListeners.set(type, listener);
 window.removeEventListener = (type, listener) => {
     if (resizeWindowListeners.get(type) === listener) resizeWindowListeners.delete(type);
@@ -2904,13 +2908,18 @@ window.visualViewport = {
 };
 window.__pmTheme.phoneScale = 1;
 const resizeHandleListeners = new Map();
+const releasedResizePointers = [];
 const resizeHandle = {
     addEventListener(type, listener) { resizeHandleListeners.set(type, listener); },
     removeEventListener(type, listener) {
         if (resizeHandleListeners.get(type) === listener) resizeHandleListeners.delete(type);
     },
+    setPointerCapture() {},
+    releasePointerCapture(pointerId) { releasedResizePointers.push(pointerId); },
 };
-const unbindPhoneResizeFixture = foundationDeps.bindPhoneResize(foundationPhone, resizeHandle);
+const unbindPhoneResizeFixture = foundationDeps.bindPhoneResize(foundationPhone, resizeHandle, resizeScope);
+assert.deepEqual(resizeDiagnostics.snapshot(), { cleanup: 1, listener: 8, scope: 1 },
+    'resize 绑定必须由 phone scope 持有全部 pointer、window resize 与 VisualViewport listeners');
 const widthBeforeKeyboard = foundationPhoneStyleValues.get('--pm-phone-width');
 window.visualViewport.height = 400;
 visualViewportListeners.get('resize')();
@@ -2919,6 +2928,62 @@ assert.equal(foundationPhoneStyleValues.get('--pm-phone-height'), '328px', 'Visu
 unbindPhoneResizeFixture();
 assert.equal(resizeWindowListeners.has('resize'), false, '解绑必须移除 window resize 监听器');
 assert.equal(visualViewportListeners.has('resize'), false, '解绑必须移除 VisualViewport resize 监听器');
+assert.deepEqual(resizeDiagnostics.snapshot(), { scope: 1 }, '主动解绑后 resize listeners 必须全部释放');
+resizeScope.dispose('fixture-complete');
+
+const activeResizeDiagnostics = createLifecycleDiagnostics();
+const activeResizeScope = createLifecycleScope({ label: 'phone-resize-active', diagnostics: activeResizeDiagnostics });
+foundationDeps.bindPhoneResize(foundationPhone, resizeHandle, activeResizeScope);
+foundationState.isMinimized = false;
+resizeHandleListeners.get('pointerdown')({
+    button: 0, pointerId: 17, clientX: 10, clientY: 20, cancelable: true, preventDefault() {},
+});
+assert.equal(foundationPhone.classList.contains('is-resizing'), true, 'pointerdown 必须保持原有拖动开始语义');
+activeResizeScope.dispose('phone-closed');
+assert.equal(foundationPhone.classList.contains('is-resizing'), false, 'phone scope dispose 必须结束活动中的 resize');
+assert.deepEqual(releasedResizePointers, [17], 'phone scope dispose 必须释放活动 pointer capture');
+assert.equal(resizeWindowListeners.size, 0, 'phone scope dispose 必须移除全部 window resize listeners');
+assert.equal(visualViewportListeners.size, 0, 'phone scope dispose 必须移除 VisualViewport listener');
+assert.deepEqual(activeResizeDiagnostics.snapshot(), {}, 'phone scope dispose 后 resize 资源必须归零');
+
+for (let cycle = 0; cycle < 20; cycle += 1) {
+    const cycleDiagnostics = createLifecycleDiagnostics();
+    const cycleScope = createLifecycleScope({ label: `phone-resize-cycle-${cycle + 1}`, diagnostics: cycleDiagnostics });
+    foundationDeps.bindPhoneResize(foundationPhone, resizeHandle, cycleScope);
+    assert.deepEqual(cycleDiagnostics.snapshot(), { cleanup: 1, listener: 8, scope: 1 },
+        `第 ${cycle + 1} 次 resize 绑定资源不得增长`);
+    cycleScope.dispose(`cycle-${cycle + 1}-closed`);
+    assert.deepEqual(cycleDiagnostics.snapshot(), {}, `第 ${cycle + 1} 次关闭后 resize 资源必须归零`);
+    assert.equal(resizeHandleListeners.size, 0, `第 ${cycle + 1} 次关闭后 handle listeners 必须清空`);
+    assert.equal(resizeWindowListeners.size, 0, `第 ${cycle + 1} 次关闭后 window listeners 必须清空`);
+    assert.equal(visualViewportListeners.size, 0, `第 ${cycle + 1} 次关闭后 VisualViewport listener 必须清空`);
+}
+
+const failedResizeDiagnostics = createLifecycleDiagnostics();
+const failedResizeScope = createLifecycleScope({ label: 'phone-resize-failure', diagnostics: failedResizeDiagnostics });
+let failedResizeListenCalls = 0;
+const injectedResizeFailureScope = {
+    ...failedResizeScope,
+    listen(...args) {
+        failedResizeListenCalls += 1;
+        if (failedResizeListenCalls === 4) throw new Error('injected-resize-listener-failure');
+        return failedResizeScope.listen(...args);
+    },
+};
+assert.throws(
+    () => foundationDeps.bindPhoneResize(foundationPhone, resizeHandle, injectedResizeFailureScope),
+    /injected-resize-listener-failure/,
+    'resize listener 半安装失败必须向上传递',
+);
+assert.equal(resizeHandleListeners.size, 0, 'resize 半安装失败必须撤销 handle listeners');
+assert.equal(resizeWindowListeners.size, 0, 'resize 半安装失败必须撤销 window listeners');
+assert.equal(visualViewportListeners.size, 0, 'resize 半安装失败不得留下 VisualViewport listener');
+assert.deepEqual(failedResizeDiagnostics.snapshot(), { scope: 1 }, 'resize 半安装失败后必须回到 scope 基线');
+foundationDeps.bindPhoneResize(foundationPhone, resizeHandle, failedResizeScope);
+assert.deepEqual(failedResizeDiagnostics.snapshot(), { cleanup: 1, listener: 8, scope: 1 },
+    'resize 半安装失败后必须允许恢复重装');
+failedResizeScope.dispose('failure-recovery-complete');
+assert.deepEqual(failedResizeDiagnostics.snapshot(), {}, 'resize 恢复重装后 dispose 不得残留资源');
 delete window.visualViewport;
 delete window.innerWidth;
 delete window.innerHeight;
@@ -3096,6 +3161,8 @@ const lifecycleIntervalIds = [];
 const lifecycleClearedIds = [];
 const lifecycleTimeoutCallbacks = [];
 const lifecyclePhoneListeners = new Map();
+const lifecycleResizeScopes = [];
+let lifecycleResizeCleanupCalls = 0;
 const lifecyclePhone = {
     id: '', dataset: {}, innerHTML: '', removed: false,
     style: { setProperty() {}, removeProperty() {} },
@@ -3117,6 +3184,12 @@ const lifecycleFixtureState = {
 let lifecycleHookCalls = 0;
 const lifecycleDiagnostics = createLifecycleDiagnostics();
 const lifecycleAppScope = createLifecycleScope({ label: 'app', diagnostics: lifecycleDiagnostics });
+let lifecycleBindPhoneResizeImpl = (phone, handle, scope) => {
+    assert.equal(phone, lifecyclePhone, '生产 open 装配必须把当前手机窗口传给 resize binder');
+    assert.equal(scope.label, 'app/phone', '生产 open 装配必须把 app 的 phone child scope 传给 resize binder');
+    lifecycleResizeScopes.push(scope);
+    return scope.addCleanup(() => { lifecycleResizeCleanupCalls += 1; });
+};
 const lifecycleFixtureDeps = {
     runtime: createRuntimeState(), getCtx: () => ({ registerSlashCommand() {} }),
     appLifecycleScope: lifecycleAppScope, lifecycleDiagnostics,
@@ -3125,7 +3198,9 @@ const lifecycleFixtureDeps = {
     applyBidirectionalInjection: () => {}, clearBidirectionalInjection: () => {},
     persistCurrentHistory: () => {}, persistPhoneUiSnapshot: () => {},
     applyBackground: () => {}, applyTheme: () => {}, applyPhoneScale: () => {},
-    bindIsland: () => () => {}, bindPhoneResize: () => () => {}, bindPhonePageUi: () => {},
+    bindIsland: () => () => {},
+    bindPhoneResize: (...args) => lifecycleBindPhoneResizeImpl(...args),
+    bindPhonePageUi: () => {},
     migrateOldHistory: () => {}, hookGenerationEvent: () => { lifecycleHookCalls += 1; }, invalidateGeneration: () => {},
     disarmAutoPoke: () => {}, syncGenerationControls: () => {}, closeOverlay: () => {},
     closeControlCenter: () => {}, refreshReplyCardAvailability: () => {}, clearActiveQuote: () => {},
@@ -3452,6 +3527,23 @@ try {
     installPhoneLifecycle(lifecycleFixtureState, lifecycleFixtureDeps);
     assert.equal(lifecycleHookCalls, hookCallsBeforeSuccessInstall + 1,
         '每个独立 runtime 安装时都必须同步尝试注册宿主事件');
+    const workingResizeBinder = lifecycleBindPhoneResizeImpl;
+    let failedResizeScope = null;
+    lifecycleBindPhoneResizeImpl = (phone, handle, scope) => {
+        failedResizeScope = scope;
+        throw new Error('fixture-resize-start-failed');
+    };
+    window.__pmTheme = structuredClone(baseTheme);
+    await assert.rejects(window.__pmOpen(), /fixture-resize-start-failed/);
+    assert.equal(failedResizeScope?.isDisposed, true, 'resize 安装失败必须 dispose 已创建的 phone child scope');
+    assert.equal(failedResizeScope?.signal.reason, 'phone-resize-start-failed', 'resize 安装失败必须保留明确的 scope dispose 原因');
+    assert.equal(lifecycleFixtureState.phoneActive, false, 'resize 安装失败必须回滚已激活的手机状态');
+    assert.equal(lifecycleFixtureState.phoneWindow, null, 'resize 安装失败必须移除已创建的手机窗口');
+    assert.equal(lifecyclePhone.removed, true, 'resize 安装失败必须执行完整 phone DOM 回滚');
+    assert.deepEqual(lifecycleDiagnostics.snapshot(), { cleanup: 2, listener: 2, scope: 1, timeout: 1 },
+        'resize 安装失败后必须只保留 app-scope 宿主事件重试基线');
+    lifecycleBindPhoneResizeImpl = workingResizeBinder;
+    lifecyclePhone.removed = false;
     window.__pmTheme = structuredClone(baseTheme);
     globalThis.setInterval = () => { throw new Error('fixture-interval-start-failed'); };
     await assert.rejects(window.__pmOpen(), /fixture-interval-start-failed/);
@@ -3461,29 +3553,40 @@ try {
         '巡检 interval 启动失败时必须移除已创建的手机窗口');
     assert.equal(lifecycleFixtureDeps.runtime.visibilityTimer, null,
         '巡检 interval 启动失败时不得残留 timer 状态');
+    assert.equal(lifecycleResizeScopes.at(-1)?.isDisposed, true,
+        'resize 失败恢复后的下一次打开必须成功注入 phone scope，并在后续 interval 失败时释放');
     assert.deepEqual(lifecycleDiagnostics.snapshot(), { cleanup: 2, listener: 2, scope: 1, timeout: 1 },
         '巡检 interval 启动失败后必须只保留 app-scope 宿主事件重试基线');
     globalThis.setInterval = () => { lifecycleIntervalIds.push(0); return 0; };
     await window.__pmOpen();
     assert.deepEqual(lifecycleIntervalIds, [0], '成功打开必须且只能启动一个可见性巡检定时器');
+    const firstSuccessfulResizeScope = lifecycleResizeScopes.at(-1);
+    assert.equal(firstSuccessfulResizeScope?.isDisposed, false, '成功打开时 resize binder 接收的 phone scope 必须保持活动');
     assert.equal(lifecycleFixtureDeps.runtime.visibilityTimer, 0, '可见性巡检必须保存 setInterval 返回的 0 号 timer');
     await window.__pmOpen();
     assert.deepEqual(lifecycleIntervalIds, [0], '重复打开既有手机不得重复启动可见性巡检');
     window.__pmEnd(true);
     assert.deepEqual(lifecycleClearedIds, [0], '关闭手机必须清理 timer id 为 0 的可见性巡检');
+    assert.equal(firstSuccessfulResizeScope?.isDisposed, true, '关闭手机必须 dispose resize binder 持有的同一个 phone scope');
+    assert.equal(lifecycleResizeCleanupCalls, 2,
+        'interval 启动失败与首次成功关闭必须各执行一次 resize scope cleanup，失败安装不得伪造 cleanup');
     assert.equal(lifecycleFixtureDeps.runtime.visibilityTimer, null, '关闭手机后可见性巡检状态必须恢复为空');
     assert.deepEqual(lifecycleDiagnostics.snapshot(), { cleanup: 2, listener: 2, scope: 1, timeout: 1 }, '关闭手机后必须只保留 app-scope 宿主事件重试基线');
     for (let cycle = 0; cycle < 20; cycle += 1) {
         lifecyclePhone.removed = false;
         await window.__pmOpen();
-        assert.deepEqual(lifecycleDiagnostics.snapshot(), { 'child-scope': 1, cleanup: 2, interval: 1, listener: 2, scope: 2, timeout: 1 },
-            `第 ${cycle + 1} 次打开后必须只有一组 document capture listeners、一个 app timeout、一个 phone scope 和一个巡检 interval`);
+        const cycleResizeScope = lifecycleResizeScopes.at(-1);
+        assert.equal(cycleResizeScope?.isDisposed, false, `第 ${cycle + 1} 次打开必须把活动 phone child scope 注入 resize binder`);
+        assert.deepEqual(lifecycleDiagnostics.snapshot(), { 'child-scope': 1, cleanup: 3, interval: 1, listener: 2, scope: 2, timeout: 1 },
+            `第 ${cycle + 1} 次打开后必须只有一组 document capture listeners、一个 app timeout、一个 resize cleanup、一个 phone scope 和一个巡检 interval`);
         window.__pmEnd(true);
+        assert.equal(cycleResizeScope?.isDisposed, true, `第 ${cycle + 1} 次关闭必须 dispose resize binder 所属 phone scope`);
         assert.deepEqual(lifecycleDiagnostics.snapshot(), { cleanup: 2, listener: 2, scope: 1, timeout: 1 },
             `第 ${cycle + 1} 次关闭后资源诊断必须回到 app-scope 宿主事件重试基线`);
     }
     assert.equal(lifecycleIntervalIds.length, 21, '20 次重新打开必须每次且只创建一个巡检 interval');
     assert.equal(lifecycleClearedIds.length, 21, '20 次重新关闭必须每次且只释放一个巡检 interval');
+    assert.equal(lifecycleResizeCleanupCalls, 22, '同一 app scope 下 interval 失败、首次关闭及 20 次循环必须逐次释放 resize cleanup');
 
     const captureBaseline = {
         click: new Set(documentClickListeners),

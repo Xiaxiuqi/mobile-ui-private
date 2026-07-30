@@ -453,7 +453,26 @@ export function installPhoneLifecycle(state, deps) {
             },
         });
         unbindIsland = bindIsland(state.phoneWindow, state.phoneWindow.querySelector('.pm-island'));
-        unbindPhoneResize = bindPhoneResize(state.phoneWindow, state.phoneWindow.querySelector('.pm-phone-resize-handle'));
+        try {
+            if (!appLifecycleScope) throw new Error('Phone lifecycle requires an app lifecycle scope');
+            phoneLifecycleScope = appLifecycleScope.child('phone');
+            unbindPhoneResize = bindPhoneResize(
+                state.phoneWindow,
+                state.phoneWindow.querySelector('.pm-phone-resize-handle'),
+                phoneLifecycleScope,
+            );
+        } catch (error) {
+            try {
+                phoneLifecycleScope?.dispose('phone-resize-start-failed');
+            } catch (cleanupError) {
+                console.error('[phone-mode] 手机尺寸监听器启动失败后的资源清理失败', cleanupError);
+            }
+            phoneLifecycleScope = null;
+            try { window.__pmEnd(true); } catch (cleanupError) {
+                console.error('[phone-mode] 手机打开失败后的回滚失败', cleanupError);
+            }
+            throw error;
+        }
         applyTheme(); applyBackground(); state.isGroupChat = false; state.groupMembers = []; state.groupExtras = []; state.groupColorMap = {};
         state.groupDisplayName = ''; state.groupRandomNpcEnabled = false; state.groupNature = ''; state.groupRandomNpcPrompt = ''; state.currentGroupKey = '';
 
@@ -486,8 +505,7 @@ export function installPhoneLifecycle(state, deps) {
         // 初始化完成后才启动巡检；插件空闲或打开失败时不得保留后台定时器。
         if (runtime.visibilityTimer === null && state.phoneActive && state.phoneWindow) {
             try {
-                if (!appLifecycleScope) throw new Error('Phone lifecycle requires an app lifecycle scope');
-                phoneLifecycleScope = appLifecycleScope.child('phone');
+                if (!phoneLifecycleScope) throw new Error('Phone lifecycle scope is unavailable');
                 runtime.visibilityTimer = phoneLifecycleScope.interval(ensureVisibility, 2000).id;
             } catch (error) {
                 try {

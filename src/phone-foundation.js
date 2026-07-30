@@ -528,7 +528,8 @@ export function installPhoneFoundation(state, deps) {
     };
 
 
-    function bindPhoneResize(el, handle) {
+    function bindPhoneResize(el, handle, lifecycleScope) {
+        if (!lifecycleScope) throw new Error('Phone resize requires a phone lifecycle scope');
         let resizing = false;
         let pointerId = null;
         let startX = 0;
@@ -577,25 +578,31 @@ export function installPhoneFoundation(state, deps) {
             handle.setPointerCapture?.(pointerId);
             if (event.cancelable) event.preventDefault();
         };
-        handle.addEventListener('pointerdown', onPointerDown);
-        handle.addEventListener('lostpointercapture', finish);
-        window.addEventListener('pointermove', onPointerMove, { passive: false });
-        window.addEventListener('pointerup', finish);
-        window.addEventListener('pointercancel', finish);
-        window.addEventListener('blur', finish);
-        window.addEventListener('resize', onViewportResize);
-        visualViewport?.addEventListener('resize', onViewportResize);
-        applyPhoneScale(el);
+        const releases = [];
+        try {
+            releases.push(lifecycleScope.listen(handle, 'pointerdown', onPointerDown));
+            releases.push(lifecycleScope.listen(handle, 'lostpointercapture', finish));
+            releases.push(lifecycleScope.listen(window, 'pointermove', onPointerMove, { passive: false }));
+            releases.push(lifecycleScope.listen(window, 'pointerup', finish));
+            releases.push(lifecycleScope.listen(window, 'pointercancel', finish));
+            releases.push(lifecycleScope.listen(window, 'blur', finish));
+            releases.push(lifecycleScope.listen(window, 'resize', onViewportResize));
+            if (visualViewport) releases.push(lifecycleScope.listen(visualViewport, 'resize', onViewportResize));
+            releases.push(lifecycleScope.addCleanup(() => finish()));
+            applyPhoneScale(el);
+        } catch (error) {
+            for (const release of releases.reverse()) {
+                try { release(); } catch (cleanupError) {
+                    console.error('[phone-mode] 手机尺寸监听器安装失败后的清理失败', cleanupError);
+                }
+            }
+            throw error;
+        }
         return () => {
             finish();
-            handle.removeEventListener('pointerdown', onPointerDown);
-            handle.removeEventListener('lostpointercapture', finish);
-            window.removeEventListener('pointermove', onPointerMove);
-            window.removeEventListener('pointerup', finish);
-            window.removeEventListener('pointercancel', finish);
-            window.removeEventListener('blur', finish);
-            window.removeEventListener('resize', onViewportResize);
-            visualViewport?.removeEventListener('resize', onViewportResize);
+            let released = false;
+            for (const release of releases.reverse()) released = release() || released;
+            return released;
         };
     }
 
