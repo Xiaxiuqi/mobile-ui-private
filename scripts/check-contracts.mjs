@@ -1882,7 +1882,7 @@ for (const expected of [
   'runtime.eventHooked = results.every(Boolean)',
   'handleHostChatChanged({', "cancelCommunityGeneration?.('host-chat-changed')", "cancelCalendarTasks?.('host-chat-changed')",
   "disarmAutoPoke?.('host-chat-changed')", 'endPhone(true)',
-  'installPhonePageSuspensionListeners', 'updatePhonePageSuspensionHandler', '__pmPageSuspensionHandler',
+  'installPhonePageSuspensionListeners', 'updatePhonePageSuspensionHandler', '__pmPageSuspensionHandler', '__pmPageSuspensionListenerOwner',
   "__pmPageSuspensionHandler?.('beforeunload')", "__pmPageSuspensionHandler?.('document-hidden')",
 ]) requireText('phone-foundation.js', sourceModuleByName.get('phone-foundation.js')?.code || '', expected);
 for (const expected of ['hostEventSource: null', 'hostEventRegistrations: new Set()']) requireText('runtime.js', sourceModuleByName.get('runtime.js')?.code || '', expected);
@@ -2788,7 +2788,8 @@ for (const expected of [
   'runAutoPokeCounterCycle', 'await run(contactName)', 'commitAutomaticResult', 'await persistHistory()', 'persistCounter()',
 ]) requireText('runtime.js', runtimeCode, expected);
 for (const expected of [
-  'updatePhonePageSuspensionHandler(window, deps, disarmAutoPoke)', "disarmAutoPoke?.('host-chat-changed')",
+  'updatePhonePageSuspensionHandler(window, deps, disarmAutoPoke)',
+  'installPhonePageSuspensionListeners(window, document, deps.appLifecycleScope)', "disarmAutoPoke?.('host-chat-changed')",
   'hasCompletedAssistantMessage && isAutoPokeAllowed()',
   'createAutomaticTaskController', 'automaticTasks.begin', 'automaticTasks.isActive', 'automaticTasks.finish',
 ]) requireText('phone-foundation.js', foundationCode, expected);

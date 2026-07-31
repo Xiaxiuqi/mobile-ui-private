@@ -6,6 +6,7 @@ import { installPhoneFoundation } from '../src/phone-foundation.js';
 import { deleteSelectedMessages } from '../src/phone-lifecycle.js';
 import { splitToSentences } from '../src/prompts.js';
 import { createRuntimeState } from '../src/runtime.js';
+import { createLifecycleScope } from '../src/infrastructure/lifecycle-scope.js';
 import {
     MAX_EMOJI_FILE_BYTES, MAX_EMOJI_INLINE_LIBRARY_BYTES,
     cloneEmojiLibrary, createEmojiRenderBudget, emojiDataUrlBytes, emojiFileError,
@@ -220,6 +221,7 @@ const previousIntegrationDocument = globalThis.document;
 const previousIntegrationLocalStorage = globalThis.localStorage;
 const previousAnimationFrame = globalThis.requestAnimationFrame;
 const previousMatchMedia = globalThis.matchMedia;
+const integrationAppLifecycleScope = createLifecycleScope({ label: 'emoji-integration-app' });
 try {
     const messageList = new BubbleElement();
     messageList.scrollHeight = 0;
@@ -257,6 +259,7 @@ try {
         body: new BubbleElement(),
         visibilityState: 'visible',
         addEventListener: (name, handler) => documentListeners.set(name, handler),
+        removeEventListener: name => documentListeners.delete(name),
         createElement: () => new BubbleElement(),
         createTextNode: text => { const node = new BubbleElement(); node.textContent = String(text); return node; },
         getElementById: () => null,
@@ -265,6 +268,7 @@ try {
     };
     globalThis.window = {
         addEventListener() {},
+        removeEventListener() {},
         __pmEmojis: [{ id: 'set', name: '测试', images: [{ url: exactLimit, desc: '大图' }] }],
         __pmHistories: {
             story: {
@@ -301,6 +305,7 @@ try {
         activeQuote: null,
     };
     const deps = {
+        appLifecycleScope: integrationAppLifecycleScope,
         runtime: createRuntimeState(),
         getCtx: () => null,
         getStorageId: () => 'story',
@@ -463,6 +468,7 @@ try {
     assert.equal(missingCard.attributes['aria-label'], '原消息已删除或已被裁剪，当前显示引用快照');
     assert.equal(missingCard.querySelector('.pm-reply-card-text').textContent, '保留的快照');
 } finally {
+    integrationAppLifecycleScope.dispose('emoji-integration-complete');
     if (previousIntegrationWindow === undefined) delete globalThis.window; else globalThis.window = previousIntegrationWindow;
     if (previousIntegrationDocument === undefined) delete globalThis.document; else globalThis.document = previousIntegrationDocument;
     if (previousIntegrationLocalStorage === undefined) delete globalThis.localStorage; else globalThis.localStorage = previousIntegrationLocalStorage;

@@ -15360,15 +15360,35 @@ ${lines}`;
     element.style.setProperty("--pm-phone-height", `${size.height}px`);
     return size;
   }
-  function installPhonePageSuspensionListeners(windowRef = window, documentRef = document) {
+  function installPhonePageSuspensionListeners(windowRef = window, documentRef = document, lifecycleScope) {
     if (windowRef.__pmBeforeUnloadRegistered) return false;
-    windowRef.addEventListener("beforeunload", () => windowRef.__pmPageSuspensionHandler?.("beforeunload"));
-    documentRef.addEventListener("visibilitychange", () => {
-      if (documentRef.visibilityState === "hidden") {
-        windowRef.__pmPageSuspensionHandler?.("document-hidden");
+    if (!lifecycleScope) throw new Error("Phone page suspension listeners require an app lifecycle scope");
+    const owner = {}, releases = [];
+    const beforeUnload = () => windowRef.__pmPageSuspensionListenerOwner === owner && windowRef.__pmPageSuspensionHandler?.("beforeunload");
+    const visibilityChange = () => windowRef.__pmPageSuspensionListenerOwner === owner && documentRef.visibilityState === "hidden" && windowRef.__pmPageSuspensionHandler?.("document-hidden");
+    try {
+      releases.push(lifecycleScope.listen(windowRef, "beforeunload", beforeUnload));
+      releases.push(lifecycleScope.listen(documentRef, "visibilitychange", visibilityChange));
+      releases.push(lifecycleScope.addCleanup(() => {
+        if (windowRef.__pmPageSuspensionListenerOwner !== owner) return;
+        windowRef.__pmPageSuspensionListenerOwner = null;
+        windowRef.__pmBeforeUnloadRegistered = false;
+      }));
+      windowRef.__pmPageSuspensionListenerOwner = owner;
+      windowRef.__pmBeforeUnloadRegistered = true;
+    } catch (error) {
+      const cleanupErrors = [];
+      for (const release of releases.reverse()) {
+        try {
+          release();
+        } catch (cleanupError) {
+          cleanupErrors.push(cleanupError);
+        }
       }
-    });
-    windowRef.__pmBeforeUnloadRegistered = true;
+      if (cleanupErrors.length)
+        throw new AggregateError([error, ...cleanupErrors], "Phone page suspension listener installation failed");
+      throw error;
+    }
     return true;
   }
   function updatePhonePageSuspensionHandler(windowRef, deps, disarm, save = saveHistoriesBeforeUnload) {
@@ -15489,7 +15509,7 @@ ${lines}`;
       emojiRenderBudget = createEmojiRenderBudget();
     };
     updatePhonePageSuspensionHandler(window, deps, disarmAutoPoke);
-    installPhonePageSuspensionListeners(window, document);
+    installPhonePageSuspensionListeners(window, document, deps.appLifecycleScope);
     window.__pmHistories = window.__pmHistories || {};
     window.__pmConfig = window.__pmConfig || { apiUrl: "", apiKey: "", model: "", temperature: 1.2, useIndependent: false };
     window.__pmProfiles = window.__pmProfiles || [];
@@ -16104,15 +16124,27 @@ ${lines}`;
       clearActiveTimer();
       activePointerId = null;
     };
+    const releaseCapture = (pointerId) => {
+      if (pointerId === null) return;
+      try {
+        element.releasePointerCapture?.(pointerId);
+      } catch (error) {
+      }
+    };
+    const clearPointer = () => {
+      const pointerId = activePointerId;
+      resetPointer();
+      releaseCapture(pointerId);
+    };
     const isActivePointer = (event) => activePointerId !== null && (event?.pointerId === void 0 || event.pointerId === activePointerId);
     const cancelPointer = (event) => {
       if (!isActivePointer(event)) return;
-      resetPointer();
+      clearPointer();
     };
     const releasePointer = (event) => {
       if (!isActivePointer(event)) return;
       const isShortPress = timer !== null;
-      resetPointer();
+      clearPointer();
       if (isShortPress) onPress?.();
     };
     const onPointerDown = (event) => {
@@ -16145,9 +16177,7 @@ ${lines}`;
       onPress?.();
     };
     const onContextMenu = (event) => event.preventDefault?.();
-    const onWindowBlur = () => {
-      resetPointer();
-    };
+    const onWindowBlur = () => clearPointer();
     element.addEventListener("pointerdown", onPointerDown);
     element.addEventListener("pointermove", onPointerMove);
     element.addEventListener("pointerup", releasePointer);
@@ -16157,7 +16187,7 @@ ${lines}`;
     element.addEventListener("contextmenu", onContextMenu);
     eventTarget?.addEventListener("blur", onWindowBlur);
     return () => {
-      resetPointer();
+      clearPointer();
       element.removeEventListener("pointerdown", onPointerDown);
       element.removeEventListener("pointermove", onPointerMove);
       element.removeEventListener("pointerup", releasePointer);

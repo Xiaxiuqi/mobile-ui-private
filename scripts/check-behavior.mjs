@@ -524,23 +524,28 @@ assert.deepEqual(hostChangeCalls, [
     ['disarm', 'host-chat-changed'], ['invalidate'],
 ]);
 
-const pageWindowListeners = new Map();
-const pageDocumentListeners = new Map();
-const pageWindow = {
-    addEventListener(type, listener) {
-        assert.equal(pageWindowListeners.has(type), false, `${type} 监听器只能注册一次`);
-        pageWindowListeners.set(type, listener);
-    },
+const createSuspensionTarget = ({ visibilityState, failType } = {}) => {
+    const listeners = new Map();
+    return {
+        visibilityState,
+        listeners,
+        addEventListener(type, listener) {
+            if (type === failType) throw new Error(`failed:${type}`);
+            assert.equal(listeners.has(type), false, `${type} 监听器只能注册一次`);
+            listeners.set(type, listener);
+        },
+        removeEventListener(type, listener) {
+            if (listeners.get(type) === listener) listeners.delete(type);
+        },
+    };
 };
-const pageDocument = {
-    visibilityState: 'visible',
-    addEventListener(type, listener) {
-        assert.equal(pageDocumentListeners.has(type), false, `${type} 监听器只能注册一次`);
-        pageDocumentListeners.set(type, listener);
-    },
-};
-assert.equal(installPhonePageSuspensionListeners(pageWindow, pageDocument), true);
-assert.equal(installPhonePageSuspensionListeners(pageWindow, pageDocument), false);
+const pageWindow = createSuspensionTarget();
+const pageDocument = createSuspensionTarget({ visibilityState: 'visible' });
+const pageDiagnostics = createLifecycleDiagnostics();
+const pageScope = createLifecycleScope({ label: 'page-suspension', diagnostics: pageDiagnostics });
+assert.equal(installPhonePageSuspensionListeners(pageWindow, pageDocument, pageScope), true);
+assert.equal(installPhonePageSuspensionListeners(pageWindow, pageDocument, pageScope), false);
+assert.deepEqual(pageDiagnostics.snapshot(), { cleanup: 1, listener: 2, scope: 1 });
 const pageHandlerCalls = [];
 updatePhonePageSuspensionHandler(pageWindow, {
     cancelCommunityGeneration: reason => pageHandlerCalls.push(['old-community', reason]),
@@ -552,15 +557,69 @@ updatePhonePageSuspensionHandler(pageWindow, {
     cancelCalendarTasks: reason => pageHandlerCalls.push(['current-calendar', reason]),
 }, reason => pageHandlerCalls.push(['current-disarm', reason]),
 () => pageHandlerCalls.push(['current-save']));
-pageWindowListeners.get('beforeunload')();
+pageWindow.listeners.get('beforeunload')();
 pageDocument.visibilityState = 'hidden';
-pageDocumentListeners.get('visibilitychange')();
+pageDocument.listeners.get('visibilitychange')();
 assert.deepEqual(pageHandlerCalls, [
     ['current-save'], ['current-community', 'beforeunload'], ['current-calendar', 'beforeunload'], ['current-disarm', 'beforeunload'],
     ['current-save'], ['current-community', 'document-hidden'], ['current-calendar', 'document-hidden'], ['current-disarm', 'document-hidden'],
 ]);
-assert.equal(pageWindowListeners.size, 1);
-assert.equal(pageDocumentListeners.size, 1);
+const staleBeforeUnload = pageWindow.listeners.get('beforeunload');
+const staleVisibilityChange = pageDocument.listeners.get('visibilitychange');
+assert.equal(pageScope.dispose('test-dispose'), true);
+assert.deepEqual(pageDiagnostics.snapshot(), {});
+assert.equal(pageWindow.listeners.size, 0);
+assert.equal(pageDocument.listeners.size, 0);
+assert.equal(pageWindow.__pmBeforeUnloadRegistered, false);
+assert.equal(pageWindow.__pmPageSuspensionListenerOwner, null);
+const callsAfterDispose = pageHandlerCalls.length;
+staleBeforeUnload();
+staleVisibilityChange();
+assert.equal(pageWindow.listeners.get('beforeunload'), undefined);
+assert.equal(pageDocument.listeners.get('visibilitychange'), undefined);
+assert.equal(pageHandlerCalls.length, callsAfterDispose,
+    'scope dispose 后即使陈旧 listener 被直接调用也不得触发 suspension handler');
+
+const replacementDiagnostics = createLifecycleDiagnostics();
+const replacementScope = createLifecycleScope({ label: 'page-suspension-replacement', diagnostics: replacementDiagnostics });
+assert.equal(installPhonePageSuspensionListeners(pageWindow, pageDocument, replacementScope), true,
+    'scope dispose 后必须允许恢复安装');
+assert.notEqual(pageWindow.listeners.get('beforeunload'), staleBeforeUnload);
+assert.notEqual(pageDocument.listeners.get('visibilitychange'), staleVisibilityChange);
+replacementScope.dispose('replacement-complete');
+assert.deepEqual(replacementDiagnostics.snapshot(), {});
+
+const failedDocumentWindow = createSuspensionTarget();
+const failedDocument = createSuspensionTarget({ visibilityState: 'visible', failType: 'visibilitychange' });
+const failedDocumentDiagnostics = createLifecycleDiagnostics();
+const failedDocumentScope = createLifecycleScope({ label: 'page-suspension-document-failure', diagnostics: failedDocumentDiagnostics });
+assert.throws(
+    () => installPhonePageSuspensionListeners(failedDocumentWindow, failedDocument, failedDocumentScope),
+    /failed:visibilitychange/,
+);
+assert.equal(failedDocumentWindow.listeners.size, 0, '第二个 listener 注册失败必须回滚第一个 listener');
+assert.equal(failedDocument.listeners.size, 0);
+assert.notEqual(failedDocumentWindow.__pmBeforeUnloadRegistered, true);
+failedDocumentScope.dispose('document-failure-complete');
+assert.deepEqual(failedDocumentDiagnostics.snapshot(), {});
+
+const failedOwnerWindow = createSuspensionTarget();
+const failedOwnerDocument = createSuspensionTarget({ visibilityState: 'visible' });
+const failedOwnerDiagnostics = createLifecycleDiagnostics();
+const failedOwnerBaseScope = createLifecycleScope({ label: 'page-suspension-owner-failure', diagnostics: failedOwnerDiagnostics });
+const failedOwnerScope = {
+    listen: (...args) => failedOwnerBaseScope.listen(...args),
+    addCleanup() { throw new Error('failed:owner-cleanup'); },
+};
+assert.throws(
+    () => installPhonePageSuspensionListeners(failedOwnerWindow, failedOwnerDocument, failedOwnerScope),
+    /failed:owner-cleanup/,
+);
+assert.equal(failedOwnerWindow.listeners.size, 0, 'owner cleanup 注册失败必须回滚 window listener');
+assert.equal(failedOwnerDocument.listeners.size, 0, 'owner cleanup 注册失败必须回滚 document listener');
+assert.notEqual(failedOwnerWindow.__pmBeforeUnloadRegistered, true);
+failedOwnerBaseScope.dispose('owner-failure-complete');
+assert.deepEqual(failedOwnerDiagnostics.snapshot(), {});
 
 assert.deepEqual(normalizeCharacterBehavior(null), DEFAULT_CHARACTER_BEHAVIOR);
 const worldBookKey = createWorldBookEntryKey(' 世界书 A ', 42);
@@ -2157,8 +2216,11 @@ window.__pmShowModelPicker();
 assert.equal(uiElements.has('pm-model-dropdown'), false, '苹果模型浮层关闭后不得残留');
 
 window.addEventListener = () => {};
+window.removeEventListener = () => {};
 const originalConsoleWarn = console.warn;
 const hostBoundaryWarnings = [];
+const branchFoundationDiagnostics = createLifecycleDiagnostics();
+const branchFoundationAppScope = createLifecycleScope({ label: 'branch-foundation-app', diagnostics: branchFoundationDiagnostics });
 try {
     console.warn = (...args) => hostBoundaryWarnings.push(args);
     const personaContext = {
@@ -2498,6 +2560,8 @@ try {
             getCtx: () => injectionContext,
             getStorageId: () => 'story',
             getUserPersona: () => ({ name: '用户' }),
+            appLifecycleScope: branchFoundationAppScope,
+            lifecycleDiagnostics: branchFoundationDiagnostics,
             getInteractiveStore: () => interactiveStoreReady,
             beginBranchInheritance: async context => {
                 if (officialBranchFailure) throw officialBranchFailure;
@@ -2574,6 +2638,8 @@ try {
     const legacyDeps = {
         runtime: createRuntimeState(), getCtx: () => legacyEventContext, getStorageId: () => 'story',
         getUserPersona: () => ({ name: '用户' }),
+        appLifecycleScope: branchFoundationAppScope,
+        lifecycleDiagnostics: branchFoundationDiagnostics,
         beginBranchInheritance: async context => {
             legacyBranchCalls.push(context); return { status: 'cloned' };
         },
@@ -2615,6 +2681,8 @@ try {
     currentEventRegistrationContext = eventRegistrationContext;
     const recoveringDeps = {
         runtime: createRuntimeState(),
+        appLifecycleScope: branchFoundationAppScope,
+        lifecycleDiagnostics: branchFoundationDiagnostics,
         getCtx: () => currentEventRegistrationContext,
         getStorageId: () => 'story',
         getUserPersona: () => ({ name: '用户' }),
@@ -2679,6 +2747,8 @@ try {
 
     const quietDeps = {
         runtime: createRuntimeState(), getCtx: () => ({}), getStorageId: () => 'story',
+        appLifecycleScope: branchFoundationAppScope,
+        lifecycleDiagnostics: branchFoundationDiagnostics,
         getUserPersona: () => ({ name: '用户' }),
     };
     installPhoneFoundation({ phoneWindow: null, phoneActive: false, conversationHistory: [] }, quietDeps);
@@ -2686,6 +2756,8 @@ try {
     assert.equal(hostBoundaryWarnings.filter(args => String(args[0]).includes('宿主事件')).length, registrationWarningCount,
         '缺少 eventSource/eventTypes 的未就绪宿主必须安静跳过');
 } finally {
+    branchFoundationAppScope.dispose('branch-foundation-complete');
+    assert.deepEqual(branchFoundationDiagnostics.snapshot(), {});
     console.warn = originalConsoleWarn;
 }
 
@@ -7509,11 +7581,15 @@ try {
         __pmGroupMeta: { story: {} },
         __pmInjectionConfig: {},
         addEventListener() {},
+        removeEventListener() {},
     };
     globalThis.document = {
         visibilityState: 'visible',
         addEventListener() {},
+        removeEventListener() {},
     };
+    const explicitInjectionDiagnostics = createLifecycleDiagnostics();
+    const explicitInjectionAppScope = createLifecycleScope({ label: 'explicit-injection-app', diagnostics: explicitInjectionDiagnostics });
     installPhoneContextInjection({
         activeStorageId: 'story', currentPersona: 'Alice', isGroupChat: false, currentGroupKey: '',
     }, {
@@ -7553,6 +7629,8 @@ try {
     window.__pmGroupMeta.story.__group_team = { name: '测试群' };
     installPhoneFoundation({ phoneWindow: null, phoneActive: false, conversationHistory: [] }, {
         runtime: createRuntimeState(), getCtx: () => ({}), getStorageId: () => 'story',
+        appLifecycleScope: explicitInjectionAppScope,
+        lifecycleDiagnostics: explicitInjectionDiagnostics,
         getUserPersona: () => ({ name: '用户' }),
     });
     const directResult = window.__pmToggleBidirectional(' Alice ');
@@ -7564,6 +7642,8 @@ try {
     ], '旧注入入口必须按当前 storage、规范化 key 与群聊类型委托统一事务');
     await assert.rejects(() => window.__pmToggleBidirectional('Reject'), /delegated-rejection/,
         '旧注入入口不得吞掉统一事务的拒绝结果');
+    explicitInjectionAppScope.dispose('explicit-injection-complete');
+    assert.deepEqual(explicitInjectionDiagnostics.snapshot(), {});
 } finally {
     globalThis.window = previousExplicitInjectionWindow;
     globalThis.localStorage = previousExplicitInjectionStorage;
@@ -8159,15 +8239,18 @@ try {
     const productionContext = { ...branchContext, chatId: 'production-branch' };
     const previousProductionBeforeUnloadRegistration = window.__pmBeforeUnloadRegistered;
     const previousProductionWindowAddEventListener = window.addEventListener;
+    const previousProductionWindowRemoveEventListener = window.removeEventListener;
     const previousProductionDocument = globalThis.document;
     globalThis.document = {
         visibilityState: 'visible',
         addEventListener() {},
+        removeEventListener() {},
         getElementById() { return null; },
         querySelector() { return null; },
         querySelectorAll() { return []; },
     };
     window.addEventListener = () => {};
+    window.removeEventListener = () => {};
     window.__pmBeforeUnloadRegistered = false;
     const productionListeners = new Map();
     const previousProductionEnd = window.__pmEnd;
@@ -8192,8 +8275,11 @@ try {
         productionCleanupCalls.push(['end-phone', force]);
         productionFoundationState.phoneActive = false;
     };
+    const productionFoundationDiagnostics = createLifecycleDiagnostics();
+    const productionFoundationAppScope = createLifecycleScope({ label: 'production-foundation-app', diagnostics: productionFoundationDiagnostics });
     const productionFoundationDeps = {
         runtime: createRuntimeState(), getCtx: () => currentProductionEventContext,
+        appLifecycleScope: productionFoundationAppScope, lifecycleDiagnostics: productionFoundationDiagnostics,
         getStorageId: () => productionTargetId, getUserPersona: () => ({ name: '用户' }),
         cancelCommunityGeneration: reason => productionCleanupCalls.push(['community', reason]),
         cancelCalendarTasks: reason => productionCleanupCalls.push(['calendar', reason]),
@@ -8354,8 +8440,11 @@ try {
     assert.deepEqual(productionCleanupCalls.slice(-3), [
         ['community', 'host-chat-changed'], ['calendar', 'host-chat-changed'], ['end-phone', true],
     ], '继承失败完成后也必须恰好执行一次聊天切换清理');
+    productionFoundationAppScope.dispose('production-foundation-complete');
+    assert.deepEqual(productionFoundationDiagnostics.snapshot(), {});
     window.__pmEnd = previousProductionEnd;
     window.addEventListener = previousProductionWindowAddEventListener;
+    window.removeEventListener = previousProductionWindowRemoveEventListener;
     window.__pmBeforeUnloadRegistered = previousProductionBeforeUnloadRegistration;
     globalThis.document = previousProductionDocument;
 } finally {

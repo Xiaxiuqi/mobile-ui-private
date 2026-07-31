@@ -78,18 +78,34 @@ export function applyPhoneScale(element, scale = globalThis.window?.__pmTheme?.p
     return size;
 }
 
-export function installPhonePageSuspensionListeners(windowRef = window, documentRef = document) {
+export function installPhonePageSuspensionListeners(windowRef = window, documentRef = document, lifecycleScope) {
     if (windowRef.__pmBeforeUnloadRegistered) return false;
-    windowRef.addEventListener('beforeunload', () => windowRef.__pmPageSuspensionHandler?.('beforeunload'));
-    documentRef.addEventListener('visibilitychange', () => {
-        if (documentRef.visibilityState === 'hidden') {
-            windowRef.__pmPageSuspensionHandler?.('document-hidden');
+    if (!lifecycleScope) throw new Error('Phone page suspension listeners require an app lifecycle scope');
+    const owner = {}, releases = [];
+    const beforeUnload = () => windowRef.__pmPageSuspensionListenerOwner === owner
+        && windowRef.__pmPageSuspensionHandler?.('beforeunload');
+    const visibilityChange = () => windowRef.__pmPageSuspensionListenerOwner === owner
+        && documentRef.visibilityState === 'hidden' && windowRef.__pmPageSuspensionHandler?.('document-hidden');
+    try {
+        releases.push(lifecycleScope.listen(windowRef, 'beforeunload', beforeUnload));
+        releases.push(lifecycleScope.listen(documentRef, 'visibilitychange', visibilityChange));
+        releases.push(lifecycleScope.addCleanup(() => {
+            if (windowRef.__pmPageSuspensionListenerOwner !== owner) return;
+            windowRef.__pmPageSuspensionListenerOwner = null; windowRef.__pmBeforeUnloadRegistered = false;
+        }));
+        windowRef.__pmPageSuspensionListenerOwner = owner;
+        windowRef.__pmBeforeUnloadRegistered = true;
+    } catch (error) {
+        const cleanupErrors = [];
+        for (const release of releases.reverse()) {
+            try { release(); } catch (cleanupError) { cleanupErrors.push(cleanupError); }
         }
-    });
-    windowRef.__pmBeforeUnloadRegistered = true;
+        if (cleanupErrors.length)
+            throw new AggregateError([error, ...cleanupErrors], 'Phone page suspension listener installation failed');
+        throw error;
+    }
     return true;
 }
-
 export function updatePhonePageSuspensionHandler(windowRef, deps, disarm, save = saveHistoriesBeforeUnload) {
     windowRef.__pmPageSuspensionHandler = reason => handlePhonePageSuspension(
         deps, reason, { disarm, save },
@@ -214,7 +230,7 @@ export function installPhoneFoundation(state, deps) {
     };
     // 监听器只注册一次，但每次安装都更新当前依赖，避免热重载后继续调用旧任务控制器。
     updatePhonePageSuspensionHandler(window, deps, disarmAutoPoke);
-    installPhonePageSuspensionListeners(window, document);
+    installPhonePageSuspensionListeners(window, document, deps.appLifecycleScope);
 
     window.__pmHistories = window.__pmHistories || {};
     window.__pmConfig = window.__pmConfig || { apiUrl: '', apiKey: '', model: '', temperature: 1.2, useIndependent: false };
