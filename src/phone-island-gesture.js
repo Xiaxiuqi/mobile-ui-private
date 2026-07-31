@@ -2,7 +2,10 @@ export function bindIsland(el, handle, {
     setTimer = globalThis.setTimeout,
     clearTimer = globalThis.clearTimeout,
     doubleTapDelay = 300,
+    lifecycleScope,
 } = {}) {
+    if (!lifecycleScope) throw new Error('Island gesture requires a lifecycle scope');
+    const scope = lifecycleScope.child('island-gesture');
     let active = true;
     let isDragging = false, startX, startY, startTX = 0, startTY = 0;
     let moved = false, secondTap = false, tapTimer = null;
@@ -14,10 +17,11 @@ export function bindIsland(el, handle, {
         return match ? { x: parseFloat(match[1]), y: parseFloat(match[2]) } : { x: 0, y: 0 };
     };
     const onStart = e => {
+        if (!active) return;
         if (e.target.tagName === 'BUTTON') return;
         secondTap = el.classList.contains('is-min') && tapTimer !== null;
         if (secondTap) {
-            clearTimer(tapTimer);
+            tapTimer.cancel();
             tapTimer = null;
         }
         isDragging = true;
@@ -32,6 +36,7 @@ export function bindIsland(el, handle, {
         if (e.cancelable) e.preventDefault();
     };
     const onMove = e => {
+        if (!active) return;
         if (!isDragging) return;
         const coords = getCoord(e), dx = coords.x - startX, dy = coords.y - startY;
         if (!moved && Math.abs(dx) < 5 && Math.abs(dy) < 5) return;
@@ -46,12 +51,13 @@ export function bindIsland(el, handle, {
         secondTap = false;
         el.style.transition = '.35s cubic-bezier(.18,.89,.32,1.2)';
         if (clearPendingTap && tapTimer !== null) {
-            clearTimer(tapTimer);
+            tapTimer.cancel();
             tapTimer = null;
         }
     };
     const cancelAll = () => cancelGesture({ clearPendingTap: true });
     const onEnd = () => {
+        if (!active) return;
         if (!isDragging) return;
         isDragging = false;
         el.style.transition = '.35s cubic-bezier(.18,.89,.32,1.2)';
@@ -62,29 +68,28 @@ export function bindIsland(el, handle, {
             window.__pmEnd();
             return;
         }
-        tapTimer = setTimer(() => {
+        let releaseTimer = () => false;
+        const timerId = setTimer(() => {
+            releaseTimer();
             tapTimer = null;
             if (active && el.classList.contains('is-min')) window.__pmToggleMin();
         }, doubleTapDelay);
+        releaseTimer = scope.addCleanup(() => clearTimer(timerId), 'timeout');
+        tapTimer = { id: timerId, cancel: releaseTimer };
     };
-    handle.addEventListener('mousedown', onStart);
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onEnd);
-    handle.addEventListener('touchstart', onStart, { passive: false });
-    window.addEventListener('touchmove', onMove, { passive: false });
-    window.addEventListener('touchend', onEnd);
-    window.addEventListener('touchcancel', cancelAll);
-    window.addEventListener('blur', cancelAll);
-    return () => {
+    scope.listen(handle, 'mousedown', onStart);
+    scope.listen(window, 'mousemove', onMove);
+    scope.listen(window, 'mouseup', onEnd);
+    scope.listen(handle, 'touchstart', onStart, { passive: false });
+    scope.listen(window, 'touchmove', onMove, { passive: false });
+    scope.listen(window, 'touchend', onEnd);
+    scope.listen(window, 'touchcancel', cancelAll);
+    scope.listen(window, 'blur', cancelAll);
+    scope.addCleanup(() => {
         active = false;
         cancelGesture({ clearPendingTap: true });
-        handle.removeEventListener('mousedown', onStart);
-        window.removeEventListener('mousemove', onMove);
-        window.removeEventListener('mouseup', onEnd);
-        handle.removeEventListener('touchstart', onStart);
-        window.removeEventListener('touchmove', onMove);
-        window.removeEventListener('touchend', onEnd);
-        window.removeEventListener('touchcancel', cancelAll);
-        window.removeEventListener('blur', cancelAll);
+    }, 'gesture-state');
+    return () => {
+        scope.dispose('island-gesture-unbound');
     };
 }

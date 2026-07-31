@@ -2,9 +2,19 @@ import { POPOVER_SUPPORTED } from './constants.js';
 import { escapeAttr } from './ui.js';
 import { CLOSE_ICON_SVG } from './icons.js';
 
-export function openCropper(imgDataUrl, { onCancel, onConfirm }) {
+let currentCropperTeardown = null;
+
+export function openCropper(imgDataUrl, { onCancel, onConfirm, appLifecycleScope, closeOverlay }) {
+    if (!appLifecycleScope) throw new Error('Cropper requires an app lifecycle scope');
+    if (typeof closeOverlay !== 'function') throw new Error('Cropper requires the managed overlay close contract');
     const ratio = 330 / 450;
-    document.getElementById('pm-overlay')?.remove();
+    if (typeof currentCropperTeardown === 'function') {
+        const previous = currentCropperTeardown;
+        currentCropperTeardown = null;
+        previous('cropper-replaced');
+    }
+    closeOverlay('replace');
+    const scope = appLifecycleScope.child('cropper');
     const overlay = document.createElement('div');
     overlay.id = 'pm-overlay';
     if (POPOVER_SUPPORTED) overlay.setAttribute('popover', 'manual');
@@ -29,12 +39,21 @@ export function openCropper(imgDataUrl, { onCancel, onConfirm }) {
 </div>`;
 
     const cancel = () => {
-        overlay.remove();
         onCancel?.();
     };
-    overlay.querySelector('#pm-crop-close').addEventListener('click', cancel);
-    overlay.querySelector('#pm-crop-cancel').addEventListener('click', cancel);
-    overlay.addEventListener('click', event => { if (event.target === overlay) cancel(); });
+    const runCancel = () => {
+        teardown('cropper-cancelled');
+        cancel();
+    };
+    const teardown = reason => scope.dispose(reason || 'cropper-closed');
+    currentCropperTeardown = teardown;
+    scope.addCleanup(() => {
+        if (currentCropperTeardown === teardown) currentCropperTeardown = null;
+    }, 'owner');
+    scope.addCleanup(() => overlay.remove(), 'dom');
+    scope.listen(overlay.querySelector('#pm-crop-close'), 'click', runCancel);
+    scope.listen(overlay.querySelector('#pm-crop-cancel'), 'click', runCancel);
+    scope.listen(overlay, 'click', event => { if (event.target === overlay) runCancel(); });
     document.body.appendChild(overlay);
     if (overlay.showPopover) try { overlay.showPopover(); } catch (error) {}
 
@@ -68,14 +87,15 @@ export function openCropper(imgDataUrl, { onCancel, onConfirm }) {
         }
         updateTransform();
     };
+    scope.addCleanup(() => { image.onload = null; }, 'handler');
 
-
-    zoomSlider.oninput = () => {
+    scope.listen(zoomSlider, 'input', () => {
         scale = parseInt(zoomSlider.value, 10) / 100;
         updateTransform();
-    };
+    });
 
     let dragging = false, startX = 0, startY = 0, startTx = 0, startTy = 0;
+    let pinchDistance = 0, pinchScale = 1;
     const onDragStart = event => {
         dragging = true;
         const point = event.touches ? event.touches[0] : event;
@@ -94,15 +114,17 @@ export function openCropper(imgDataUrl, { onCancel, onConfirm }) {
         if (event.cancelable) event.preventDefault();
     };
     const onDragEnd = () => { dragging = false; };
-    frame.addEventListener('mousedown', onDragStart);
-    window.addEventListener('mousemove', onDragMove);
-    window.addEventListener('mouseup', onDragEnd);
-    frame.addEventListener('touchstart', onDragStart, { passive: false });
-    window.addEventListener('touchmove', onDragMove, { passive: false });
-    window.addEventListener('touchend', onDragEnd);
+    const cancelDrag = () => { dragging = false; pinchDistance = 0; };
+    scope.listen(frame, 'mousedown', onDragStart);
+    scope.listen(window, 'mousemove', onDragMove);
+    scope.listen(window, 'mouseup', onDragEnd);
+    scope.listen(frame, 'touchstart', onDragStart, { passive: false });
+    scope.listen(window, 'touchmove', onDragMove, { passive: false });
+    scope.listen(window, 'touchend', onDragEnd);
+    scope.listen(window, 'touchcancel', cancelDrag);
+    scope.listen(window, 'blur', cancelDrag);
 
-    let pinchDistance = 0, pinchScale = 1;
-    frame.addEventListener('touchstart', event => {
+    scope.listen(frame, 'touchstart', event => {
         if (event.touches.length !== 2) return;
         pinchDistance = Math.hypot(
             event.touches[0].clientX - event.touches[1].clientX,
@@ -110,7 +132,7 @@ export function openCropper(imgDataUrl, { onCancel, onConfirm }) {
         );
         pinchScale = scale;
     }, { passive: false });
-    frame.addEventListener('touchmove', event => {
+    scope.listen(frame, 'touchmove', event => {
         if (event.touches.length !== 2 || !pinchDistance) return;
         const distance = Math.hypot(
             event.touches[0].clientX - event.touches[1].clientX,
@@ -121,14 +143,14 @@ export function openCropper(imgDataUrl, { onCancel, onConfirm }) {
         updateTransform();
         event.preventDefault();
     }, { passive: false });
-    frame.addEventListener('wheel', event => {
+    scope.listen(frame, 'wheel', event => {
         event.preventDefault();
         scale = Math.max(1, Math.min(4, scale + (event.deltaY > 0 ? -0.1 : 0.1)));
         zoomSlider.value = Math.round(scale * 100);
         updateTransform();
     });
 
-    overlay.querySelector('#pm-crop-confirm').addEventListener('click', () => {
+    scope.listen(overlay.querySelector('#pm-crop-confirm'), 'click', () => {
         const canvas = document.createElement('canvas');
         const outputWidth = 600;
         const outputHeight = Math.round(outputWidth / ratio);
@@ -153,7 +175,8 @@ export function openCropper(imgDataUrl, { onCancel, onConfirm }) {
             quality -= 0.1;
             output = canvas.toDataURL('image/jpeg', quality);
         }
-        overlay.remove();
+        teardown('cropper-confirmed');
         onConfirm(output);
     });
+    return teardown;
 }

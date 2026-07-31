@@ -452,10 +452,12 @@ export function installPhoneLifecycle(state, deps) {
                 }
             },
         });
-        unbindIsland = bindIsland(state.phoneWindow, state.phoneWindow.querySelector('.pm-island'));
         try {
             if (!appLifecycleScope) throw new Error('Phone lifecycle requires an app lifecycle scope');
             phoneLifecycleScope = appLifecycleScope.child('phone');
+            unbindIsland = bindIsland(state.phoneWindow, state.phoneWindow.querySelector('.pm-island'), {
+                lifecycleScope: phoneLifecycleScope,
+            });
             unbindPhoneResize = bindPhoneResize(
                 state.phoneWindow,
                 state.phoneWindow.querySelector('.pm-phone-resize-handle'),

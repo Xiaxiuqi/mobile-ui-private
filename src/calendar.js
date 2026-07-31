@@ -26,10 +26,10 @@ import { createCalendarRecipeController } from './calendar-recipe-controller.js'
 import { createTaskController } from './calendar-task-controller.js';
 export const calendarGenerationErrorMessage = generationErrorMessage; export { renderCalendarPageHtml };
 export function installCalendar(state, deps) {
-    const { getStorageId, gatherContext, callAI, fetchImpl, makeOverlay, closeOverlay } = deps;
-    if (typeof window !== 'undefined') window.__pmReturnToCalendarDataSource = () => {
-        closeOverlay?.('replace'); return deps.showPhoneCalendarPage?.();
-    };
+    const { getStorageId, gatherContext, callAI, fetchImpl, makeOverlay, closeOverlay, appLifecycleScope } = deps;
+    if (!appLifecycleScope) throw new Error('Calendar requires an app lifecycle scope');
+    const calendarLifecycleScope = appLifecycleScope.child('calendar');
+    if (typeof window !== 'undefined') window.__pmReturnToCalendarDataSource = () => { closeOverlay?.('replace'); return deps.showPhoneCalendarPage?.(); };
     const runtime = {
         store: normalizeCalendarStore(loadCalendarWithLegacyInjectionMigration()),
         occasionStore: normalizeOccasionStore(loadCalendarOccasions()),
@@ -43,20 +43,18 @@ export function installCalendar(state, deps) {
         statusByStorage: new Map(),
         statusTimerByStorage: new Map(),
     };
-    const tasks = createTaskController(getStorageId);
-    const scheduleTimeout = deps.setTimeoutImpl || globalThis.setTimeout;
-    const cancelTimeout = deps.clearTimeoutImpl || globalThis.clearTimeout;
+    const tasks = createTaskController(getStorageId, calendarLifecycleScope.signal);
     const status = (storageId, text, { duration = 4000, persistent = false } = {}) => {
         const previousToken = runtime.statusTimerByStorage.get(storageId);
-        if (previousToken) cancelTimeout(previousToken.timer);
+        previousToken?.timeout.cancel();
         runtime.statusTimerByStorage.delete(storageId);
         const nextText = text || '';
         runtime.statusByStorage.set(storageId, nextText);
         const element = state.phoneWindow?.querySelector('.pm-calendar-status');
         if (element && getStorageId() === storageId) element.textContent = nextText;
         if (!nextText || persistent) return;
-        const token = { timer: undefined };
-        const timer = scheduleTimeout(() => {
+        const token = { timeout: null };
+        token.timeout = calendarLifecycleScope.timeout(() => {
             if (runtime.statusTimerByStorage.get(storageId) !== token) return;
             runtime.statusTimerByStorage.delete(storageId);
             if (runtime.statusByStorage.get(storageId) !== nextText) return;
@@ -64,8 +62,6 @@ export function installCalendar(state, deps) {
             const currentElement = state.phoneWindow?.querySelector('.pm-calendar-status');
             if (currentElement && getStorageId() === storageId) currentElement.textContent = '';
         }, duration);
-        timer?.unref?.();
-        token.timer = timer;
         runtime.statusTimerByStorage.set(storageId, token);
     };
     const errorStatus = (storageId, error) => status(storageId, error?.message || '日历操作失败', { duration: 10000 });
@@ -129,7 +125,7 @@ export function installCalendar(state, deps) {
     };
     const rerender = storageId => { if (getStorageId() === storageId) render(storageId); };
     const recipeController = createCalendarRecipeController({
-        tasks, getStorageId, gatherContext, callAI, makeOverlay, closeOverlay, commitRecipe,
+        tasks, getStorageId, gatherContext, callAI, makeOverlay, closeOverlay, commitRecipe, parentSignal: calendarLifecycleScope.signal,
         getRecipeScope: storageId => recipeScopeFor(runtime.recipeStore, storageId),
         getReferenceDate: storageId => calendarReferenceDate(scope(storageId)),
         getView: viewFor,
@@ -140,7 +136,7 @@ export function installCalendar(state, deps) {
         confirmImpl: deps.confirmImpl || globalThis.confirm,
     });
     const outfitController = createCalendarOutfitController({
-        tasks, getStorageId, gatherContext, callAI, makeOverlay, closeOverlay, commitOutfits, getOutfitStore: () => runtime.outfitStore,
+        tasks, getStorageId, gatherContext, callAI, makeOverlay, closeOverlay, commitOutfits, parentSignal: calendarLifecycleScope.signal, getOutfitStore: () => runtime.outfitStore,
         getProfile: (storageId, subject) => outfitScopeFor(runtime.outfitStore, storageId, subject), getReferenceDate: storageId => calendarReferenceDate(scope(storageId)), getView: viewFor,
         setView: (storageId, view) => runtime.viewByStorage.set(storageId, view),
         getStatus: storageId => runtime.statusByStorage.get(storageId) || '', status, rerender,
@@ -780,8 +776,11 @@ export function installCalendar(state, deps) {
     const transfersCalendarStateOwnership = reason => reason === 'plugin-data-clear' || reason === 'backup-apply' || reason === 'backup-rollback';
     const cancelCalendarTasks = reason => {
         if (transfersCalendarStateOwnership(reason)) invalidateCommits();
+        for (const token of runtime.statusTimerByStorage.values()) token.timeout.cancel();
+        runtime.statusTimerByStorage.clear();
         return tasks.cancel(reason);
     };
+    calendarLifecycleScope.addCleanup(() => { runtime.statusTimerByStorage.clear(); tasks.cancel(calendarLifecycleScope.signal.reason || 'calendar-disposed'); }, 'calendar-state');
     Object.assign(deps, {
         cancelCalendarTasks, ensureCalendarWeek: ensureWeek,
         getCalendarCycleStore: () => normalizeCycleStore(runtime.cycleStore), getCalendarHolidayStore: () => normalizeHolidayCache(runtime.holidayStore),

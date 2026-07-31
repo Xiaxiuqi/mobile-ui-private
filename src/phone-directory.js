@@ -111,37 +111,24 @@ import {
     loadGroupMeta, saveBidirectional, saveGroupMeta, saveHistoriesStrict, savePokeConfig,
 } from './storage.js';
 export function installPhoneDirectory(state, deps) {
-    const {
-        runtime, getStorageId, makeOverlay, closeOverlay, closeControlCenter,
-        applyBackground, applyBidirectionalInjection,
-    } = deps;
+    const { runtime, getStorageId, makeOverlay, closeOverlay, closeControlCenter,
+        applyBackground, applyBidirectionalInjection, appLifecycleScope } = deps;
+    if (!appLifecycleScope) throw new Error('Phone directory requires an app lifecycle scope');
     const runConversationInjectionMutation = deps.runConversationInjectionMutation
         || (task => Promise.resolve().then(task));
     let deleteTransactionActive = false;
     let contactSwitcherLoadSequence = 0;
-    let contactSwitcherOutsideHandler = null;
-    let contactSwitcherEscapeHandler = null;
-    let contactSwitcherResizeObserver = null;
+    let contactSwitcherScope = null;
     const CONTACT_SWITCHER_ID = 'pm-contact-switcher';
     const currentConversationKey = () => state.isGroupChat && state.currentGroupKey
         ? state.currentGroupKey : state.currentPersona;
     function closeContactSwitcher(reason = 'close') {
         contactSwitcherLoadSequence += 1;
         const switcher = document.getElementById(CONTACT_SWITCHER_ID);
-        if (contactSwitcherResizeObserver) {
-            contactSwitcherResizeObserver.disconnect();
-            contactSwitcherResizeObserver = null;
-        }
         const trigger = state.phoneWindow?.querySelector('.pm-name-trigger');
+        contactSwitcherScope?.dispose(reason);
+        contactSwitcherScope = null;
         switcher?.remove();
-        if (contactSwitcherOutsideHandler) {
-            document.removeEventListener('click', contactSwitcherOutsideHandler, true);
-            contactSwitcherOutsideHandler = null;
-        }
-        if (contactSwitcherEscapeHandler) {
-            document.removeEventListener('keydown', contactSwitcherEscapeHandler, true);
-            contactSwitcherEscapeHandler = null;
-        }
         trigger?.setAttribute('aria-expanded', 'false');
         if (['toggle', 'outside', 'escape'].includes(reason)) trigger?.focus({ preventScroll: true });
         return Boolean(switcher);
@@ -222,7 +209,7 @@ export function installPhoneDirectory(state, deps) {
         if (!phone || !trigger?.isConnected || state.isMinimized) return false;
         const sequence = ++contactSwitcherLoadSequence;
         await loadGroupMeta();
-        if (sequence !== contactSwitcherLoadSequence || !trigger.isConnected) return false;
+        if (sequence !== contactSwitcherLoadSequence || !trigger.isConnected || appLifecycleScope.isDisposed || state.phoneWindow !== phone) return false;
         closeContactSwitcher('replace');
         closeControlCenter?.();
         closeOverlay?.('replace');
@@ -252,6 +239,8 @@ export function installPhoneDirectory(state, deps) {
                 .filter(key => !key.startsWith('__group_'))
                 .map(key => renderRow(key, key, false)),
         ];
+        const scope = appLifecycleScope.child('contact-switcher');
+        contactSwitcherScope = scope;
         const switcher = document.createElement('div');
         switcher.id = CONTACT_SWITCHER_ID;
         switcher.className = 'pm-contact-switcher';
@@ -264,17 +253,24 @@ export function installPhoneDirectory(state, deps) {
             <button type="button" onclick="window.__pmShowGroupCreate()">新建</button>
             <button type="button" onclick="window.__pmShowAddContact()">添加</button>
           </div>`;
-        phone.appendChild(switcher);
-        positionContactSwitcher(switcher, trigger, phone);
-        if (typeof ResizeObserver === 'function') {
-            contactSwitcherResizeObserver = new ResizeObserver(() => {
-                positionContactSwitcher(switcher, trigger, phone);
-            });
-            contactSwitcherResizeObserver.observe(phone);
-            contactSwitcherResizeObserver.observe(trigger);
+        try {
+            scope.addCleanup(() => switcher.remove(), 'dom');
+            phone.appendChild(switcher);
+            positionContactSwitcher(switcher, trigger, phone);
+            if (typeof ResizeObserver === 'function') {
+                const contactSwitcherResizeObserver = new ResizeObserver(() => positionContactSwitcher(switcher, trigger, phone));
+                contactSwitcherResizeObserver.observe(phone);
+                contactSwitcherResizeObserver.observe(trigger);
+                scope.addCleanup(() => contactSwitcherResizeObserver.disconnect(), 'observer');
+            }
+            trigger.setAttribute('aria-expanded', 'true');
+            bindContactSwitcher(switcher, trigger, scope);
+        } catch (error) {
+            scope.dispose('contact-switcher-open-failed');
+            if (contactSwitcherScope === scope) contactSwitcherScope = null;
+            trigger.setAttribute('aria-expanded', 'false');
+            throw error;
         }
-        trigger.setAttribute('aria-expanded', 'true');
-        bindContactSwitcher(switcher, trigger);
         switcher.querySelector('[aria-current="true"]')?.scrollIntoView?.({ block: 'nearest' });
         switcher.querySelector('button')?.focus({ preventScroll: true });
         return true;
@@ -285,8 +281,8 @@ export function installPhoneDirectory(state, deps) {
         return renderContactSwitcher(trigger || state.phoneWindow?.querySelector('.pm-name-trigger'));
     };
 
-    function bindContactSwitcher(switcher, trigger) {
-        switcher.addEventListener('click', async event => {
+    function bindContactSwitcher(switcher, trigger, scope) {
+        scope.listen(switcher, 'click', async event => {
             const action = event.target.closest('button[data-contact-action]');
             if (!action || !switcher.contains(action) || action.disabled) return;
             event.stopPropagation();
@@ -322,15 +318,15 @@ export function installPhoneDirectory(state, deps) {
                 else await window.__pmDel(key);
             }
         });
-        contactSwitcherOutsideHandler = event => {
+        const outsideHandler = event => {
             if (switcher.contains(event.target) || trigger.contains(event.target)) return;
             closeContactSwitcher('outside');
         };
-        contactSwitcherEscapeHandler = event => {
+        const escapeHandler = event => {
             if (event.key === 'Escape') closeContactSwitcher('escape');
         };
-        document.addEventListener('click', contactSwitcherOutsideHandler, true);
-        document.addEventListener('keydown', contactSwitcherEscapeHandler, true);
+        scope.listen(document, 'click', outsideHandler, true);
+        scope.listen(document, 'keydown', escapeHandler, true);
     }
     Object.assign(deps, { closeContactSwitcher });
     const setDeleteButtonsDisabled = disabled => {
@@ -406,8 +402,8 @@ export function installPhoneDirectory(state, deps) {
             ${groupMeta.members.map((name, index) => `<label style="display:contents;"><span style="font-size:12px;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(name)}</span><input class="pm-group-member-color" data-member="${escapeAttr(name)}" type="color" value="${escapeAttr(groupMeta.memberColors[name] || GROUP_COLORS[index % GROUP_COLORS.length].bg)}"></label>`).join('')}
           </div>
         </div>` : '';
-        makeOverlay(`
-    <div class="pm-modal pm-modal-wide">
+        const formScope = appLifecycleScope.child('group-form');
+        makeOverlay(`<div class="pm-modal pm-modal-wide">
     <div class="pm-modal-header"><button type="button" onclick="${closeAction}" class="pm-modal-close" title="返回列表" aria-label="返回列表">${BACK_ICON_SVG}</button><b>${title}</b><button type="button" onclick="${closeAction}" class="pm-modal-close" title="关闭" aria-label="关闭">${CLOSE_ICON_SVG}</button></div>
     <div class="pm-modal-scroll pm-group-settings-scroll">
         <div class="pm-cfg-label">群聊名称</div>
@@ -435,8 +431,10 @@ export function installPhoneDirectory(state, deps) {
     <div class="pm-modal-add">
         <button class="pm-action-button is-accent" onclick="window.__pmConfirmGroup('${safeJS(mode)}')" style="flex:1">创建</button>
     </div>` : `<div class="pm-modal-add"><button class="pm-action-button is-accent" onclick="window.__pmSaveAndCloseGroupEdit()" style="flex:1">保存群聊设置</button></div>`}
-    </div>`);
-        setTimeout(() => window.__pmGroupInputChanged(), 0);
+    </div>`, {
+            onClose: reason => formScope.dispose(reason),
+        });
+        formScope.timeout(() => window.__pmGroupInputChanged(), 0);
     }
     window.__pmSaveAndCloseGroupEdit = async () => {
         const nameInput = document.getElementById('pm-group-name-input');
@@ -644,8 +642,8 @@ export function installPhoneDirectory(state, deps) {
     window.__pmShowAddContact = (resultMessage = '') => {
         closeContactSwitcher('replace');
         closeOverlay?.('replace');
-        makeOverlay(`
-<div class="pm-modal">
+        const addContactScope = appLifecycleScope.child('add-contact');
+        makeOverlay(`<div class="pm-modal">
   <div class="pm-modal-header"><span></span><b>添加联系人</b><button type="button" onclick="window.__pmShowList()" class="pm-modal-close" title="关闭" aria-label="关闭">${CLOSE_ICON_SVG}</button></div>
   ${resultMessage ? `<div class="pm-bi-bar pm-contact-add-result"><span>${escapeHtml(resultMessage)}</span></div>` : ''}
   <div class="pm-contact-add-choices">
@@ -661,11 +659,13 @@ export function installPhoneDirectory(state, deps) {
       <button type="button" id="pm-autogen-btn" class="pm-contact-add-ai" onclick="window.__pmConfirmAutoGen()" aria-label="AI 自动生成联系人"><span class="pm-contact-add-icon">${SPARKLES_ICON_SVG}</span><span>生成联系人与群聊</span></button>
     </section>
   </div>
-</div>`);
-        setTimeout(() => {
+</div>`, {
+            onClose: reason => addContactScope.dispose(reason),
+        });
+        addContactScope.timeout(() => {
             const input = document.getElementById('pm-add-contact-input');
             input?.focus();
-            input?.addEventListener('keydown', e => {
+            if (input) addContactScope.listen(input, 'keydown', e => {
                 if (e.key === 'Enter') { const v = input.value.trim(); if (v) window.__pmSwitchContact(v); }
             });
         }, 0);

@@ -8,7 +8,7 @@ import { renderRecipeMealDialog } from './calendar-view.js';
 
 export function createCalendarRecipeController({
     tasks, getStorageId, gatherContext, callAI, makeOverlay, closeOverlay, commitRecipe,
-    getRecipeScope, getReferenceDate, getView, setView, getStatus, status, rerender,
+    getRecipeScope, getReferenceDate, getView, setView, getStatus, status, rerender, parentSignal,
     confirmImpl = globalThis.confirm,
 }) {
     const setRecipeBusy = (storageId, task, previousStatus) => {
@@ -48,6 +48,7 @@ export function createCalendarRecipeController({
         const task = tasks.begin(storageId, 'recipe-generate', {
             replace: false,
             mode: replaceWindow ? 'recipe-regenerate' : 'recipe-generate',
+            parentSignal,
         });
         if (!task) throw new Error('当前会话已有菜谱生成任务，或会话不可用');
         const view = getView(storageId);

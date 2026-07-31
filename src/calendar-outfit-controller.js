@@ -3,7 +3,7 @@ import { calendarWindowDescription, formatCalendarDate, parseCalendarDate } from
 import { buildOutfitPrompts, deleteOutfit, outfitForDate, outfitScopeFor, parseOutfitAiResponse, replaceOutfitsInWindow, updateOutfitProfile, upsertOutfit } from './calendar-outfit-model.js';
 import { renderOutfitDialog } from './calendar-view.js';
 
-export function createCalendarOutfitController({ tasks, getStorageId, gatherContext, callAI, makeOverlay, closeOverlay, commitOutfits, getOutfitStore, getProfile, getReferenceDate, getView, setView, getStatus, status, rerender, confirmImpl = globalThis.confirm }) {
+export function createCalendarOutfitController({ tasks, getStorageId, gatherContext, callAI, makeOverlay, closeOverlay, commitOutfits, getOutfitStore, getProfile, getReferenceDate, getView, setView, getStatus, status, rerender, parentSignal, confirmImpl = globalThis.confirm }) {
     const setBusy = (storageId, task, previousStatus) => setView(storageId, { ...getView(storageId), outfitGenerating: true, outfitGenerationTask: task, outfitGenerationPreviousStatus: previousStatus });
     async function generate(storageId = getStorageId(), { replaceWindow = false } = {}) {
         const reference = getReferenceDate(storageId), selected = replaceWindow ? getView(storageId).selectedDate : '';
@@ -17,7 +17,7 @@ export function createCalendarOutfitController({ tasks, getStorageId, gatherCont
         if (hasExistingAi && (typeof confirmImpl !== 'function'
             || !confirmImpl(`${window.label}已有 AI 生成的穿搭，重新生成将覆盖这些内容；手动记录会保留。是否继续？`))) return false;
         const snapshot = JSON.stringify(window.dates.map(date => [date, profile.days[date] || null]));
-        const task = tasks.begin(storageId, 'outfit-generate', { replace: false, mode: replaceWindow ? 'outfit-regenerate' : 'outfit-generate' });
+        const task = tasks.begin(storageId, 'outfit-generate', { replace: false, mode: replaceWindow ? 'outfit-regenerate' : 'outfit-generate', parentSignal });
         if (!task) throw new Error('当前会话已有穿搭生成任务，或会话不可用');
         const previousStatus = getView(storageId).outfitGenerationTask ? getView(storageId).outfitGenerationPreviousStatus : getStatus(storageId);
         setBusy(storageId, task, previousStatus); status(storageId, `正在${replaceWindow ? '重新' : ''}生成${window.label} OOTD…`, { persistent: true }); rerender(storageId);
@@ -25,10 +25,15 @@ export function createCalendarOutfitController({ tasks, getStorageId, gatherCont
         try {
             const context = await gatherContext(null, { module: 'outfit', signal: task.signal, worldBookMaxChars: 3500 });
             if (!tasks.active(task)) return false;
-            const requested = getProfile(storageId, subject), prompts = buildOutfitPrompts(context, requested, start, { days, subject });
+            const requested = getProfile(storageId, subject);
+            const requestedPreferences = JSON.stringify([
+                requested.colorPreference, requested.preference, requested.generationRule,
+            ]);
+            const prompts = buildOutfitPrompts(context, requested, start, { days, subject });
             const generated = parseOutfitAiResponse(await callAI(prompts.systemPrompt, prompts.userPrompt, { isolated: true, signal: task.signal }), { start, days });
             const committed = await commitOutfits(storageId, store => {
                 const current = outfitScopeFor(store, storageId, subject);
+                if (JSON.stringify([current.colorPreference, current.preference, current.generationRule]) !== requestedPreferences) throw new Error('穿搭偏好或生成规则已在生成期间改变，请重新生成');
                 if (JSON.stringify(window.dates.map(date => [date, current.days[date] || null])) !== snapshot) throw new Error('待覆盖穿搭已在生成期间改变，请重新确认后生成');
                 return updateOutfitProfile(store, storageId, subject, value => replaceOutfitsInWindow(value, generated, { start, now: Date.now(), days }));
             }, task);

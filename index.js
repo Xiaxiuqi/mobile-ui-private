@@ -3597,7 +3597,7 @@ ${userPrompt}` : userPrompt;
   }
 
   // src/calendar-outfit-controller.js
-  function createCalendarOutfitController({ tasks, getStorageId: getStorageId2, gatherContext: gatherContext2, callAI, makeOverlay, closeOverlay, commitOutfits, getOutfitStore, getProfile, getReferenceDate, getView, setView, getStatus, status, rerender, confirmImpl = globalThis.confirm }) {
+  function createCalendarOutfitController({ tasks, getStorageId: getStorageId2, gatherContext: gatherContext2, callAI, makeOverlay, closeOverlay, commitOutfits, getOutfitStore, getProfile, getReferenceDate, getView, setView, getStatus, status, rerender, parentSignal, confirmImpl = globalThis.confirm }) {
     const setBusy = (storageId, task, previousStatus) => setView(storageId, { ...getView(storageId), outfitGenerating: true, outfitGenerationTask: task, outfitGenerationPreviousStatus: previousStatus });
     async function generate(storageId = getStorageId2(), { replaceWindow = false } = {}) {
       const reference = getReferenceDate(storageId), selected = replaceWindow ? getView(storageId).selectedDate : "";
@@ -3614,7 +3614,7 @@ ${userPrompt}` : userPrompt;
       const hasExistingAi = existing.some((outfit) => outfit.source === "ai");
       if (hasExistingAi && (typeof confirmImpl !== "function" || !confirmImpl(`${window2.label}\u5DF2\u6709 AI \u751F\u6210\u7684\u7A7F\u642D\uFF0C\u91CD\u65B0\u751F\u6210\u5C06\u8986\u76D6\u8FD9\u4E9B\u5185\u5BB9\uFF1B\u624B\u52A8\u8BB0\u5F55\u4F1A\u4FDD\u7559\u3002\u662F\u5426\u7EE7\u7EED\uFF1F`))) return false;
       const snapshot = JSON.stringify(window2.dates.map((date) => [date, profile.days[date] || null]));
-      const task = tasks.begin(storageId, "outfit-generate", { replace: false, mode: replaceWindow ? "outfit-regenerate" : "outfit-generate" });
+      const task = tasks.begin(storageId, "outfit-generate", { replace: false, mode: replaceWindow ? "outfit-regenerate" : "outfit-generate", parentSignal });
       if (!task) throw new Error("\u5F53\u524D\u4F1A\u8BDD\u5DF2\u6709\u7A7F\u642D\u751F\u6210\u4EFB\u52A1\uFF0C\u6216\u4F1A\u8BDD\u4E0D\u53EF\u7528");
       const previousStatus = getView(storageId).outfitGenerationTask ? getView(storageId).outfitGenerationPreviousStatus : getStatus(storageId);
       setBusy(storageId, task, previousStatus);
@@ -3624,10 +3624,17 @@ ${userPrompt}` : userPrompt;
       try {
         const context = await gatherContext2(null, { module: "outfit", signal: task.signal, worldBookMaxChars: 3500 });
         if (!tasks.active(task)) return false;
-        const requested = getProfile(storageId, subject), prompts = buildOutfitPrompts(context, requested, start, { days, subject });
+        const requested = getProfile(storageId, subject);
+        const requestedPreferences = JSON.stringify([
+          requested.colorPreference,
+          requested.preference,
+          requested.generationRule
+        ]);
+        const prompts = buildOutfitPrompts(context, requested, start, { days, subject });
         const generated = parseOutfitAiResponse(await callAI(prompts.systemPrompt, prompts.userPrompt, { isolated: true, signal: task.signal }), { start, days });
         const committed = await commitOutfits(storageId, (store) => {
           const current = outfitScopeFor(store, storageId, subject);
+          if (JSON.stringify([current.colorPreference, current.preference, current.generationRule]) !== requestedPreferences) throw new Error("\u7A7F\u642D\u504F\u597D\u6216\u751F\u6210\u89C4\u5219\u5DF2\u5728\u751F\u6210\u671F\u95F4\u6539\u53D8\uFF0C\u8BF7\u91CD\u65B0\u751F\u6210");
           if (JSON.stringify(window2.dates.map((date) => [date, current.days[date] || null])) !== snapshot) throw new Error("\u5F85\u8986\u76D6\u7A7F\u642D\u5DF2\u5728\u751F\u6210\u671F\u95F4\u6539\u53D8\uFF0C\u8BF7\u91CD\u65B0\u786E\u8BA4\u540E\u751F\u6210");
           return updateOutfitProfile(store, storageId, subject, (value) => replaceOutfitsInWindow(value, generated, { start, now: Date.now(), days }));
         }, task);
@@ -3759,6 +3766,7 @@ ${userPrompt}` : userPrompt;
     getStatus,
     status,
     rerender,
+    parentSignal,
     confirmImpl = globalThis.confirm
   }) {
     const setRecipeBusy = (storageId, task, previousStatus) => {
@@ -3796,7 +3804,8 @@ ${userPrompt}` : userPrompt;
       const requestedWindowSnapshot = windowSnapshot(getRecipeScope(storageId));
       const task = tasks.begin(storageId, "recipe-generate", {
         replace: false,
-        mode: replaceWindow ? "recipe-regenerate" : "recipe-generate"
+        mode: replaceWindow ? "recipe-regenerate" : "recipe-generate",
+        parentSignal
       });
       if (!task) throw new Error("\u5F53\u524D\u4F1A\u8BDD\u5DF2\u6709\u83DC\u8C31\u751F\u6210\u4EFB\u52A1\uFF0C\u6216\u4F1A\u8BDD\u4E0D\u53EF\u7528");
       const view = getView(storageId);
@@ -3945,20 +3954,24 @@ ${userPrompt}` : userPrompt;
   }
 
   // src/calendar-task-controller.js
-  function createTaskController(getStorageId2) {
+  function createTaskController(getStorageId2, defaultParentSignal = null) {
     let epoch = 0, sequence = 0;
     const tasks = /* @__PURE__ */ new Map();
     const slotFor = (storageId, category) => ["generate", "recipe-generate", "outfit-generate"].includes(category) ? `${category}\0${storageId}` : category;
     const begin = (storageId, category, { replace = true, mode = category, parentSignal } = {}) => {
       if (!storageId || storageId === "sms_unknown__default" || getStorageId2() !== storageId) return null;
+      const ownerSignal = parentSignal || defaultParentSignal;
       const slot = slotFor(storageId, category);
       const previous = tasks.get(slot);
       if (previous && !replace) return null;
-      previous?.controller.abort("superseded");
+      if (previous) {
+        previous.detachParent?.();
+        previous.controller.abort("superseded");
+      }
       const controller = new AbortController();
-      const abortFromParent = () => controller.abort(parentSignal?.reason || "parent-cancelled");
-      if (parentSignal?.aborted) abortFromParent();
-      else parentSignal?.addEventListener?.("abort", abortFromParent, { once: true });
+      const abortFromParent = () => controller.abort(ownerSignal?.reason || "parent-cancelled");
+      if (ownerSignal?.aborted) abortFromParent();
+      else ownerSignal?.addEventListener?.("abort", abortFromParent, { once: true });
       const task = Object.freeze({
         id: ++sequence,
         epoch,
@@ -3968,16 +3981,16 @@ ${userPrompt}` : userPrompt;
         slot,
         controller,
         signal: controller.signal,
-        detachParent: () => parentSignal?.removeEventListener?.("abort", abortFromParent)
+        detachParent: () => ownerSignal?.removeEventListener?.("abort", abortFromParent)
       });
       tasks.set(slot, task);
       return task;
     };
     const active = (task) => !!task && !task.signal.aborted && task.epoch === epoch && tasks.get(task.slot) === task && getStorageId2() === task.storageId;
     const finish = (task) => {
+      task?.detachParent?.();
       if (tasks.get(task?.slot) !== task) return false;
       tasks.delete(task.slot);
-      task.detachParent?.();
       return true;
     };
     const cancel = (reason) => {
@@ -3995,7 +4008,9 @@ ${userPrompt}` : userPrompt;
   // src/calendar.js
   var calendarGenerationErrorMessage = generationErrorMessage;
   function installCalendar(state, deps) {
-    const { getStorageId: getStorageId2, gatherContext: gatherContext2, callAI, fetchImpl, makeOverlay, closeOverlay } = deps;
+    const { getStorageId: getStorageId2, gatherContext: gatherContext2, callAI, fetchImpl, makeOverlay, closeOverlay, appLifecycleScope } = deps;
+    if (!appLifecycleScope) throw new Error("Calendar requires an app lifecycle scope");
+    const calendarLifecycleScope = appLifecycleScope.child("calendar");
     if (typeof window !== "undefined") window.__pmReturnToCalendarDataSource = () => {
       closeOverlay?.("replace");
       return deps.showPhoneCalendarPage?.();
@@ -4013,20 +4028,18 @@ ${userPrompt}` : userPrompt;
       statusByStorage: /* @__PURE__ */ new Map(),
       statusTimerByStorage: /* @__PURE__ */ new Map()
     };
-    const tasks = createTaskController(getStorageId2);
-    const scheduleTimeout = deps.setTimeoutImpl || globalThis.setTimeout;
-    const cancelTimeout = deps.clearTimeoutImpl || globalThis.clearTimeout;
+    const tasks = createTaskController(getStorageId2, calendarLifecycleScope.signal);
     const status = (storageId, text5, { duration = 4e3, persistent = false } = {}) => {
       const previousToken = runtime.statusTimerByStorage.get(storageId);
-      if (previousToken) cancelTimeout(previousToken.timer);
+      previousToken?.timeout.cancel();
       runtime.statusTimerByStorage.delete(storageId);
       const nextText = text5 || "";
       runtime.statusByStorage.set(storageId, nextText);
       const element = state.phoneWindow?.querySelector(".pm-calendar-status");
       if (element && getStorageId2() === storageId) element.textContent = nextText;
       if (!nextText || persistent) return;
-      const token = { timer: void 0 };
-      const timer = scheduleTimeout(() => {
+      const token = { timeout: null };
+      token.timeout = calendarLifecycleScope.timeout(() => {
         if (runtime.statusTimerByStorage.get(storageId) !== token) return;
         runtime.statusTimerByStorage.delete(storageId);
         if (runtime.statusByStorage.get(storageId) !== nextText) return;
@@ -4034,8 +4047,6 @@ ${userPrompt}` : userPrompt;
         const currentElement = state.phoneWindow?.querySelector(".pm-calendar-status");
         if (currentElement && getStorageId2() === storageId) currentElement.textContent = "";
       }, duration);
-      timer?.unref?.();
-      token.timer = timer;
       runtime.statusTimerByStorage.set(storageId, token);
     };
     const errorStatus = (storageId, error) => status(storageId, error?.message || "\u65E5\u5386\u64CD\u4F5C\u5931\u8D25", { duration: 1e4 });
@@ -4119,6 +4130,7 @@ ${userPrompt}` : userPrompt;
       makeOverlay,
       closeOverlay,
       commitRecipe,
+      parentSignal: calendarLifecycleScope.signal,
       getRecipeScope: (storageId) => recipeScopeFor(runtime.recipeStore, storageId),
       getReferenceDate: (storageId) => calendarReferenceDate(scope(storageId)),
       getView: viewFor,
@@ -4136,6 +4148,7 @@ ${userPrompt}` : userPrompt;
       makeOverlay,
       closeOverlay,
       commitOutfits,
+      parentSignal: calendarLifecycleScope.signal,
       getOutfitStore: () => runtime.outfitStore,
       getProfile: (storageId, subject) => outfitScopeFor(runtime.outfitStore, storageId, subject),
       getReferenceDate: (storageId) => calendarReferenceDate(scope(storageId)),
@@ -4833,8 +4846,14 @@ ${userPrompt}` : userPrompt;
     const transfersCalendarStateOwnership = (reason) => reason === "plugin-data-clear" || reason === "backup-apply" || reason === "backup-rollback";
     const cancelCalendarTasks = (reason) => {
       if (transfersCalendarStateOwnership(reason)) invalidateCommits();
+      for (const token of runtime.statusTimerByStorage.values()) token.timeout.cancel();
+      runtime.statusTimerByStorage.clear();
       return tasks.cancel(reason);
     };
+    calendarLifecycleScope.addCleanup(() => {
+      runtime.statusTimerByStorage.clear();
+      tasks.cancel(calendarLifecycleScope.signal.reason || "calendar-disposed");
+    }, "calendar-state");
     Object.assign(deps, {
       cancelCalendarTasks,
       ensureCalendarWeek: ensureWeek,
@@ -13813,33 +13832,23 @@ ${antiFluff}`;
       closeOverlay,
       closeControlCenter,
       applyBackground,
-      applyBidirectionalInjection
+      applyBidirectionalInjection,
+      appLifecycleScope
     } = deps;
+    if (!appLifecycleScope) throw new Error("Phone directory requires an app lifecycle scope");
     const runConversationInjectionMutation = deps.runConversationInjectionMutation || ((task) => Promise.resolve().then(task));
     let deleteTransactionActive = false;
     let contactSwitcherLoadSequence = 0;
-    let contactSwitcherOutsideHandler = null;
-    let contactSwitcherEscapeHandler = null;
-    let contactSwitcherResizeObserver = null;
+    let contactSwitcherScope = null;
     const CONTACT_SWITCHER_ID = "pm-contact-switcher";
     const currentConversationKey = () => state.isGroupChat && state.currentGroupKey ? state.currentGroupKey : state.currentPersona;
     function closeContactSwitcher(reason = "close") {
       contactSwitcherLoadSequence += 1;
       const switcher = document.getElementById(CONTACT_SWITCHER_ID);
-      if (contactSwitcherResizeObserver) {
-        contactSwitcherResizeObserver.disconnect();
-        contactSwitcherResizeObserver = null;
-      }
       const trigger = state.phoneWindow?.querySelector(".pm-name-trigger");
+      contactSwitcherScope?.dispose(reason);
+      contactSwitcherScope = null;
       switcher?.remove();
-      if (contactSwitcherOutsideHandler) {
-        document.removeEventListener("click", contactSwitcherOutsideHandler, true);
-        contactSwitcherOutsideHandler = null;
-      }
-      if (contactSwitcherEscapeHandler) {
-        document.removeEventListener("keydown", contactSwitcherEscapeHandler, true);
-        contactSwitcherEscapeHandler = null;
-      }
       trigger?.setAttribute("aria-expanded", "false");
       if (["toggle", "outside", "escape"].includes(reason)) trigger?.focus({ preventScroll: true });
       return Boolean(switcher);
@@ -13914,7 +13923,7 @@ ${antiFluff}`;
       if (!phone || !trigger?.isConnected || state.isMinimized) return false;
       const sequence = ++contactSwitcherLoadSequence;
       await loadGroupMeta();
-      if (sequence !== contactSwitcherLoadSequence || !trigger.isConnected) return false;
+      if (sequence !== contactSwitcherLoadSequence || !trigger.isConnected || appLifecycleScope.isDisposed || state.phoneWindow !== phone) return false;
       closeContactSwitcher("replace");
       closeControlCenter?.();
       closeOverlay?.("replace");
@@ -13942,6 +13951,8 @@ ${antiFluff}`;
         }),
         ...Object.keys(histories).filter((key) => !key.startsWith("__group_")).map((key) => renderRow(key, key, false))
       ];
+      const scope = appLifecycleScope.child("contact-switcher");
+      contactSwitcherScope = scope;
       const switcher = document.createElement("div");
       switcher.id = CONTACT_SWITCHER_ID;
       switcher.className = "pm-contact-switcher";
@@ -13954,17 +13965,24 @@ ${antiFluff}`;
             <button type="button" onclick="window.__pmShowGroupCreate()">\u65B0\u5EFA</button>
             <button type="button" onclick="window.__pmShowAddContact()">\u6DFB\u52A0</button>
           </div>`;
-      phone.appendChild(switcher);
-      positionContactSwitcher(switcher, trigger, phone);
-      if (typeof ResizeObserver === "function") {
-        contactSwitcherResizeObserver = new ResizeObserver(() => {
-          positionContactSwitcher(switcher, trigger, phone);
-        });
-        contactSwitcherResizeObserver.observe(phone);
-        contactSwitcherResizeObserver.observe(trigger);
+      try {
+        scope.addCleanup(() => switcher.remove(), "dom");
+        phone.appendChild(switcher);
+        positionContactSwitcher(switcher, trigger, phone);
+        if (typeof ResizeObserver === "function") {
+          const contactSwitcherResizeObserver = new ResizeObserver(() => positionContactSwitcher(switcher, trigger, phone));
+          contactSwitcherResizeObserver.observe(phone);
+          contactSwitcherResizeObserver.observe(trigger);
+          scope.addCleanup(() => contactSwitcherResizeObserver.disconnect(), "observer");
+        }
+        trigger.setAttribute("aria-expanded", "true");
+        bindContactSwitcher(switcher, trigger, scope);
+      } catch (error) {
+        scope.dispose("contact-switcher-open-failed");
+        if (contactSwitcherScope === scope) contactSwitcherScope = null;
+        trigger.setAttribute("aria-expanded", "false");
+        throw error;
       }
-      trigger.setAttribute("aria-expanded", "true");
-      bindContactSwitcher(switcher, trigger);
       switcher.querySelector('[aria-current="true"]')?.scrollIntoView?.({ block: "nearest" });
       switcher.querySelector("button")?.focus({ preventScroll: true });
       return true;
@@ -13973,8 +13991,8 @@ ${antiFluff}`;
       if (document.getElementById(CONTACT_SWITCHER_ID)) return closeContactSwitcher("toggle");
       return renderContactSwitcher(trigger || state.phoneWindow?.querySelector(".pm-name-trigger"));
     };
-    function bindContactSwitcher(switcher, trigger) {
-      switcher.addEventListener("click", async (event) => {
+    function bindContactSwitcher(switcher, trigger, scope) {
+      scope.listen(switcher, "click", async (event) => {
         const action = event.target.closest("button[data-contact-action]");
         if (!action || !switcher.contains(action) || action.disabled) return;
         event.stopPropagation();
@@ -14010,15 +14028,15 @@ ${antiFluff}`;
           else await window.__pmDel(key);
         }
       });
-      contactSwitcherOutsideHandler = (event) => {
+      const outsideHandler = (event) => {
         if (switcher.contains(event.target) || trigger.contains(event.target)) return;
         closeContactSwitcher("outside");
       };
-      contactSwitcherEscapeHandler = (event) => {
+      const escapeHandler = (event) => {
         if (event.key === "Escape") closeContactSwitcher("escape");
       };
-      document.addEventListener("click", contactSwitcherOutsideHandler, true);
-      document.addEventListener("keydown", contactSwitcherEscapeHandler, true);
+      scope.listen(document, "click", outsideHandler, true);
+      scope.listen(document, "keydown", escapeHandler, true);
     }
     Object.assign(deps, { closeContactSwitcher });
     const setDeleteButtonsDisabled = (disabled) => {
@@ -14088,8 +14106,8 @@ ${antiFluff}`;
             ${groupMeta.members.map((name, index) => `<label style="display:contents;"><span style="font-size:12px;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(name)}</span><input class="pm-group-member-color" data-member="${escapeAttr(name)}" type="color" value="${escapeAttr(groupMeta.memberColors[name] || GROUP_COLORS[index % GROUP_COLORS.length].bg)}"></label>`).join("")}
           </div>
         </div>` : "";
-      makeOverlay(`
-    <div class="pm-modal pm-modal-wide">
+      const formScope = appLifecycleScope.child("group-form");
+      makeOverlay(`<div class="pm-modal pm-modal-wide">
     <div class="pm-modal-header"><button type="button" onclick="${closeAction}" class="pm-modal-close" title="\u8FD4\u56DE\u5217\u8868" aria-label="\u8FD4\u56DE\u5217\u8868">${BACK_ICON_SVG}</button><b>${title}</b><button type="button" onclick="${closeAction}" class="pm-modal-close" title="\u5173\u95ED" aria-label="\u5173\u95ED">${CLOSE_ICON_SVG}</button></div>
     <div class="pm-modal-scroll pm-group-settings-scroll">
         <div class="pm-cfg-label">\u7FA4\u804A\u540D\u79F0</div>
@@ -14117,8 +14135,10 @@ ${antiFluff}`;
     <div class="pm-modal-add">
         <button class="pm-action-button is-accent" onclick="window.__pmConfirmGroup('${safeJS(mode)}')" style="flex:1">\u521B\u5EFA</button>
     </div>` : `<div class="pm-modal-add"><button class="pm-action-button is-accent" onclick="window.__pmSaveAndCloseGroupEdit()" style="flex:1">\u4FDD\u5B58\u7FA4\u804A\u8BBE\u7F6E</button></div>`}
-    </div>`);
-      setTimeout(() => window.__pmGroupInputChanged(), 0);
+    </div>`, {
+        onClose: (reason) => formScope.dispose(reason)
+      });
+      formScope.timeout(() => window.__pmGroupInputChanged(), 0);
     }
     window.__pmSaveAndCloseGroupEdit = async () => {
       const nameInput = document.getElementById("pm-group-name-input");
@@ -14336,8 +14356,8 @@ ${antiFluff}`;
     window.__pmShowAddContact = (resultMessage = "") => {
       closeContactSwitcher("replace");
       closeOverlay?.("replace");
-      makeOverlay(`
-<div class="pm-modal">
+      const addContactScope = appLifecycleScope.child("add-contact");
+      makeOverlay(`<div class="pm-modal">
   <div class="pm-modal-header"><span></span><b>\u6DFB\u52A0\u8054\u7CFB\u4EBA</b><button type="button" onclick="window.__pmShowList()" class="pm-modal-close" title="\u5173\u95ED" aria-label="\u5173\u95ED">${CLOSE_ICON_SVG}</button></div>
   ${resultMessage ? `<div class="pm-bi-bar pm-contact-add-result"><span>${escapeHtml(resultMessage)}</span></div>` : ""}
   <div class="pm-contact-add-choices">
@@ -14353,11 +14373,13 @@ ${antiFluff}`;
       <button type="button" id="pm-autogen-btn" class="pm-contact-add-ai" onclick="window.__pmConfirmAutoGen()" aria-label="AI \u81EA\u52A8\u751F\u6210\u8054\u7CFB\u4EBA"><span class="pm-contact-add-icon">${SPARKLES_ICON_SVG}</span><span>\u751F\u6210\u8054\u7CFB\u4EBA\u4E0E\u7FA4\u804A</span></button>
     </section>
   </div>
-</div>`);
-      setTimeout(() => {
+</div>`, {
+        onClose: (reason) => addContactScope.dispose(reason)
+      });
+      addContactScope.timeout(() => {
         const input = document.getElementById("pm-add-contact-input");
         input?.focus();
-        input?.addEventListener("keydown", (e) => {
+        if (input) addContactScope.listen(input, "keydown", (e) => {
           if (e.key === "Enter") {
             const v = input.value.trim();
             if (v) window.__pmSwitchContact(v);
@@ -15266,8 +15288,11 @@ ${lines}`;
   function bindIsland(el, handle, {
     setTimer = globalThis.setTimeout,
     clearTimer = globalThis.clearTimeout,
-    doubleTapDelay = 300
+    doubleTapDelay = 300,
+    lifecycleScope
   } = {}) {
+    if (!lifecycleScope) throw new Error("Island gesture requires a lifecycle scope");
+    const scope = lifecycleScope.child("island-gesture");
     let active = true;
     let isDragging = false, startX, startY, startTX = 0, startTY = 0;
     let moved = false, secondTap = false, tapTimer = null;
@@ -15277,10 +15302,11 @@ ${lines}`;
       return match ? { x: parseFloat(match[1]), y: parseFloat(match[2]) } : { x: 0, y: 0 };
     };
     const onStart = (e) => {
+      if (!active) return;
       if (e.target.tagName === "BUTTON") return;
       secondTap = el.classList.contains("is-min") && tapTimer !== null;
       if (secondTap) {
-        clearTimer(tapTimer);
+        tapTimer.cancel();
         tapTimer = null;
       }
       isDragging = true;
@@ -15295,6 +15321,7 @@ ${lines}`;
       if (e.cancelable) e.preventDefault();
     };
     const onMove = (e) => {
+      if (!active) return;
       if (!isDragging) return;
       const coords = getCoord(e), dx = coords.x - startX, dy = coords.y - startY;
       if (!moved && Math.abs(dx) < 5 && Math.abs(dy) < 5) return;
@@ -15309,12 +15336,13 @@ ${lines}`;
       secondTap = false;
       el.style.transition = ".35s cubic-bezier(.18,.89,.32,1.2)";
       if (clearPendingTap && tapTimer !== null) {
-        clearTimer(tapTimer);
+        tapTimer.cancel();
         tapTimer = null;
       }
     };
     const cancelAll = () => cancelGesture({ clearPendingTap: true });
     const onEnd = () => {
+      if (!active) return;
       if (!isDragging) return;
       isDragging = false;
       el.style.transition = ".35s cubic-bezier(.18,.89,.32,1.2)";
@@ -15325,30 +15353,29 @@ ${lines}`;
         window.__pmEnd();
         return;
       }
-      tapTimer = setTimer(() => {
+      let releaseTimer = () => false;
+      const timerId = setTimer(() => {
+        releaseTimer();
         tapTimer = null;
         if (active && el.classList.contains("is-min")) window.__pmToggleMin();
       }, doubleTapDelay);
+      releaseTimer = scope.addCleanup(() => clearTimer(timerId), "timeout");
+      tapTimer = { id: timerId, cancel: releaseTimer };
     };
-    handle.addEventListener("mousedown", onStart);
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onEnd);
-    handle.addEventListener("touchstart", onStart, { passive: false });
-    window.addEventListener("touchmove", onMove, { passive: false });
-    window.addEventListener("touchend", onEnd);
-    window.addEventListener("touchcancel", cancelAll);
-    window.addEventListener("blur", cancelAll);
-    return () => {
+    scope.listen(handle, "mousedown", onStart);
+    scope.listen(window, "mousemove", onMove);
+    scope.listen(window, "mouseup", onEnd);
+    scope.listen(handle, "touchstart", onStart, { passive: false });
+    scope.listen(window, "touchmove", onMove, { passive: false });
+    scope.listen(window, "touchend", onEnd);
+    scope.listen(window, "touchcancel", cancelAll);
+    scope.listen(window, "blur", cancelAll);
+    scope.addCleanup(() => {
       active = false;
       cancelGesture({ clearPendingTap: true });
-      handle.removeEventListener("mousedown", onStart);
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onEnd);
-      handle.removeEventListener("touchstart", onStart);
-      window.removeEventListener("touchmove", onMove);
-      window.removeEventListener("touchend", onEnd);
-      window.removeEventListener("touchcancel", cancelAll);
-      window.removeEventListener("blur", cancelAll);
+    }, "gesture-state");
+    return () => {
+      scope.dispose("island-gesture-unbound");
     };
   }
 
@@ -16723,10 +16750,12 @@ ${lines}`;
           }
         }
       });
-      unbindIsland = bindIsland2(state.phoneWindow, state.phoneWindow.querySelector(".pm-island"));
       try {
         if (!appLifecycleScope) throw new Error("Phone lifecycle requires an app lifecycle scope");
         phoneLifecycleScope = appLifecycleScope.child("phone");
+        unbindIsland = bindIsland2(state.phoneWindow, state.phoneWindow.querySelector(".pm-island"), {
+          lifecycleScope: phoneLifecycleScope
+        });
         unbindPhoneResize = bindPhoneResize(
           state.phoneWindow,
           state.phoneWindow.querySelector(".pm-phone-resize-handle"),
@@ -17280,9 +17309,18 @@ ${lines}`;
   });
 
   // src/cropper.js
-  function openCropper(imgDataUrl, { onCancel, onConfirm }) {
+  var currentCropperTeardown = null;
+  function openCropper(imgDataUrl, { onCancel, onConfirm, appLifecycleScope, closeOverlay }) {
+    if (!appLifecycleScope) throw new Error("Cropper requires an app lifecycle scope");
+    if (typeof closeOverlay !== "function") throw new Error("Cropper requires the managed overlay close contract");
     const ratio = 330 / 450;
-    document.getElementById("pm-overlay")?.remove();
+    if (typeof currentCropperTeardown === "function") {
+      const previous = currentCropperTeardown;
+      currentCropperTeardown = null;
+      previous("cropper-replaced");
+    }
+    closeOverlay("replace");
+    const scope = appLifecycleScope.child("cropper");
     const overlay = document.createElement("div");
     overlay.id = "pm-overlay";
     if (POPOVER_SUPPORTED) overlay.setAttribute("popover", "manual");
@@ -17306,13 +17344,22 @@ ${lines}`;
   </div>
 </div>`;
     const cancel = () => {
-      overlay.remove();
       onCancel?.();
     };
-    overlay.querySelector("#pm-crop-close").addEventListener("click", cancel);
-    overlay.querySelector("#pm-crop-cancel").addEventListener("click", cancel);
-    overlay.addEventListener("click", (event) => {
-      if (event.target === overlay) cancel();
+    const runCancel = () => {
+      teardown("cropper-cancelled");
+      cancel();
+    };
+    const teardown = (reason) => scope.dispose(reason || "cropper-closed");
+    currentCropperTeardown = teardown;
+    scope.addCleanup(() => {
+      if (currentCropperTeardown === teardown) currentCropperTeardown = null;
+    }, "owner");
+    scope.addCleanup(() => overlay.remove(), "dom");
+    scope.listen(overlay.querySelector("#pm-crop-close"), "click", runCancel);
+    scope.listen(overlay.querySelector("#pm-crop-cancel"), "click", runCancel);
+    scope.listen(overlay, "click", (event) => {
+      if (event.target === overlay) runCancel();
     });
     document.body.appendChild(overlay);
     if (overlay.showPopover) try {
@@ -17347,11 +17394,15 @@ ${lines}`;
       }
       updateTransform();
     };
-    zoomSlider.oninput = () => {
+    scope.addCleanup(() => {
+      image.onload = null;
+    }, "handler");
+    scope.listen(zoomSlider, "input", () => {
       scale = parseInt(zoomSlider.value, 10) / 100;
       updateTransform();
-    };
+    });
     let dragging = false, startX = 0, startY = 0, startTx = 0, startTy = 0;
+    let pinchDistance = 0, pinchScale = 1;
     const onDragStart = (event) => {
       dragging = true;
       const point = event.touches ? event.touches[0] : event;
@@ -17372,14 +17423,19 @@ ${lines}`;
     const onDragEnd = () => {
       dragging = false;
     };
-    frame.addEventListener("mousedown", onDragStart);
-    window.addEventListener("mousemove", onDragMove);
-    window.addEventListener("mouseup", onDragEnd);
-    frame.addEventListener("touchstart", onDragStart, { passive: false });
-    window.addEventListener("touchmove", onDragMove, { passive: false });
-    window.addEventListener("touchend", onDragEnd);
-    let pinchDistance = 0, pinchScale = 1;
-    frame.addEventListener("touchstart", (event) => {
+    const cancelDrag = () => {
+      dragging = false;
+      pinchDistance = 0;
+    };
+    scope.listen(frame, "mousedown", onDragStart);
+    scope.listen(window, "mousemove", onDragMove);
+    scope.listen(window, "mouseup", onDragEnd);
+    scope.listen(frame, "touchstart", onDragStart, { passive: false });
+    scope.listen(window, "touchmove", onDragMove, { passive: false });
+    scope.listen(window, "touchend", onDragEnd);
+    scope.listen(window, "touchcancel", cancelDrag);
+    scope.listen(window, "blur", cancelDrag);
+    scope.listen(frame, "touchstart", (event) => {
       if (event.touches.length !== 2) return;
       pinchDistance = Math.hypot(
         event.touches[0].clientX - event.touches[1].clientX,
@@ -17387,7 +17443,7 @@ ${lines}`;
       );
       pinchScale = scale;
     }, { passive: false });
-    frame.addEventListener("touchmove", (event) => {
+    scope.listen(frame, "touchmove", (event) => {
       if (event.touches.length !== 2 || !pinchDistance) return;
       const distance = Math.hypot(
         event.touches[0].clientX - event.touches[1].clientX,
@@ -17398,13 +17454,13 @@ ${lines}`;
       updateTransform();
       event.preventDefault();
     }, { passive: false });
-    frame.addEventListener("wheel", (event) => {
+    scope.listen(frame, "wheel", (event) => {
       event.preventDefault();
       scale = Math.max(1, Math.min(4, scale + (event.deltaY > 0 ? -0.1 : 0.1)));
       zoomSlider.value = Math.round(scale * 100);
       updateTransform();
     });
-    overlay.querySelector("#pm-crop-confirm").addEventListener("click", () => {
+    scope.listen(overlay.querySelector("#pm-crop-confirm"), "click", () => {
       const canvas = document.createElement("canvas");
       const outputWidth = 600;
       const outputHeight = Math.round(outputWidth / ratio);
@@ -17429,9 +17485,10 @@ ${lines}`;
         quality -= 0.1;
         output = canvas.toDataURL("image/jpeg", quality);
       }
-      overlay.remove();
+      teardown("cropper-confirmed");
       onConfirm(output);
     });
+    return teardown;
   }
 
   // src/settings-api-mode.js
@@ -18813,7 +18870,8 @@ ${lines}`;
       applyBidirectionalInjection,
       clearBidirectionalInjection,
       getInteractiveStore,
-      appLifecycleScope
+      appLifecycleScope,
+      closeOverlay
     } = deps;
     const {
       capture: captureBackupState,
@@ -19213,10 +19271,20 @@ ${error.message}`);
       const file = input.files?.[0];
       if (!file) return;
       const reader = new FileReader();
+      const releaseReader = appLifecycleScope.addCleanup(() => {
+        reader.onload = null;
+        reader.onerror = null;
+        if (reader.readyState === 1) reader.abort();
+      }, "file-reader");
+      reader.onerror = () => releaseReader();
       reader.onload = (e) => {
+        releaseReader();
+        if (appLifecycleScope.isDisposed) return;
         const persona = getCurrentPersona();
         const key = `${getStorageId2()}_${persona}`;
         openCropper(e.target.result, {
+          appLifecycleScope,
+          closeOverlay,
           onCancel: () => window.__pmShowConfig("look"),
           onConfirm: (croppedDataUrl) => queueBackgroundMutation(scope, () => {
             if (scope === "desktop") window.__pmDesktopBg = croppedDataUrl;

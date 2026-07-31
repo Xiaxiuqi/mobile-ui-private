@@ -21,18 +21,27 @@ export function bindPressGesture(element, options) {
         clearActiveTimer();
         activePointerId = null;
     };
+    const releaseCapture = pointerId => {
+        if (pointerId === null) return;
+        try { element.releasePointerCapture?.(pointerId); } catch (error) {}
+    };
+    const clearPointer = () => {
+        const pointerId = activePointerId;
+        resetPointer();
+        releaseCapture(pointerId);
+    };
     const isActivePointer = event => (
         activePointerId !== null
         && (event?.pointerId === undefined || event.pointerId === activePointerId)
     );
     const cancelPointer = event => {
         if (!isActivePointer(event)) return;
-        resetPointer();
+        clearPointer();
     };
     const releasePointer = event => {
         if (!isActivePointer(event)) return;
         const isShortPress = timer !== null;
-        resetPointer();
+        clearPointer();
         if (isShortPress) onPress?.();
     };
     const onPointerDown = event => {
@@ -62,9 +71,7 @@ export function bindPressGesture(element, options) {
         onPress?.();
     };
     const onContextMenu = event => event.preventDefault?.();
-    const onWindowBlur = () => {
-        resetPointer();
-    };
+    const onWindowBlur = () => clearPointer();
 
     element.addEventListener('pointerdown', onPointerDown);
     element.addEventListener('pointermove', onPointerMove);
@@ -76,7 +83,7 @@ export function bindPressGesture(element, options) {
     eventTarget?.addEventListener('blur', onWindowBlur);
 
     return () => {
-        resetPointer();
+        clearPointer();
         element.removeEventListener('pointerdown', onPointerDown);
         element.removeEventListener('pointermove', onPointerMove);
         element.removeEventListener('pointerup', releasePointer);

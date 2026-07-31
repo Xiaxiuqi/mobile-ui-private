@@ -1,21 +1,25 @@
-export function createTaskController(getStorageId) {
+export function createTaskController(getStorageId, defaultParentSignal = null) {
     let epoch = 0, sequence = 0;
     const tasks = new Map();
     const slotFor = (storageId, category) => ['generate', 'recipe-generate', 'outfit-generate'].includes(category)
         ? `${category}\0${storageId}` : category;
     const begin = (storageId, category, { replace = true, mode = category, parentSignal } = {}) => {
         if (!storageId || storageId === 'sms_unknown__default' || getStorageId() !== storageId) return null;
+        const ownerSignal = parentSignal || defaultParentSignal;
         const slot = slotFor(storageId, category);
         const previous = tasks.get(slot);
         if (previous && !replace) return null;
-        previous?.controller.abort('superseded');
+        if (previous) {
+            previous.detachParent?.();
+            previous.controller.abort('superseded');
+        }
         const controller = new AbortController();
-        const abortFromParent = () => controller.abort(parentSignal?.reason || 'parent-cancelled');
-        if (parentSignal?.aborted) abortFromParent();
-        else parentSignal?.addEventListener?.('abort', abortFromParent, { once: true });
+        const abortFromParent = () => controller.abort(ownerSignal?.reason || 'parent-cancelled');
+        if (ownerSignal?.aborted) abortFromParent();
+        else ownerSignal?.addEventListener?.('abort', abortFromParent, { once: true });
         const task = Object.freeze({
             id: ++sequence, epoch, storageId, category, mode, slot, controller, signal: controller.signal,
-            detachParent: () => parentSignal?.removeEventListener?.('abort', abortFromParent),
+            detachParent: () => ownerSignal?.removeEventListener?.('abort', abortFromParent),
         });
         tasks.set(slot, task);
         return task;
@@ -23,9 +27,9 @@ export function createTaskController(getStorageId) {
     const active = task => !!task && !task.signal.aborted && task.epoch === epoch
         && tasks.get(task.slot) === task && getStorageId() === task.storageId;
     const finish = task => {
+        task?.detachParent?.();
         if (tasks.get(task?.slot) !== task) return false;
         tasks.delete(task.slot);
-        task.detachParent?.();
         return true;
     };
     const cancel = reason => {

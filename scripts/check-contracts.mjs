@@ -1609,7 +1609,8 @@ for (const expected of [
   'weatherRefreshing: false', 'weatherRefreshTask: task', 'latestView.weatherRefreshTask === task',
   'managementOpenByMode', 'resetCache: true',
   'statusTimerByStorage', 'createCalendarRecipeController', 'getCalendarRecipeStore', 'createCalendarOutfitController', 'getCalendarOutfitStore',
-  'setTimeoutImpl', 'clearTimeoutImpl', '{ persistent: true }', '{ duration: 10000 }',
+  "appLifecycleScope.child('calendar')", 'calendarLifecycleScope.timeout', 'createTaskController(getStorageId, calendarLifecycleScope.signal)',
+  '{ persistent: true }', '{ duration: 10000 }',
 ]) requireText('calendar.js', calendarCode, expected);
 for (const expected of [
   'calendarMonthCells', 'shiftCalendarMonth', 'BACK_ICON_SVG', 'FORWARD_ICON_SVG', 'HOME_ICON_SVG', 'CHEVRON_DOWN_ICON_SVG', 'RECIPE_ICON_SVG',
@@ -1627,6 +1628,7 @@ for (const expected of [
 for (const expected of ['rawContent: removeProtectedBlocks(message.mes || \'\')', 'rawLatestChatText', 'mainChatText: mainChat.map(message => `${message.who}：${message.content}`).join(\'\\n\')']) requireText('host-context.js', hostContextCode, expected);
 for (const expected of [
   "tasks.begin(storageId, 'recipe-generate'", 'isolated: true, signal: task.signal',
+  'parentSignal',
   'expectedRegion: requestedRegion, days: generationDays', 'replaceRecipeInWindow', 'commitRecipe',
   'generationDays = replaceWindow ? 1 : 7', 'hasExistingMeals', 'generationWindow.label', '覆盖当日所有餐食',
   'requestedWindowSnapshot', '待覆盖菜谱已在生成期间改变，请重新确认后生成',
@@ -1634,6 +1636,10 @@ for (const expected of [
   'refreshInjection: false', 'calendar-recipe-add', 'calendar-recipe-edit', 'calendar-recipe-delete',
   'renderRecipeMealDialog', 'recipeGenerationTask === task',
 ]) requireText('calendar-recipe-controller.js', calendarRecipeControllerCode, expected);
+for (const expected of ["tasks.begin(storageId, 'outfit-generate'", 'parentSignal', 'signal: task.signal']) {
+  requireText('calendar-outfit-controller.js', sourceModuleByName.get('calendar-outfit-controller.js')?.code || '', expected);
+}
+for (const expected of ['defaultParentSignal', 'ownerSignal', "controller.abort(ownerSignal?.reason || 'parent-cancelled')"]) requireText('calendar-task-controller.js', sourceModuleByName.get('calendar-task-controller.js')?.code || '', expected);
 for (const expected of ['commitGeneration', 'invalidateCommits', 'generation !== commitGeneration']) {
   requireText('calendar-commit.js', sourceModuleByName.get('calendar-commit.js')?.code || '', expected);
 }

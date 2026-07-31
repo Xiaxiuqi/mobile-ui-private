@@ -82,6 +82,7 @@ import { commitConversationInjectionUpdate, installPhoneContextInjection } from 
 import {
     commitEditedGroupUpdate, installPhoneDirectory, refreshEditedGroupRuntime,
 } from '../src/phone-directory.js';
+import { openCropper } from '../src/cropper.js';
 function createQuickReplyApiFixture({ set = null, active = false, fail = {}, beforeMutation = null } = {}) {
     const sets = new Map();
     if (set) sets.set(set.name, set);
@@ -1666,6 +1667,42 @@ const createModelDropdownFixture = () => {
         options,
     };
 };
+const cropperOverlayFixtures = [];
+const createCropperOverlayFixture = () => {
+    const createTarget = extras => {
+        const listeners = new Map();
+        return {
+            style: {}, value: '100', onload: null, ...extras,
+            addEventListener(type, handler) {
+                if (!listeners.has(type)) listeners.set(type, new Set());
+                listeners.get(type).add(handler);
+            },
+            removeEventListener(type, handler) { listeners.get(type)?.delete(handler); },
+            dispatch(type, event = {}) {
+                for (const handler of [...(listeners.get(type) || [])]) handler(event);
+            },
+            get listenerCount() { return [...listeners.values()].reduce((total, handlers) => total + handlers.size, 0); },
+        };
+    };
+    const controls = new Map([
+        ['#pm-crop-close', createTarget()],
+        ['#pm-crop-cancel', createTarget()],
+        ['#pm-crop-frame', createTarget({ clientWidth: 330 })],
+        ['#pm-crop-img', createTarget({ naturalWidth: 330, naturalHeight: 450 })],
+        ['#pm-crop-zoom', createTarget()],
+        ['#pm-crop-confirm', createTarget()],
+    ]);
+    const overlay = createTarget({
+        id: '', removed: false, controls,
+        setAttribute() {},
+        set innerHTML(value) { this.html = String(value); },
+        get innerHTML() { return this.html || ''; },
+        querySelector(selector) { return controls.get(selector) || null; },
+        remove() { this.removed = true; uiElements.delete(this.id); },
+    });
+    cropperOverlayFixtures.push(overlay);
+    return overlay;
+};
 const uiAlerts = [];
 const uiElements = new Map([
     ['pm-custom-title', { value: '  雨夜电台  ' }],
@@ -1824,7 +1861,8 @@ installSettingsUi({
         overlay.__pmOnClose = options.onClose || null;
         uiElements.set('pm-overlay', overlay);
         return overlay;
-    }, applyTheme: () => appliedThemes.push(structuredClone(window.__pmTheme)), applyBackground: () => {},
+    }, closeOverlay: closeSettingsOverlay,
+    applyTheme: () => appliedThemes.push(structuredClone(window.__pmTheme)), applyBackground: () => {},
     fitNameFont: () => {}, addNote: note => uiNotes.push(note), getCurrentPersona: () => 'default', getStorageId: () => 'story', appLifecycleScope: settingsAppLifecycleScope,
     runtime: settingsRuntime,
     closePhone: () => { importCloseCalls += 1; },
@@ -2984,6 +3022,7 @@ const runIslandTimers = () => {
 };
 const unbindIslandFixture = foundationDeps.bindIsland(foundationPhone, islandHandle, {
     setTimer: setIslandTimer, clearTimer: clearIslandTimer, doubleTapDelay: 300,
+    lifecycleScope: foundationAppLifecycleScope,
 });
 const makeIslandEvent = (x, y) => ({
     target: { tagName: 'DIV' }, clientX: x, clientY: y, cancelable: true, preventDefault() {},
@@ -3255,6 +3294,112 @@ assert.equal(generationCancelButtons[0].hidden, true, '生成收尾后停止按�
 assert.equal(generationCancelButtons[0].disabled, true, '生成收尾后停止按钮必须禁用');
 assert.equal(foundationState.isGenerating, false, '取消收尾后必须释放生成状态');
 
+const originalSettingsCreateElement = document.createElement;
+const previousSettingsFileReader = globalThis.FileReader;
+const settingsResourceBaseline = settingsLifecycleDiagnostics.snapshot();
+const backgroundReaders = [];
+const cropperWindowListeners = new Map();
+const previousCropperWindowAddEventListener = window.addEventListener;
+const previousCropperWindowRemoveEventListener = window.removeEventListener;
+window.addEventListener = (type, listener) => {
+    if (!cropperWindowListeners.has(type)) cropperWindowListeners.set(type, new Set());
+    cropperWindowListeners.get(type).add(listener);
+};
+window.removeEventListener = (type, listener) => cropperWindowListeners.get(type)?.delete(listener);
+const dispatchCropperWindowEvent = (type, event = {}) => {
+    for (const listener of [...(cropperWindowListeners.get(type) || [])]) listener(event);
+};
+globalThis.FileReader = class BackgroundFileReader {
+    constructor() { this.readyState = 0; this.abortCalls = 0; backgroundReaders.push(this); }
+    readAsDataURL(file) { this.file = file; this.readyState = 1; }
+    abort() { this.abortCalls += 1; this.readyState = 0; }
+};
+document.createElement = tag => tag === 'div' ? createCropperOverlayFixture() : originalSettingsCreateElement(tag);
+let replacedSettingsOverlayCloseReason = '';
+settingsMakeOverlay('<div>待替换设置浮层</div>', {
+    onClose: reason => { replacedSettingsOverlayCloseReason = reason; },
+});
+const completedBackgroundInput = { files: [{ name: 'completed.png' }], value: 'completed.png' };
+window.__pmUploadBg(completedBackgroundInput, 'desktop');
+const completedBackgroundReader = backgroundReaders.at(-1);
+assert.equal(settingsLifecycleDiagnostics.snapshot()['file-reader'], 1, '背景读取进行中必须由 app scope 托管');
+completedBackgroundReader.readyState = 2;
+completedBackgroundReader.onload({ target: { result: 'data:image/png;base64,completed' } });
+assert.equal(completedBackgroundReader.onload, null, '背景读取完成后必须清除 onload 回调');
+assert.equal(completedBackgroundReader.onerror, null, '背景读取完成后必须清除 onerror 回调');
+assert.equal(replacedSettingsOverlayCloseReason, 'replace',
+    '裁剪器替换既有浮层时必须执行统一 onClose 契约');
+assert.equal(settingsLifecycleDiagnostics.snapshot()['file-reader'], undefined, '背景读取完成后必须释放 file-reader cleanup');
+const completedCropperOverlay = cropperOverlayFixtures.at(-1);
+assert.equal(uiElements.get('pm-overlay'), completedCropperOverlay, '背景读取完成后必须打开裁剪器');
+const completedCropperFrame = completedCropperOverlay.controls.get('#pm-crop-frame');
+const completedCropperImage = completedCropperOverlay.controls.get('#pm-crop-img');
+completedCropperImage.onload();
+const mouseDragStart = { clientX: 200, clientY: 200, cancelable: true, preventDefault() {} };
+const mouseDragMove = { clientX: 180, clientY: 180, cancelable: true, preventDefault() {} };
+completedCropperFrame.dispatch('mousedown', mouseDragStart);
+dispatchCropperWindowEvent('mousemove', mouseDragMove);
+const transformBeforeBlur = completedCropperImage.style.transform;
+dispatchCropperWindowEvent('blur');
+dispatchCropperWindowEvent('mousemove', { clientX: 120, clientY: 120, cancelable: true, preventDefault() {} });
+assert.equal(completedCropperImage.style.transform, transformBeforeBlur,
+    'window blur 后迟到的 mousemove 不得继续拖动裁剪图片');
+completedCropperFrame.dispatch('touchstart', {
+    touches: [{ clientX: 180, clientY: 180 }], cancelable: true, preventDefault() {},
+});
+dispatchCropperWindowEvent('touchmove', {
+    touches: [{ clientX: 160, clientY: 160 }], cancelable: true, preventDefault() {},
+});
+const transformBeforeTouchCancel = completedCropperImage.style.transform;
+dispatchCropperWindowEvent('touchcancel');
+dispatchCropperWindowEvent('touchmove', {
+    touches: [{ clientX: 80, clientY: 80 }], cancelable: true, preventDefault() {},
+});
+assert.equal(completedCropperImage.style.transform, transformBeforeTouchCancel,
+    'touchcancel 后迟到的 touchmove 不得继续拖动裁剪图片');
+completedCropperOverlay.controls.get('#pm-crop-close').dispatch('click');
+assert.equal(completedCropperOverlay.removed, true, '裁剪器关闭后必须移除自身 DOM');
+assert.deepEqual(settingsLifecycleDiagnostics.snapshot(), settingsResourceBaseline, '裁剪器关闭后资源必须回到原有基线');
+closeSettingsOverlay('background-upload-test-cleanup');
+
+const failedBackgroundInput = { files: [{ name: 'failed.png' }], value: 'failed.png' };
+window.__pmUploadBg(failedBackgroundInput, 'desktop');
+const failedBackgroundReader = backgroundReaders.at(-1);
+assert.equal(settingsLifecycleDiagnostics.snapshot()['file-reader'], 1, '失败前的背景读取必须保持托管');
+failedBackgroundReader.onerror(new Error('injected background read failure'));
+assert.equal(failedBackgroundReader.onload, null, '背景读取失败后必须清除 onload 回调');
+assert.equal(failedBackgroundReader.onerror, null, '背景读取失败后必须清除 onerror 回调');
+assert.deepEqual(settingsLifecycleDiagnostics.snapshot(), settingsResourceBaseline, '背景读取失败后必须释放 file-reader cleanup');
+
+const cropperOwnerDiagnostics = createLifecycleDiagnostics();
+const cropperOwnerScope = createLifecycleScope({ label: 'cropper-owner-app', diagnostics: cropperOwnerDiagnostics });
+assert.throws(
+    () => openCropper('data:image/png;base64,missing-close-contract', { appLifecycleScope: cropperOwnerScope }),
+    /managed overlay close contract/,
+    '裁剪器不得在缺少统一 overlay 关闭契约时静默直接删除 DOM',
+);
+openCropper('data:image/png;base64,owner', { appLifecycleScope: cropperOwnerScope, closeOverlay: closeSettingsOverlay });
+const parentDisposedCropper = cropperOverlayFixtures.at(-1);
+cropperOwnerScope.dispose('cropper-owner-parent-disposed');
+assert.equal(parentDisposedCropper.removed, true, '父 scope dispose 必须移除仍打开的裁剪器 DOM');
+assert.deepEqual(cropperOwnerDiagnostics.snapshot(), {}, '父 scope dispose 必须释放裁剪器全部资源');
+const replacementCropperDiagnostics = createLifecycleDiagnostics();
+const replacementCropperScope = createLifecycleScope({
+    label: 'cropper-owner-replacement-app', diagnostics: replacementCropperDiagnostics,
+});
+assert.doesNotThrow(() => openCropper('data:image/png;base64,replacement', {
+    appLifecycleScope: replacementCropperScope, closeOverlay: closeSettingsOverlay,
+}),
+    '父 scope dispose 后重新打开裁剪器不得调用陈旧 teardown');
+const replacementCropper = cropperOverlayFixtures.at(-1);
+replacementCropperScope.dispose('cropper-owner-replacement-disposed');
+assert.equal(replacementCropper.removed, true, '替换裁剪器的父 scope dispose 必须移除 DOM');
+assert.deepEqual(replacementCropperDiagnostics.snapshot(), {}, '替换裁剪器 dispose 后资源必须归零');
+window.addEventListener = previousCropperWindowAddEventListener;
+window.removeEventListener = previousCropperWindowRemoveEventListener;
+document.createElement = originalSettingsCreateElement;
+globalThis.FileReader = previousSettingsFileReader;
+
 window.__pmShowModelPicker();
 assert.equal(uiElements.has('pm-model-dropdown'), false, '再次点击模型箭头必须关闭现有浮层');
 assert.equal(documentClickListeners.size, lifecycleDocumentClickBaseline, '模型箭头关闭后必须只保留宿主生命周期监听器');
@@ -3288,7 +3433,27 @@ window.__pmShowModelPicker();
 await new Promise(resolve => setTimeout(resolve, 0));
 const staleModelPickerListener = [...documentClickListeners].find(listener => !modelPickerClickBaseline.has(listener));
 const teardownModelDropdown = uiElements.get('pm-model-dropdown');
+const pendingBackgroundReaders = [];
+globalThis.FileReader = class PendingBackgroundFileReader {
+    constructor() { this.readyState = 0; this.abortCalls = 0; pendingBackgroundReaders.push(this); }
+    readAsDataURL(file) { this.file = file; this.readyState = 1; }
+    abort() { this.abortCalls += 1; this.readyState = 0; }
+};
+const pendingBackgroundInput = { files: [{ name: 'pending.png' }], value: 'pending.png' };
+window.__pmUploadBg(pendingBackgroundInput, 'desktop');
+const pendingBackgroundReader = pendingBackgroundReaders.at(-1);
+const staleBackgroundLoad = pendingBackgroundReader.onload;
+const cropperFixtureCountBeforeTeardown = cropperOverlayFixtures.length;
+assert.equal(settingsLifecycleDiagnostics.snapshot()['file-reader'], 1, 'app teardown 前必须仍跟踪 pending FileReader');
 settingsAppLifecycleScope.dispose('settings-app-teardown');
+assert.equal(pendingBackgroundReader.abortCalls, 1, 'app teardown 必须终止 pending FileReader');
+assert.equal(pendingBackgroundReader.onload, null, 'app teardown 必须清除 pending FileReader onload');
+assert.equal(pendingBackgroundReader.onerror, null, 'app teardown 必须清除 pending FileReader onerror');
+assert.doesNotThrow(() => staleBackgroundLoad?.({ target: { result: 'data:image/png;base64,stale' } }),
+    'app teardown 后直接调用陈旧 FileReader onload 不得产生异常');
+assert.equal(cropperOverlayFixtures.length, cropperFixtureCountBeforeTeardown,
+    'app teardown 后陈旧 FileReader onload 不得打开裁剪器');
+globalThis.FileReader = previousSettingsFileReader;
 assert.equal(uiElements.has('pm-model-dropdown'), false, 'app teardown 必须移除仍打开的模型浮层');
 assert.equal(documentClickListeners.size, lifecycleDocumentClickBaseline, 'app teardown 必须移除模型浮层 document listener');
 assert.deepEqual(settingsLifecycleDiagnostics.snapshot(), {}, 'app teardown 后模型浮层资源必须全部归零');
@@ -4269,7 +4434,9 @@ globalThis.indexedDB = {
                         },
                         get(key) {
                             const getRequest = {};
-                            queueMicrotask(() => {
+                            queueMicrotask(async () => {
+                                const block = consumeIDBBlock('get', key);
+                                if (block) { block.enter(); await block.pending; }
                                 if (consumeIDBAbort('get', key)) {
                                     transaction.onabort?.();
                                     return;
@@ -4469,8 +4636,12 @@ function createDirectoryDeleteFixture({
         injectionCalls += 1;
         return result || { written: 1, failedWrites: 0, cleared: 1, failedKeys: [] };
     };
+    const appLifecycleScope = createLifecycleScope({
+        label: 'directory-fixture', diagnostics: createLifecycleDiagnostics(),
+    });
     const deps = {
         runtime,
+        appLifecycleScope,
         getStorageId: () => 'story',
         makeOverlay: () => {},
         applyBidirectionalInjection,
@@ -4483,6 +4654,7 @@ function createDirectoryDeleteFixture({
     let listRefreshes = 0;
     window.__pmShowList = async () => { listRefreshes += 1; };
     return {
+        appLifecycleScope,
         runtime,
         state,
         phoneElements,
@@ -4846,6 +5018,9 @@ try {
             setAttribute(name, value) { attributes.set(name, String(value)); },
             getAttribute(name) { return attributes.get(name) ?? null; },
             addEventListener(type, listener) { listeners.set(type, listener); },
+            removeEventListener(type, listener) {
+                if (listeners.get(type) === listener) listeners.delete(type);
+            },
             dispatch(type, event) { return listeners.get(type)?.(event); },
             contains(target) { return target === this || target?.switcherOwner === this; },
             querySelector(selector) {
@@ -4935,6 +5110,21 @@ try {
     assert.equal(await staleOpen, false, '异步打开期间再次关闭必须让旧请求失效');
     assert.equal(await latestOpen, true, '最后一次标题点击必须由最新请求打开浮层');
     assert.equal(switcherElements.has('pm-contact-switcher'), true);
+
+    assert.equal(window.__pmToggleContactSwitcher(trigger), true, '销毁竞态前必须先关闭现有联系人浮层');
+    localValues.delete('ST_SMS_GROUP_META_LOCAL_FALLBACK');
+    const pendingGroupMeta = blockIDBOperation('get', 'ST_SMS_GROUP_META');
+    const openBeforeAppDispose = window.__pmToggleContactSwitcher(trigger);
+    await pendingGroupMeta.entered;
+    fixture.appLifecycleScope.dispose('directory-app-disposed');
+    pendingGroupMeta.release();
+    assert.equal(await openBeforeAppDispose, false, 'app dispose 后迟到的联系人数据不得重新打开浮层');
+    assert.equal(switcherElements.has('pm-contact-switcher'), false,
+        'app dispose 后迟到的联系人数据不得插入无 owner 的 DOM');
+    assert.equal(switcherDocumentListeners.has('click'), false,
+        'app dispose 后迟到的联系人数据不得注册 document click listener');
+    assert.equal(switcherDocumentListeners.has('keydown'), false,
+        'app dispose 后迟到的联系人数据不得注册 document keydown listener');
 } finally {
     globalThis.confirm = previousDeleteConfirm;
     globalThis.alert = previousDeleteAlert;

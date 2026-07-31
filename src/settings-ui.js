@@ -53,7 +53,7 @@ export function installSettingsUi(deps) {
     const {
         makeOverlay, applyTheme, applyBackground, fitNameFont, addNote,
         getCurrentPersona, getStorageId, runtime, closePhone,
-        applyBidirectionalInjection, clearBidirectionalInjection, getInteractiveStore, appLifecycleScope,
+        applyBidirectionalInjection, clearBidirectionalInjection, getInteractiveStore, appLifecycleScope, closeOverlay,
     } = deps;
     const {
         capture: captureBackupState,
@@ -416,10 +416,20 @@ export function installSettingsUi(deps) {
     window.__pmUploadBg = (input, scope) => {
         const file = input.files?.[0]; if (!file) return;
         const reader = new FileReader();
+        const releaseReader = appLifecycleScope.addCleanup(() => {
+            reader.onload = null;
+            reader.onerror = null;
+            if (reader.readyState === 1) reader.abort();
+        }, 'file-reader');
+        reader.onerror = () => releaseReader();
         reader.onload = (e) => {
+            releaseReader();
+            if (appLifecycleScope.isDisposed) return;
             const persona = getCurrentPersona();
             const key = `${getStorageId()}_${persona}`;
             openCropper(e.target.result, {
+                appLifecycleScope,
+                closeOverlay,
                 onCancel: () => window.__pmShowConfig('look'),
                 onConfirm: croppedDataUrl => queueBackgroundMutation(scope, () => {
                     if (scope === 'desktop') window.__pmDesktopBg = croppedDataUrl;

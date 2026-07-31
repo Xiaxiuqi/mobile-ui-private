@@ -7,6 +7,7 @@ import { createCalendarCommitters } from '../src/calendar-commit.js';
 import { createCalendarRecipeController } from '../src/calendar-recipe-controller.js';
 import { createCalendarOutfitController } from '../src/calendar-outfit-controller.js';
 import { createTaskController } from '../src/calendar-task-controller.js';
+import { createLifecycleDiagnostics, createLifecycleScope } from '../src/infrastructure/lifecycle-scope.js';
 import {
     buildRecipePrompts, createEmptyRecipeScope, createEmptyRecipeStore, DEFAULT_RECIPE_GENERATION_RULE, deleteRecipeMeal, mergeGeneratedRecipe,
     normalizeRecipeScope, normalizeRecipeStore, parseRecipeAiResponse, recipeDayFor, recipeScopeFor,
@@ -1432,7 +1433,14 @@ try {
         ...previousWorldBookWindow,
         __pmShowWorldBookColumns: async options => { calendarWorldBookCalls.push(options); },
     };
+    const calendarLifecycleDiagnostics = createLifecycleDiagnostics();
+    const calendarAppLifecycleScope = createLifecycleScope({
+        label: 'calendar-app',
+        diagnostics: calendarLifecycleDiagnostics,
+        timers: { setTimeout: setTimeoutImpl, clearTimeout: clearTimeoutImpl },
+    });
     const deps = {
+        appLifecycleScope: calendarAppLifecycleScope,
         getStorageId: () => storageA,
         gatherContext: async () => ({}),
         callAI: async () => '{"version":1,"kind":"calendar_events","events":[]}',
@@ -2061,6 +2069,28 @@ try {
     assert.equal(memory.has(CALENDAR_RECIPE_STORAGE_KEY), false,
         '旧菜谱事务迟到结束不得让已清空的持久化数据复活');
 
+    const parentAbortListeners = new Set();
+    const parentTaskSignal = {
+        aborted: false,
+        reason: null,
+        addEventListener(type, listener) { if (type === 'abort') parentAbortListeners.add(listener); },
+        removeEventListener(type, listener) { if (type === 'abort') parentAbortListeners.delete(listener); },
+    };
+    const replacementTasks = createTaskController(() => storageA, parentTaskSignal);
+    const replacedTask = replacementTasks.begin(storageA, 'weather-refresh');
+    assert.equal(parentAbortListeners.size, 1, '任务开始后必须注册一个父终止监听器');
+    const replacingTask = replacementTasks.begin(storageA, 'weather-refresh');
+    assert.equal(replacedTask.signal.aborted, true, '同槽任务替换必须终止旧任务');
+    assert.equal(parentAbortListeners.size, 1, '同槽任务替换必须先解绑旧任务的父终止监听器');
+    assert.equal(replacementTasks.finish(replacedTask), false, '被替换任务不得结束当前任务');
+    assert.equal(parentAbortListeners.size, 1, '旧任务迟到结束不得解绑新任务的父终止监听器');
+    assert.equal(replacementTasks.finish(replacingTask), true, '当前任务必须能够正常结束');
+    assert.equal(parentAbortListeners.size, 0, '任务正常结束必须解绑父终止监听器');
+    replacementTasks.begin(storageA, 'weather-refresh');
+    replacementTasks.cancel('calendar-disposed');
+    assert.equal(parentAbortListeners.size, 0, '任务批量取消必须解绑全部父终止监听器');
+
+
     let controllerRecipeScope = createEmptyRecipeScope();
     let controllerView = { selectedDate: recipeDates[0], recipeGenerating: false };
     const controllerStatuses = [];
@@ -2144,14 +2174,16 @@ try {
     let controllerOutfitStore = createEmptyOutfitStore();
     let controllerOutfitView = { selectedDate: recipeDates[0], outfitSubject: 'role:Alice', outfitGenerating: false };
     const controllerOutfitGatherCalls = [];
+    const controllerOutfitTasks = createTaskController(() => storageA);
+    let controllerOutfitAiImpl = async () => outfitEnvelope();
     const outfitController = createCalendarOutfitController({
-        tasks: createTaskController(() => storageA),
+        tasks: controllerOutfitTasks,
         getStorageId: () => storageA,
         gatherContext: async (...args) => {
             controllerOutfitGatherCalls.push(args);
             return { cardScenario: '架空北境旅店', worldBookText: '冬季多雪' };
         },
-        callAI: async () => outfitEnvelope(),
+        callAI: (...args) => controllerOutfitAiImpl(...args),
         makeOverlay: makeRecipeOverlay,
         closeOverlay: reason => controllerCloseReasons.push(reason),
         commitOutfits: async (_storageId, mutate) => { controllerOutfitStore = normalizeOutfitStore(mutate(controllerOutfitStore)); return true; },
@@ -2170,6 +2202,30 @@ try {
     assert.equal(controllerOutfitGatherCalls[0][0], null);
     assert.deepEqual({ ...controllerOutfitGatherCalls[0][1], signal: undefined }, { module: 'outfit', signal: undefined, worldBookMaxChars: 3500 },
         '穿搭真实控制器必须以 outfit 模块和 3500 字符预算采集上下文');
+    const outfitPreferenceRaceResponse = deferred(), outfitPreferenceRaceStarted = deferred();
+    controllerOutfitAiImpl = async () => {
+        outfitPreferenceRaceStarted.resolve();
+        return outfitPreferenceRaceResponse.promise;
+    };
+    const outfitBeforePreferenceRace = structuredClone(controllerOutfitStore);
+    const outfitPreferenceRaceGeneration = outfitController.generate();
+    await outfitPreferenceRaceStarted.promise;
+    controllerOutfitStore = updateOutfitProfile(controllerOutfitStore, storageA, 'role:Alice', profile => ({
+        ...profile,
+        colorPreference: '生成期间改为蓝色',
+        preference: '生成期间改为不穿高跟鞋',
+        generationRule: '生成期间更新的穿搭规则',
+    }));
+    outfitPreferenceRaceResponse.resolve(outfitEnvelope());
+    await assert.rejects(outfitPreferenceRaceGeneration, /穿搭偏好或生成规则已在生成期间改变/,
+        '生成期间保存穿搭偏好或规则后，旧提示词结果不得提交');
+    const outfitAfterPreferenceRace = outfitScopeFor(controllerOutfitStore, storageA, 'role:Alice');
+    assert.equal(outfitAfterPreferenceRace.colorPreference, '生成期间改为蓝色');
+    assert.equal(outfitAfterPreferenceRace.preference, '生成期间改为不穿高跟鞋');
+    assert.equal(outfitAfterPreferenceRace.generationRule, '生成期间更新的穿搭规则');
+    assert.deepEqual(outfitAfterPreferenceRace.days,
+        outfitScopeFor(outfitBeforePreferenceRace, storageA, 'role:Alice').days,
+        '穿搭偏好竞态拒绝不得改写生成前 OOTD');
     assert.equal(controllerConfirmMessages.length, confirmCountBeforeEmptyRecipeGenerate,
         '未来七日没有菜谱时，顶部生成必须静默执行');
     controllerRecipeScope = createEmptyRecipeScope();
@@ -2432,7 +2488,14 @@ try {
     let injectionCount = 0;
     let injectionImpl = async () => { injectionCount += 1; };
     const calendarGatherCalls = [];
+    const asyncCalendarLifecycleDiagnostics = createLifecycleDiagnostics();
+    const asyncCalendarAppLifecycleScope = createLifecycleScope({
+        label: 'async-calendar-app',
+        diagnostics: asyncCalendarLifecycleDiagnostics,
+        timers: { setTimeout: setTimeoutImpl, clearTimeout: clearTimeoutImpl },
+    });
     const deps = {
+        appLifecycleScope: asyncCalendarAppLifecycleScope,
         getStorageId: () => activeStorageId,
         gatherContext: (...args) => {
             calendarGatherCalls.push(args);
