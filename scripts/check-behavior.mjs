@@ -44,7 +44,9 @@ import { pmIDBKeys } from '../src/pm-idb.js';
 import { renderPhoneDesktop, runDesktopPageTransition } from '../src/interactive-scenes.js';
 import { getCommunityInjectionState, runCommunityInjectionAction } from '../src/interactive-scene-phone.js';
 import { getDanmakuMotion, getDanmakuTone, renderCommunityLauncher, renderCommunityWorkspace } from '../src/interactive-scene-views.js';
-import { installPhoneControlCenter, runControlMenuAction } from '../src/phone-control-center.js';
+import {
+    installControlCenterDocumentListeners, installPhoneControlCenter, runControlMenuAction,
+} from '../src/phone-control-center.js';
 import { installPhoneChatPoke } from '../src/phone-chat-poke.js';
 import {
     clearPhoneQuickReply, ensureInitialPhoneQuickReply, ensureInitialPhoneQuickReplyWithRetry,
@@ -620,6 +622,126 @@ assert.equal(failedOwnerDocument.listeners.size, 0, 'owner cleanup 注册失败�
 assert.notEqual(failedOwnerWindow.__pmBeforeUnloadRegistered, true);
 failedOwnerBaseScope.dispose('owner-failure-complete');
 assert.deepEqual(failedOwnerDiagnostics.snapshot(), {});
+
+const createControlCenterDocumentTarget = ({ failType = '', failRemoveType = '' } = {}) => {
+    const listeners = new Map();
+    return {
+        listeners,
+        addEventListener(type, listener, options) {
+            assert.equal(options, true, `${type} 必须保持 capture=true`);
+            if (type === failType) throw new Error(`failed:${type}`);
+            assert.equal(listeners.has(type), false, `${type} listener 不得重复注册`);
+            listeners.set(type, listener);
+        },
+        removeEventListener(type, listener, options) {
+            assert.equal(options, true, `${type} 移除时必须保持 capture=true`);
+            if (type === failRemoveType) throw new Error(`failed-remove:${type}`);
+            if (listeners.get(type) === listener) listeners.delete(type);
+        },
+    };
+};
+const controlCenterDiagnostics = createLifecycleDiagnostics();
+const controlCenterAppScope = createLifecycleScope({ label: 'control-center-app', diagnostics: controlCenterDiagnostics });
+const controlCenterDocument = createControlCenterDocumentTarget();
+const controlCenterMenuState = { removed: 0 };
+const controlCenterAnchorState = { ariaExpanded: 'true' };
+const controlCenterMenu = {
+    contains: target => target === 'menu',
+    remove: () => { controlCenterMenuState.removed += 1; },
+};
+const controlCenterAnchor = {
+    contains: target => target === 'anchor',
+    setAttribute(name, value) {
+        assert.equal(name, 'aria-expanded');
+        controlCenterAnchorState.ariaExpanded = value;
+    },
+};
+const controlCenterCloseCalls = [];
+let controlCenterScope = installControlCenterDocumentListeners({
+    documentRef: controlCenterDocument,
+    appLifecycleScope: controlCenterAppScope,
+    menu: controlCenterMenu,
+    anchor: controlCenterAnchor,
+    close: restoreFocus => controlCenterCloseCalls.push(restoreFocus),
+});
+assert.deepEqual(controlCenterDiagnostics.snapshot(), { 'child-scope': 1, 'control-center-menu': 1, listener: 2, scope: 2 });
+controlCenterDocument.listeners.get('click')({ target: 'menu' });
+controlCenterDocument.listeners.get('click')({ target: 'anchor' });
+controlCenterDocument.listeners.get('click')({ target: 'outside' });
+controlCenterDocument.listeners.get('keydown')({ key: 'Enter' });
+controlCenterDocument.listeners.get('keydown')({ key: 'Escape' });
+assert.deepEqual(controlCenterCloseCalls, [false, true], '外部 click 与 Escape 必须保持原关闭参数语义');
+const staleControlCenterClick = controlCenterDocument.listeners.get('click');
+const staleControlCenterKeydown = controlCenterDocument.listeners.get('keydown');
+controlCenterScope.dispose('menu-closed');
+assert.deepEqual(controlCenterDiagnostics.snapshot(), { scope: 1 });
+assert.equal(controlCenterMenuState.removed, 1, 'menu scope dispose 必须清理菜单 DOM');
+assert.equal(controlCenterAnchorState.ariaExpanded, 'false', 'menu scope dispose 必须恢复 aria-expanded');
+assert.equal(controlCenterDocument.listeners.size, 0);
+const controlCenterCallsAfterDispose = controlCenterCloseCalls.length;
+staleControlCenterClick({ target: 'outside' });
+staleControlCenterKeydown({ key: 'Escape' });
+assert.equal(controlCenterCloseCalls.length, controlCenterCallsAfterDispose,
+    'scope dispose 后陈旧 control-center listener 必须静默');
+
+for (let cycle = 0; cycle < 20; cycle += 1) {
+    controlCenterScope = installControlCenterDocumentListeners({
+        documentRef: controlCenterDocument,
+        appLifecycleScope: controlCenterAppScope,
+        menu: controlCenterMenu,
+        anchor: controlCenterAnchor,
+        close: () => {},
+    });
+    assert.deepEqual(controlCenterDiagnostics.snapshot(), { 'child-scope': 1, 'control-center-menu': 1, listener: 2, scope: 2 });
+    controlCenterScope.dispose(`cycle-${cycle + 1}`);
+    assert.deepEqual(controlCenterDiagnostics.snapshot(), { scope: 1 });
+}
+
+const failedControlCenterDocument = createControlCenterDocumentTarget({ failType: 'keydown' });
+const failedControlCenterMenuState = { removed: false };
+const failedControlCenterAnchorState = { ariaExpanded: 'true' };
+const failedControlCenterMenu = {
+    contains: () => false,
+    remove: () => { failedControlCenterMenuState.removed = true; },
+};
+const failedControlCenterAnchor = {
+    contains: () => false,
+    setAttribute: (name, value) => {
+        if (name === 'aria-expanded') failedControlCenterAnchorState.ariaExpanded = value;
+    },
+};
+assert.throws(() => installControlCenterDocumentListeners({
+    documentRef: failedControlCenterDocument,
+    appLifecycleScope: controlCenterAppScope,
+    menu: failedControlCenterMenu,
+    anchor: failedControlCenterAnchor,
+    close: () => {},
+}), /failed:keydown/);
+assert.equal(failedControlCenterDocument.listeners.size, 0,
+    '第二个 listener 注册失败必须回滚第一个 listener');
+assert.equal(failedControlCenterMenuState.removed, true, 'listener 安装失败必须清理已插入菜单');
+assert.equal(failedControlCenterAnchorState.ariaExpanded, 'false', 'listener 安装失败必须恢复 aria-expanded');
+assert.deepEqual(controlCenterDiagnostics.snapshot(), { scope: 1 });
+
+controlCenterScope = installControlCenterDocumentListeners({
+    documentRef: controlCenterDocument,
+    appLifecycleScope: controlCenterAppScope,
+    menu: controlCenterMenu,
+    anchor: controlCenterAnchor,
+    close: () => {},
+});
+controlCenterAppScope.dispose('app-teardown');
+assert.deepEqual(controlCenterDiagnostics.snapshot(), {});
+assert.equal(controlCenterMenuState.removed, 22, 'app teardown 必须同时清理当前菜单 DOM');
+assert.equal(controlCenterAnchorState.ariaExpanded, 'false');
+assert.equal(controlCenterDocument.listeners.size, 0, 'app teardown 必须级联释放 control-center listeners');
+assert.throws(() => installControlCenterDocumentListeners({
+    documentRef: controlCenterDocument,
+    appLifecycleScope: controlCenterAppScope,
+    menu: controlCenterMenu,
+    anchor: controlCenterAnchor,
+    close: () => {},
+}), LifecycleScopeDisposedError);
 
 assert.deepEqual(normalizeCharacterBehavior(null), DEFAULT_CHARACTER_BEHAVIOR);
 const worldBookKey = createWorldBookEntryKey(' 世界书 A ', 42);

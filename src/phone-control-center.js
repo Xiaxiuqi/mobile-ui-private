@@ -18,6 +18,37 @@ const controlActionLabel = action => ({
     delete: '进入消息删除模式',
 })[action] || '执行快捷操作';
 
+export function installControlCenterDocumentListeners({
+    documentRef = document, appLifecycleScope, menu, anchor, close,
+}) {
+    if (!appLifecycleScope) throw new Error('Control center document listeners require an app lifecycle scope');
+    const scope = appLifecycleScope.child('control-center-menu');
+    try {
+        scope.addCleanup(() => {
+            menu.remove();
+            anchor.setAttribute('aria-expanded', 'false');
+        }, 'control-center-menu');
+        scope.listen(documentRef, 'click', event => {
+            if (scope.isDisposed || menu.contains(event.target) || anchor.contains(event.target)) return;
+            close(false);
+        }, true);
+        scope.listen(documentRef, 'keydown', event => {
+            if (!scope.isDisposed && event.key === 'Escape') close(true);
+        }, true);
+    } catch (error) {
+        try {
+            scope.dispose('control-center-listener-installation-failed');
+        } catch (cleanupError) {
+            throw new AggregateError(
+                [error, cleanupError],
+                'Control center document listener installation failed',
+            );
+        }
+        throw error;
+    }
+    return scope;
+}
+
 export function runControlMenuAction(action, runAction, reportActionError) {
     const result = runAction(action);
     if (result && typeof result.then === 'function') {
@@ -33,8 +64,7 @@ export function installPhoneControlCenter(state, deps) {
     } = deps;
 
     const CONTROL_MENU_ID = 'pm-control-menu';
-    let outsideClickHandler = null;
-    let escapeKeyHandler = null;
+    let controlMenuScope = null;
 
     const getTarget = () => resolveConversationTarget(state, getStorageId);
 
@@ -79,21 +109,18 @@ export function installPhoneControlCenter(state, deps) {
     let editingTarget = null;
 
     function closeControlCenter(restoreFocus = false) {
+        const scope = controlMenuScope;
+        controlMenuScope = null;
         document.getElementById(CONTROL_MENU_ID)?.remove();
-        if (outsideClickHandler) {
-            document.removeEventListener('click', outsideClickHandler, true);
-            outsideClickHandler = null;
-        }
-        if (escapeKeyHandler) {
-            document.removeEventListener('keydown', escapeKeyHandler, true);
-            escapeKeyHandler = null;
-        }
+        let cleanupError = null;
+        try { if (scope) scope.dispose('control-center-closed'); } catch (error) { cleanupError = error; }
         const anchor = state.phoneWindow?.querySelector('.pm-expand-btn');
         if (anchor) {
             anchor.setAttribute('aria-expanded', 'false');
             if (!restoreFocus) anchor.blur();
         }
         if (restoreFocus) anchor?.focus({ preventScroll: true });
+        if (cleanupError) throw cleanupError;
     }
 
     window.__pmReturnToControlCenter = () => {
@@ -207,15 +234,13 @@ export function installPhoneControlCenter(state, deps) {
                 alert(`${controlActionLabel(action)}失败：${error?.message || '未知错误'}`);
             });
         });
-        outsideClickHandler = event => {
-            if (menu.contains(event.target) || anchor.contains(event.target)) return;
-            closeControlCenter();
-        };
-        escapeKeyHandler = event => {
-            if (event.key === 'Escape') closeControlCenter(true);
-        };
-        document.addEventListener('click', outsideClickHandler, true);
-        document.addEventListener('keydown', escapeKeyHandler, true);
+        controlMenuScope = installControlCenterDocumentListeners({
+            documentRef: document,
+            appLifecycleScope: deps.appLifecycleScope,
+            menu,
+            anchor,
+            close: closeControlCenter,
+        });
     }
 
     function sameTarget(left, right) {
@@ -227,6 +252,7 @@ export function installPhoneControlCenter(state, deps) {
     window.__pmShowControlCenter = () => {
         const existing = document.getElementById(CONTROL_MENU_ID);
         if (existing) { closeControlCenter(); return; }
+        if (controlMenuScope) closeControlCenter();
         deps.closeContactSwitcher?.('replace');
         const phone = state.phoneWindow;
         const anchor = phone?.querySelector('.pm-expand-btn');
@@ -255,7 +281,13 @@ export function installPhoneControlCenter(state, deps) {
         const availableHeight = Math.max(72, anchorRect.top - phoneRect.top - 16);
         menu.style.maxHeight = `${availableHeight}px`;
         anchor.setAttribute('aria-expanded', 'true');
-        bindControlMenu(menu, anchor);
+        try {
+            bindControlMenu(menu, anchor);
+        } catch (error) {
+            menu.remove();
+            anchor.setAttribute('aria-expanded', 'false');
+            throw error;
+        }
         menu.querySelector('button')?.focus({ preventScroll: true });
     };
 

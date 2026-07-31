@@ -13162,6 +13162,40 @@ ${antiFluff}`;
     "auto-poke": "\u6253\u5F00\u81EA\u52A8\u53D1\u6D88\u606F",
     delete: "\u8FDB\u5165\u6D88\u606F\u5220\u9664\u6A21\u5F0F"
   })[action] || "\u6267\u884C\u5FEB\u6377\u64CD\u4F5C";
+  function installControlCenterDocumentListeners({
+    documentRef = document,
+    appLifecycleScope,
+    menu,
+    anchor,
+    close
+  }) {
+    if (!appLifecycleScope) throw new Error("Control center document listeners require an app lifecycle scope");
+    const scope = appLifecycleScope.child("control-center-menu");
+    try {
+      scope.addCleanup(() => {
+        menu.remove();
+        anchor.setAttribute("aria-expanded", "false");
+      }, "control-center-menu");
+      scope.listen(documentRef, "click", (event) => {
+        if (scope.isDisposed || menu.contains(event.target) || anchor.contains(event.target)) return;
+        close(false);
+      }, true);
+      scope.listen(documentRef, "keydown", (event) => {
+        if (!scope.isDisposed && event.key === "Escape") close(true);
+      }, true);
+    } catch (error) {
+      try {
+        scope.dispose("control-center-listener-installation-failed");
+      } catch (cleanupError) {
+        throw new AggregateError(
+          [error, cleanupError],
+          "Control center document listener installation failed"
+        );
+      }
+      throw error;
+    }
+    return scope;
+  }
   function runControlMenuAction(action, runAction, reportActionError) {
     const result = runAction(action);
     if (result && typeof result.then === "function") {
@@ -13181,8 +13215,7 @@ ${antiFluff}`;
       syncGenerationControls
     } = deps;
     const CONTROL_MENU_ID = "pm-control-menu";
-    let outsideClickHandler = null;
-    let escapeKeyHandler = null;
+    let controlMenuScope = null;
     const getTarget = () => resolveConversationTarget(state, getStorageId2);
     function renderPendingList() {
       const target = getTarget();
@@ -13222,14 +13255,14 @@ ${antiFluff}`;
     };
     let editingTarget = null;
     function closeControlCenter(restoreFocus = false) {
+      const scope = controlMenuScope;
+      controlMenuScope = null;
       document.getElementById(CONTROL_MENU_ID)?.remove();
-      if (outsideClickHandler) {
-        document.removeEventListener("click", outsideClickHandler, true);
-        outsideClickHandler = null;
-      }
-      if (escapeKeyHandler) {
-        document.removeEventListener("keydown", escapeKeyHandler, true);
-        escapeKeyHandler = null;
+      let cleanupError = null;
+      try {
+        if (scope) scope.dispose("control-center-closed");
+      } catch (error) {
+        cleanupError = error;
       }
       const anchor = state.phoneWindow?.querySelector(".pm-expand-btn");
       if (anchor) {
@@ -13237,6 +13270,7 @@ ${antiFluff}`;
         if (!restoreFocus) anchor.blur();
       }
       if (restoreFocus) anchor?.focus({ preventScroll: true });
+      if (cleanupError) throw cleanupError;
     }
     window.__pmReturnToControlCenter = () => {
       closeOverlay?.("replace");
@@ -13341,15 +13375,13 @@ ${antiFluff}`;
           alert(`${controlActionLabel(action)}\u5931\u8D25\uFF1A${error?.message || "\u672A\u77E5\u9519\u8BEF"}`);
         });
       });
-      outsideClickHandler = (event) => {
-        if (menu.contains(event.target) || anchor.contains(event.target)) return;
-        closeControlCenter();
-      };
-      escapeKeyHandler = (event) => {
-        if (event.key === "Escape") closeControlCenter(true);
-      };
-      document.addEventListener("click", outsideClickHandler, true);
-      document.addEventListener("keydown", escapeKeyHandler, true);
+      controlMenuScope = installControlCenterDocumentListeners({
+        documentRef: document,
+        appLifecycleScope: deps.appLifecycleScope,
+        menu,
+        anchor,
+        close: closeControlCenter
+      });
     }
     function sameTarget(left, right) {
       return !!left && !!right && left.storageId === right.storageId && left.saveKey === right.saveKey;
@@ -13360,6 +13392,7 @@ ${antiFluff}`;
         closeControlCenter();
         return;
       }
+      if (controlMenuScope) closeControlCenter();
       deps.closeContactSwitcher?.("replace");
       const phone = state.phoneWindow;
       const anchor = phone?.querySelector(".pm-expand-btn");
@@ -13388,7 +13421,13 @@ ${antiFluff}`;
       const availableHeight = Math.max(72, anchorRect.top - phoneRect.top - 16);
       menu.style.maxHeight = `${availableHeight}px`;
       anchor.setAttribute("aria-expanded", "true");
-      bindControlMenu(menu, anchor);
+      try {
+        bindControlMenu(menu, anchor);
+      } catch (error) {
+        menu.remove();
+        anchor.setAttribute("aria-expanded", "false");
+        throw error;
+      }
       menu.querySelector("button")?.focus({ preventScroll: true });
     };
     window.__pmOpenSettingsTab = (tab) => window.__pmShowConfig(tab);

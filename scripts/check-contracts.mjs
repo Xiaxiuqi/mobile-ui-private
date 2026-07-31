@@ -1950,6 +1950,11 @@ for (const expected of ['options = {}', 'options.preservePage !== true', 'deps.s
   requireText('conversation.js', conversationCodeForNavigation, expected);
 }
 for (const expected of [
+  'installControlCenterDocumentListeners', "appLifecycleScope.child('control-center-menu')",
+  "scope.addCleanup(() => {", "menu.remove();", "anchor.setAttribute('aria-expanded', 'false')",
+  "scope.listen(documentRef, 'click'", "scope.listen(documentRef, 'keydown'",
+  "scope.dispose('control-center-closed')",
+  'function closeControlCenter(restoreFocus = false)', 'close(false)', 'close(true)',
   "makeOverlay(`\n<div class=\"pm-modal pm-pending-manager\">",
   'const maxLeft = Math.max(8, phone.clientWidth - menu.offsetWidth - 8)',
   "menu.style.left = `${Math.min(Math.max(8, desiredLeft), maxLeft)}px`",
@@ -1960,6 +1965,10 @@ for (const expected of [
   "clear.title = hasSubmitting ? '提交中的暂存不能清空' : '清空当前会话暂存'",
   'Object.assign(deps, { closeControlCenter })',
 ]) requireText('phone-control-center.js', controlCenterCode, expected);
+for (const forbidden of [
+  "document.addEventListener('click', outsideClickHandler, true)",
+  "document.addEventListener('keydown', escapeKeyHandler, true)",
+]) if (controlCenterCode.includes(forbidden)) failures.push(`phone-control-center.js: unmanaged document listener remains: ${forbidden}`);
 const forumHandlerAssignments = sourceModules.reduce((count, module) => {
   const analysis = analyze(module.code, 'module');
   return count + (analysis.windowAssignmentCounts.get('__pmOpenForumMode') || 0);
