@@ -53,7 +53,7 @@ export function installSettingsUi(deps) {
     const {
         makeOverlay, applyTheme, applyBackground, fitNameFont, addNote,
         getCurrentPersona, getStorageId, runtime, closePhone,
-        applyBidirectionalInjection, clearBidirectionalInjection, getInteractiveStore,
+        applyBidirectionalInjection, clearBidirectionalInjection, getInteractiveStore, appLifecycleScope,
     } = deps;
     const {
         capture: captureBackupState,
@@ -596,5 +596,5 @@ export function installSettingsUi(deps) {
             : 'API 设置已保存；档案列表保存失败，不影响当前配置。');
         return true;
     };
-    window.__pmShowModelPicker = () => showModelPicker(runtime);
+    window.__pmShowModelPicker = () => showModelPicker(runtime, appLifecycleScope);
 }

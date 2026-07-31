@@ -17458,7 +17458,8 @@ ${lines}`;
   }
 
   // src/settings-model-picker.js
-  function showModelPicker(runtime) {
+  function showModelPicker(runtime, appLifecycleScope) {
+    if (!appLifecycleScope) throw new Error("Settings model picker requires an app lifecycle scope");
     const existing = document.getElementById("pm-model-dropdown");
     if (existing) {
       if (typeof existing.__pmCloseDropdown === "function") existing.__pmCloseDropdown();
@@ -17473,67 +17474,94 @@ ${lines}`;
       }
       return;
     }
-    const input = document.getElementById("pm-cfg-model");
-    const rect = input.getBoundingClientRect();
-    const dropdown = document.createElement("div");
-    dropdown.id = "pm-model-dropdown";
-    dropdown.className = "pm-model-dropdown";
-    const theme = window.__pmTheme || {};
-    const preset = THEME_PRESETS[theme.preset] || THEME_PRESETS.default;
-    const interfaceMode = theme.preset === "apple" ? "light" : theme.darkMode || "light";
-    dropdown.dataset.theme = interfaceMode;
-    const customAccent = theme.preset === "custom" ? String(theme.customAccent || "").trim() : "";
-    dropdown.style.setProperty("--pm-color-accent", customAccent || preset.accent || preset.right);
-    const uiTokens = interfaceMode === "dark" ? preset.uiDark || {} : preset.ui || {};
-    for (const [token, value] of Object.entries(uiTokens)) dropdown.style.setProperty(token, value);
-    if (theme.preset === "apple") {
-      dropdown.dataset.skin = "apple";
-    }
-    dropdown.style.setProperty("--pm-model-visible-rows", String(MODEL_VISIBLE_ROWS));
-    if (POPOVER_SUPPORTED) dropdown.setAttribute("popover", "manual");
-    dropdown.innerHTML = `<input class="pm-model-search" aria-label="\u641C\u7D22\u6A21\u578B" placeholder="\u{1F50D} \u641C\u7D22..." /><div class="pm-model-options"></div>`;
-    dropdown.style.left = rect.left + "px";
-    dropdown.style.top = rect.bottom + 4 + "px";
-    dropdown.style.width = rect.width + "px";
-    document.body.appendChild(dropdown);
-    if (dropdown.showPopover) try {
-      dropdown.showPopover();
-    } catch (error) {
-    }
-    let closer = null;
-    let closed = false;
-    const closeDropdown = () => {
-      if (closed) return false;
-      closed = true;
-      dropdown.remove();
-      if (closer) document.removeEventListener("click", closer, true);
-      return true;
-    };
-    dropdown.__pmCloseDropdown = closeDropdown;
-    const options = dropdown.querySelector(".pm-model-options");
-    const render = (filter = "") => {
-      const normalizedFilter = filter.toLowerCase();
-      const filtered = runtime.modelList.filter((model) => !normalizedFilter || model.toLowerCase().includes(normalizedFilter));
-      const current = document.getElementById("pm-cfg-model")?.value || "";
-      options.innerHTML = filtered.length ? filtered.map((model) => `<button type="button" class="pm-model-opt" data-m="${escapeAttr(model)}" aria-pressed="${model === current}">${escapeHtml(model)}</button>`).join("") : '<div class="pm-model-empty">\u65E0\u5339\u914D</div>';
-      options.querySelectorAll(".pm-model-opt").forEach((option) => option.addEventListener("click", () => {
-        document.getElementById("pm-cfg-model").value = option.dataset.m;
-        closeDropdown();
-      }));
-    };
-    render();
-    const search = dropdown.querySelector(".pm-model-search");
-    search.addEventListener("input", function() {
-      render(this.value);
-    });
-    search.focus();
-    setTimeout(() => {
-      if (closed) return;
-      closer = (event) => {
-        if (!dropdown.contains(event.target) && event.target.id !== "pm-model-arrow") closeDropdown();
+    const scope = appLifecycleScope.child("settings-model-picker");
+    try {
+      const input = document.getElementById("pm-cfg-model");
+      const rect = input.getBoundingClientRect();
+      const dropdown = document.createElement("div");
+      dropdown.id = "pm-model-dropdown";
+      dropdown.className = "pm-model-dropdown";
+      const theme = window.__pmTheme || {};
+      const preset = THEME_PRESETS[theme.preset] || THEME_PRESETS.default;
+      const interfaceMode = theme.preset === "apple" ? "light" : theme.darkMode || "light";
+      dropdown.dataset.theme = interfaceMode;
+      const customAccent = theme.preset === "custom" ? String(theme.customAccent || "").trim() : "";
+      dropdown.style.setProperty("--pm-color-accent", customAccent || preset.accent || preset.right);
+      const uiTokens = interfaceMode === "dark" ? preset.uiDark || {} : preset.ui || {};
+      for (const [token, value] of Object.entries(uiTokens)) dropdown.style.setProperty(token, value);
+      if (theme.preset === "apple") {
+        dropdown.dataset.skin = "apple";
+      }
+      dropdown.style.setProperty("--pm-model-visible-rows", String(MODEL_VISIBLE_ROWS));
+      if (POPOVER_SUPPORTED) dropdown.setAttribute("popover", "manual");
+      dropdown.innerHTML = `<input class="pm-model-search" aria-label="\u641C\u7D22\u6A21\u578B" placeholder="\u{1F50D} \u641C\u7D22..." /><div class="pm-model-options"></div>`;
+      dropdown.style.left = rect.left + "px";
+      dropdown.style.top = rect.bottom + 4 + "px";
+      dropdown.style.width = rect.width + "px";
+      let closed = false;
+      const closeDropdown = () => {
+        if (closed) return false;
+        closed = true;
+        scope.dispose("settings-model-picker-closed");
+        return true;
       };
-      document.addEventListener("click", closer, true);
-    }, 0);
+      dropdown.__pmCloseDropdown = closeDropdown;
+      try {
+        scope.addCleanup(() => dropdown.remove(), "settings-model-picker");
+        document.body.appendChild(dropdown);
+        if (dropdown.showPopover) try {
+          dropdown.showPopover();
+        } catch (error) {
+        }
+        scope.timeout(() => {
+          try {
+            scope.listen(document, "click", (event) => {
+              if (!dropdown.contains(event.target) && event.target.id !== "pm-model-arrow") closeDropdown();
+            }, true);
+          } catch (error) {
+            try {
+              scope.dispose("settings-model-picker-listener-installation-failed");
+            } catch (cleanupError) {
+              throw new AggregateError([error, cleanupError], "Settings model picker listener installation failed");
+            }
+            throw error;
+          }
+        }, 0);
+      } catch (error) {
+        try {
+          scope.dispose("settings-model-picker-installation-failed");
+        } catch (cleanupError) {
+          throw new AggregateError([error, cleanupError], "Settings model picker installation failed");
+        }
+        throw error;
+      }
+      const options = dropdown.querySelector(".pm-model-options");
+      const render = (filter = "") => {
+        const normalizedFilter = filter.toLowerCase();
+        const filtered = runtime.modelList.filter((model) => !normalizedFilter || model.toLowerCase().includes(normalizedFilter));
+        const current = document.getElementById("pm-cfg-model")?.value || "";
+        options.innerHTML = filtered.length ? filtered.map((model) => `<button type="button" class="pm-model-opt" data-m="${escapeAttr(model)}" aria-pressed="${model === current}">${escapeHtml(model)}</button>`).join("") : '<div class="pm-model-empty">\u65E0\u5339\u914D</div>';
+        options.querySelectorAll(".pm-model-opt").forEach((option) => option.addEventListener("click", () => {
+          document.getElementById("pm-cfg-model").value = option.dataset.m;
+          closeDropdown();
+        }));
+      };
+      render();
+      const search = dropdown.querySelector(".pm-model-search");
+      search.addEventListener("input", function() {
+        render(this.value);
+      });
+      search.focus();
+    } catch (error) {
+      if (!scope.isDisposed) {
+        try {
+          scope.dispose("settings-model-picker-render-failed");
+        } catch (cleanupError) {
+          throw new AggregateError([error, cleanupError], "Settings model picker rendering failed");
+        }
+      }
+      throw error;
+    }
   }
 
   // src/settings-templates.js
@@ -18784,7 +18812,8 @@ ${lines}`;
       closePhone,
       applyBidirectionalInjection,
       clearBidirectionalInjection,
-      getInteractiveStore
+      getInteractiveStore,
+      appLifecycleScope
     } = deps;
     const {
       capture: captureBackupState,
@@ -19402,7 +19431,7 @@ ${error.message}`);
       addNote(profileSaved ? `\u5DF2\u4FDD\u5B58\uFF1A${window.__pmConfig.useIndependent && apiUrl ? "\u72EC\u7ACBAPI" : "\u4E3BAPI"}` : "API \u8BBE\u7F6E\u5DF2\u4FDD\u5B58\uFF1B\u6863\u6848\u5217\u8868\u4FDD\u5B58\u5931\u8D25\uFF0C\u4E0D\u5F71\u54CD\u5F53\u524D\u914D\u7F6E\u3002");
       return true;
     };
-    window.__pmShowModelPicker = () => showModelPicker(runtime);
+    window.__pmShowModelPicker = () => showModelPicker(runtime, appLifecycleScope);
   }
 
   // src/main.js

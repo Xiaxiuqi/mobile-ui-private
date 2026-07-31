@@ -57,6 +57,7 @@ import {
 import {
     createBackupStateHandlers, installSettingsUi, parseBackupData, runBackgroundTransaction, runBackupTransaction,
 } from '../src/settings-ui.js';
+import { showModelPicker } from '../src/settings-model-picker.js';
 import { renderApiSettings } from '../src/settings-templates.js';
 import { loadWorldBookDetails, loadWorldBookDirectory, loadWorldBookSettingsDirectory } from '../src/settings-worldbook.js';
 import {
@@ -1753,6 +1754,8 @@ const importCancelCalendarReasons = [];
 let importReloadCalendarCalls = 0;
 let forbiddenWorldBookWriteCalls = 0;
 const forbiddenWorldBookHostCalls = { getWorldInfoPrompt: 0, saveWorldInfo: 0, updateWorldInfoList: 0, reloadWorldInfoEditor: 0 };
+const settingsLifecycleDiagnostics = createLifecycleDiagnostics();
+const settingsAppLifecycleScope = createLifecycleScope({ label: 'settings-app', diagnostics: settingsLifecycleDiagnostics });
 const settingsRuntime = { modelList: ['model-alpha', 'model-beta'] };
 let settingsWorldBookNameCalls = 0;
 let settingsWorldBookDetailCalls = 0;
@@ -1822,7 +1825,7 @@ installSettingsUi({
         uiElements.set('pm-overlay', overlay);
         return overlay;
     }, applyTheme: () => appliedThemes.push(structuredClone(window.__pmTheme)), applyBackground: () => {},
-    fitNameFont: () => {}, addNote: note => uiNotes.push(note), getCurrentPersona: () => 'default', getStorageId: () => 'story',
+    fitNameFont: () => {}, addNote: note => uiNotes.push(note), getCurrentPersona: () => 'default', getStorageId: () => 'story', appLifecycleScope: settingsAppLifecycleScope,
     runtime: settingsRuntime,
     closePhone: () => { importCloseCalls += 1; },
     applyBidirectionalInjection: async () => {
@@ -2311,6 +2314,9 @@ assert.ok(modelDropdown, '模型列表存在时必须创建 body 级浮层');
 assert.equal(modelDropdown.dataset.theme, 'dark', '模型浮层创建时必须继承当前主题');
 assert.equal(modelDropdown.search.focused, true, '模型浮层创建后必须聚焦搜索框');
 assert.equal(documentClickListeners.size, 1, '模型浮层打开后必须只注册一个 capture 关闭监听器');
+assert.deepEqual(settingsLifecycleDiagnostics.snapshot(), {
+    'child-scope': 1, listener: 1, scope: 2, 'settings-model-picker': 1,
+}, '模型浮层打开后 timeout 必须完成并只保留 child scope、DOM cleanup 与 document listener');
 dispatchDocumentClick(modelDropdown.search);
 assert.equal(uiElements.get('pm-model-dropdown'), modelDropdown, '浮层内部点击不得关闭模型列表');
 assert.equal(documentClickListeners.size, 1, '浮层内部点击不得注销当前关闭监听器');
@@ -2325,6 +2331,7 @@ modelDropdown.options.buttons[0].click();
 assert.equal(uiElements.get('pm-cfg-model').value, 'model-beta');
 assert.equal(uiElements.has('pm-model-dropdown'), false, '选择模型后必须移除浮层');
 assert.equal(documentClickListeners.size, 0, '选择模型后必须注销 document 关闭监听器');
+assert.deepEqual(settingsLifecycleDiagnostics.snapshot(), { scope: 1 }, '选择模型关闭后短生命周期资源必须回到 app 基线');
 
 window.__pmTheme = { ...structuredClone(baseTheme), preset: 'apple', darkMode: 'dark' };
 window.__pmShowModelPicker();
@@ -3264,6 +3271,30 @@ window.__pmShowModelPicker();
 await new Promise(resolve => setTimeout(resolve, 0));
 assert.equal(uiElements.has('pm-model-dropdown'), false, '定时注册前由箭头关闭的浮层不得复活');
 assert.equal(documentClickListeners.size, lifecycleDocumentClickBaseline, '定时注册前关闭不得留下延迟模型浮层监听器');
+assert.deepEqual(settingsLifecycleDiagnostics.snapshot(), { scope: 1 }, '延迟注册前关闭必须取消 timeout 并释放 child scope');
+
+for (let cycle = 0; cycle < 20; cycle += 1) {
+    window.__pmShowModelPicker();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    assert.equal(documentClickListeners.size, lifecycleDocumentClickBaseline + 1,
+        `第 ${cycle + 1} 次模型浮层打开只能增加一个 document listener`);
+    window.__pmShowModelPicker();
+    assert.deepEqual(settingsLifecycleDiagnostics.snapshot(), { scope: 1 },
+        `第 ${cycle + 1} 次模型浮层关闭后资源必须回到 app 基线`);
+}
+
+const modelPickerClickBaseline = new Set(documentClickListeners);
+window.__pmShowModelPicker();
+await new Promise(resolve => setTimeout(resolve, 0));
+const staleModelPickerListener = [...documentClickListeners].find(listener => !modelPickerClickBaseline.has(listener));
+const teardownModelDropdown = uiElements.get('pm-model-dropdown');
+settingsAppLifecycleScope.dispose('settings-app-teardown');
+assert.equal(uiElements.has('pm-model-dropdown'), false, 'app teardown 必须移除仍打开的模型浮层');
+assert.equal(documentClickListeners.size, lifecycleDocumentClickBaseline, 'app teardown 必须移除模型浮层 document listener');
+assert.deepEqual(settingsLifecycleDiagnostics.snapshot(), {}, 'app teardown 后模型浮层资源必须全部归零');
+assert.doesNotThrow(() => staleModelPickerListener?.({ target: { id: 'stale-model-picker-target' } }),
+    'app teardown 后直接调用陈旧 listener 不得产生异常');
+assert.equal(teardownModelDropdown.removed, true, '陈旧 listener 不得复活已释放的模型浮层');
 
 settingsRuntime.modelList = [];
 uiElements.get('pm-api-status').textContent = '';
@@ -3274,6 +3305,89 @@ assert.equal(uiElements.get('pm-api-status').textContent, '请先拉取模型');
 assert.equal(uiElements.get('pm-api-status').style.color, '#ff9500');
 assert.equal(documentClickListeners.size, lifecycleDocumentClickBaseline);
 settingsRuntime.modelList = ['model-alpha', 'model-beta'];
+
+const staleTimeoutDiagnostics = createLifecycleDiagnostics();
+const staleTimeoutCallbacks = [];
+const staleTimeoutScope = createLifecycleScope({
+    label: 'settings-model-picker-stale-timeout', diagnostics: staleTimeoutDiagnostics,
+    timers: {
+        setTimeout(callback) { staleTimeoutCallbacks.push(callback); return 0; },
+        clearTimeout() {}, setInterval, clearInterval,
+    },
+});
+showModelPicker(settingsRuntime, staleTimeoutScope);
+const staleTimeoutDropdown = uiElements.get('pm-model-dropdown');
+assert.equal(staleTimeoutDropdown.__pmCloseDropdown(), true, '延迟 listener 注册前必须允许主动关闭模型浮层');
+assert.deepEqual(staleTimeoutDiagnostics.snapshot(), { scope: 1 }, '主动关闭必须取消 timeout 并释放模型浮层 child scope');
+assert.doesNotThrow(() => staleTimeoutCallbacks[0](), '主动关闭后直接调用陈旧 timeout callback 不得抛错');
+assert.equal(documentClickListeners.size, lifecycleDocumentClickBaseline, '陈旧 timeout callback 不得注册 document listener');
+assert.equal(uiElements.has('pm-model-dropdown'), false, '陈旧 timeout callback 不得复活模型浮层');
+staleTimeoutScope.dispose('stale-timeout-fixture-complete');
+
+const teardownTimeoutDiagnostics = createLifecycleDiagnostics();
+const teardownTimeoutCallbacks = [];
+const teardownTimeoutScope = createLifecycleScope({
+    label: 'settings-model-picker-timeout-teardown', diagnostics: teardownTimeoutDiagnostics,
+    timers: {
+        setTimeout(callback) { teardownTimeoutCallbacks.push(callback); return 0; },
+        clearTimeout() {}, setInterval, clearInterval,
+    },
+});
+showModelPicker(settingsRuntime, teardownTimeoutScope);
+teardownTimeoutScope.dispose('settings-model-picker-app-teardown');
+assert.deepEqual(teardownTimeoutDiagnostics.snapshot(), {}, 'app teardown 必须释放尚未触发的模型浮层 timeout 与 child scope');
+assert.doesNotThrow(() => teardownTimeoutCallbacks[0](), 'app teardown 后直接调用陈旧 timeout callback 不得抛错');
+assert.equal(documentClickListeners.size, lifecycleDocumentClickBaseline, 'app teardown 后陈旧 timeout callback 不得注册 listener');
+assert.equal(uiElements.has('pm-model-dropdown'), false, 'app teardown 后陈旧 timeout callback 不得复活 DOM');
+
+const renderFailureDiagnostics = createLifecycleDiagnostics();
+const renderFailureCallbacks = [];
+const renderFailureScope = createLifecycleScope({
+    label: 'settings-model-picker-render-failure', diagnostics: renderFailureDiagnostics,
+    timers: {
+        setTimeout(callback) { renderFailureCallbacks.push(callback); return 0; },
+        clearTimeout() {}, setInterval, clearInterval,
+    },
+});
+const originalDocumentCreateElement = document.createElement;
+document.createElement = tag => {
+    const fixture = originalDocumentCreateElement.call(document, tag);
+    fixture.search.focus = () => { throw new Error('injected model picker render failure'); };
+    return fixture;
+};
+assert.throws(() => showModelPicker(settingsRuntime, renderFailureScope), /injected model picker render failure/);
+document.createElement = originalDocumentCreateElement;
+assert.equal(uiElements.has('pm-model-dropdown'), false, '渲染失败必须移除已插入的模型浮层');
+assert.equal(documentClickListeners.size, lifecycleDocumentClickBaseline, '渲染失败不得留下 document listener');
+assert.deepEqual(renderFailureDiagnostics.snapshot(), { scope: 1 }, '渲染失败必须释放 timeout、DOM cleanup 与 child scope');
+assert.doesNotThrow(() => renderFailureCallbacks[0](), '渲染失败后直接调用陈旧 timeout callback 不得抛错');
+assert.equal(documentClickListeners.size, lifecycleDocumentClickBaseline, '渲染失败后的陈旧 timeout callback 不得注册 listener');
+showModelPicker(settingsRuntime, renderFailureScope);
+assert.equal(uiElements.has('pm-model-dropdown'), true, '渲染失败回滚后必须允许重新打开模型浮层');
+uiElements.get('pm-model-dropdown').__pmCloseDropdown();
+assert.deepEqual(renderFailureDiagnostics.snapshot(), { scope: 1 }, '恢复打开并关闭后资源必须回到父 scope 基线');
+renderFailureScope.dispose('render-failure-fixture-complete');
+
+const failedModelPickerDiagnostics = createLifecycleDiagnostics();
+const failedModelPickerTimers = [];
+const failedModelPickerScope = createLifecycleScope({
+    label: 'settings-model-picker-failure', diagnostics: failedModelPickerDiagnostics,
+    timers: {
+        setTimeout(callback) { failedModelPickerTimers.push(callback); return 0; },
+        clearTimeout() {}, setInterval, clearInterval,
+    },
+});
+showModelPicker(settingsRuntime, failedModelPickerScope);
+const originalDocumentAddEventListener = document.addEventListener;
+document.addEventListener = (type, listener, capture) => {
+    if (type === 'click' && capture === true) throw new Error('injected model picker listener failure');
+    return originalDocumentAddEventListener.call(document, type, listener, capture);
+};
+assert.throws(() => failedModelPickerTimers[0](), /injected model picker listener failure/);
+document.addEventListener = originalDocumentAddEventListener;
+assert.equal(uiElements.has('pm-model-dropdown'), false, 'document listener 注册失败必须回滚模型浮层 DOM');
+assert.deepEqual(failedModelPickerDiagnostics.snapshot(), { scope: 1 }, 'document listener 注册失败必须回滚 child scope 资源');
+failedModelPickerScope.dispose('failure-fixture-complete');
 
 const originalFetch = globalThis.fetch;
 const apiFetchCalls = [];

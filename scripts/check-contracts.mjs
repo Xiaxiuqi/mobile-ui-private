@@ -2002,10 +2002,11 @@ if (!setDarkModeSource.includes('persistThemeMutation') || !persistThemeMutation
 if (!applyThemeSource.includes("applyProperties(document.getElementById('pm-model-dropdown'))")) {
   failures.push('phone-foundation.js: applyTheme must synchronize data-theme to an existing body-level model dropdown');
 }
-if (!showModelPickerSource.includes('showModelPicker(runtime)')) {
-  failures.push('settings-ui.js: __pmShowModelPicker must delegate to the settings model picker with runtime state');
+if (!showModelPickerSource.includes('showModelPicker(runtime, appLifecycleScope)')) {
+  failures.push('settings-ui.js: __pmShowModelPicker must delegate with runtime and app lifecycle scope');
 }
 for (const expected of [
+  'showModelPicker(runtime, appLifecycleScope)', "appLifecycleScope.child('settings-model-picker')",
   "const interfaceMode = theme.preset === 'apple' ? 'light' : theme.darkMode || 'light'",
   'dropdown.dataset.theme = interfaceMode',
   "dropdown.style.setProperty('--pm-color-accent', customAccent || preset.accent || preset.right)",
@@ -2014,12 +2015,18 @@ for (const expected of [
   '<button type="button" class="pm-model-opt"',
   'aria-pressed="${model === current}"',
   'aria-label="搜索模型"',
+  "scope.addCleanup(() => dropdown.remove(), 'settings-model-picker')",
+  "scope.timeout(() => {", "scope.listen(document, 'click'", "scope.dispose('settings-model-picker-closed')",
+  "scope.dispose('settings-model-picker-listener-installation-failed')",
+  "scope.dispose('settings-model-picker-render-failed')",
   'const closeDropdown = () =>',
   'dropdown.__pmCloseDropdown = closeDropdown',
-  "document.removeEventListener('click', closer, true)",
   'if (closed) return',
   'closeDropdown();',
 ]) requireText('settings-model-picker.js showModelPicker', modelPickerImplementation, expected);
+for (const forbidden of ["setTimeout(() =>", "document.addEventListener('click'", "document.removeEventListener('click'"]) {
+  if (modelPickerImplementation.includes(forbidden)) failures.push(`settings-model-picker.js: unmanaged lifecycle resource remains: ${forbidden}`);
+}
 for (const expected of [
   '<button type="button" class="pm-theme-chip',
   'aria-label="使用${escapeAttr(v.label)}界面主题"',
