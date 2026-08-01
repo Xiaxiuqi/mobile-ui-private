@@ -3679,8 +3679,14 @@ ${userPrompt}` : userPrompt;
     }
     async function handleAction(button, app, storageId = getStorageId2()) {
       const action = button?.dataset?.action;
-      if (action === "calendar-outfit-generate") return generate(storageId);
-      if (action === "calendar-outfit-regenerate") return generate(storageId, { replaceWindow: true });
+      if (action === "calendar-outfit-generate") {
+        await generate(storageId);
+        return true;
+      }
+      if (action === "calendar-outfit-regenerate") {
+        await generate(storageId, { replaceWindow: true });
+        return true;
+      }
       if (action === "calendar-outfit-edit") {
         showEditor(storageId);
         return true;
@@ -8656,7 +8662,16 @@ ${entry2.content}` : entry2.content;
   }
 
   // src/diagnostic.js
+  var DIAGNOSTIC_ENABLED_KEY = "ST_SMS_DIAG_ENABLED";
   var freeze = (value) => Object.freeze(value);
+  function diagnosticEnabled() {
+    if (globalThis.window?.__pmDiagEnabled === true) return true;
+    try {
+      return globalThis.localStorage?.getItem(DIAGNOSTIC_ENABLED_KEY) === "true";
+    } catch (error) {
+      return false;
+    }
+  }
   function safePresence(value) {
     if (!value || typeof value !== "object") return null;
     const result = {};
@@ -8716,7 +8731,7 @@ ${entry2.content}` : entry2.content;
     });
   }
   function installDiagnosticApi(deps) {
-    if (globalThis.window?.__pmDiagEnabled !== true) return false;
+    if (!diagnosticEnabled()) return false;
     const { runtime, getCtx, getStorageId: getStorageId2, lifecycleDiagnostics } = deps;
     const snapshot = () => {
       const branch = resolveBranchInheritance(getCtx());

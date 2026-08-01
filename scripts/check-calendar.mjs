@@ -6,6 +6,7 @@ import { renderCalendarContextInjection } from '../src/phone-injection.js';
 import { createCalendarCommitters } from '../src/calendar-commit.js';
 import { createCalendarRecipeController } from '../src/calendar-recipe-controller.js';
 import { createCalendarOutfitController } from '../src/calendar-outfit-controller.js';
+import { handleOutfitPageAction } from '../src/calendar-outfit-runtime.js';
 import { createTaskController } from '../src/calendar-task-controller.js';
 import { createLifecycleDiagnostics, createLifecycleScope } from '../src/infrastructure/lifecycle-scope.js';
 import {
@@ -2175,6 +2176,7 @@ try {
     let controllerOutfitView = { selectedDate: recipeDates[0], outfitSubject: 'role:Alice', outfitGenerating: false };
     const controllerOutfitGatherCalls = [];
     const controllerOutfitTasks = createTaskController(() => storageA);
+    let controllerOutfitConfirmResult = true;
     let controllerOutfitAiImpl = async () => outfitEnvelope();
     const outfitController = createCalendarOutfitController({
         tasks: controllerOutfitTasks,
@@ -2186,7 +2188,11 @@ try {
         callAI: (...args) => controllerOutfitAiImpl(...args),
         makeOverlay: makeRecipeOverlay,
         closeOverlay: reason => controllerCloseReasons.push(reason),
-        commitOutfits: async (_storageId, mutate) => { controllerOutfitStore = normalizeOutfitStore(mutate(controllerOutfitStore)); return true; },
+        commitOutfits: async (_storageId, mutate, task) => {
+            if (task && !controllerOutfitTasks.active(task)) return false;
+            controllerOutfitStore = normalizeOutfitStore(mutate(controllerOutfitStore));
+            return true;
+        },
         getOutfitStore: () => controllerOutfitStore,
         getProfile: (storageId, subject) => outfitScopeFor(controllerOutfitStore, storageId, subject),
         getReferenceDate: () => recipeStart,
@@ -2195,10 +2201,39 @@ try {
         getStatus: () => '',
         status: (_storageId, text, options) => controllerStatuses.push({ text, options }),
         rerender: () => { controllerRenders += 1; },
-        confirmImpl: () => true,
+        confirmImpl: () => controllerOutfitConfirmResult,
     });
     assert.equal(await outfitController.generate(), true);
-    assert.equal(controllerOutfitGatherCalls.length, 1);
+    controllerOutfitConfirmResult = false;
+    assert.equal(await handleOutfitPageAction({
+        button: { dataset: { action: 'calendar-outfit-generate' } }, app: null, storageId: storageA,
+        state: {}, runtime: {}, viewFor: () => ({}), rerender: () => {}, outfitController,
+    }), true, '取消覆盖是已处理结果，不得被动作路由误判为未知穿搭操作');
+    controllerOutfitConfirmResult = true;
+    assert.equal(controllerOutfitGatherCalls.length, 1,
+        '取消覆盖后不得采集上下文或发起穿搭生成');
+    const cancelledOutfitResponse = deferred(), cancelledOutfitStarted = deferred();
+    controllerOutfitAiImpl = async () => {
+        cancelledOutfitStarted.resolve();
+        return cancelledOutfitResponse.promise;
+    };
+    const outfitBeforeTaskCancellation = structuredClone(controllerOutfitStore);
+    const cancelledOutfitAction = handleOutfitPageAction({
+        button: { dataset: { action: 'calendar-outfit-generate' } }, app: null, storageId: storageA,
+        state: {}, runtime: {}, viewFor: () => ({}), rerender: () => {}, outfitController,
+    });
+    await cancelledOutfitStarted.promise;
+    controllerOutfitTasks.cancel('host-chat-changed');
+    cancelledOutfitResponse.resolve(outfitEnvelope());
+    assert.equal(await cancelledOutfitAction, true,
+        '任务失效是已处理结果，不得被动作路由误判为未知穿搭操作');
+    assert.deepEqual(controllerOutfitStore, outfitBeforeTaskCancellation,
+        '任务失效后的迟到穿搭结果不得提交');
+    assert.equal(controllerOutfitView.outfitGenerating, false,
+        '任务失效后必须释放穿搭生成 busy 状态');
+    controllerOutfitAiImpl = async () => outfitEnvelope();
+    assert.equal(controllerOutfitGatherCalls.length, 2,
+        '确认取消不得采集上下文，但任务失效场景必须已经进入一次真实生成链路');
     assert.equal(controllerOutfitGatherCalls[0][0], null);
     assert.deepEqual({ ...controllerOutfitGatherCalls[0][1], signal: undefined }, { module: 'outfit', signal: undefined, worldBookMaxChars: 3500 },
         '穿搭真实控制器必须以 outfit 模块和 3500 字符预算采集上下文');

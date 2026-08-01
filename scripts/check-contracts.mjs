@@ -1893,7 +1893,8 @@ for (const expected of [
 ]) requireText('phone-foundation.js', sourceModuleByName.get('phone-foundation.js')?.code || '', expected);
 for (const expected of ['hostEventSource: null', 'hostEventRegistrations: new Set()']) requireText('runtime.js', sourceModuleByName.get('runtime.js')?.code || '', expected);
 for (const expected of [
-  'installDiagnosticApi(deps)', "globalThis.window?.__pmDiagEnabled !== true", 'window.__pmDiag = freeze({ snapshot, readLineage })',
+  'installDiagnosticApi(deps)', "DIAGNOSTIC_ENABLED_KEY = 'ST_SMS_DIAG_ENABLED'", "globalThis.window?.__pmDiagEnabled === true",
+  "globalThis.localStorage?.getItem(DIAGNOSTIC_ENABLED_KEY) === 'true'", 'window.__pmDiag = freeze({ snapshot, readLineage })',
   'lifecycleResources: lifecycleDiagnostics?.snapshot?.() || null',
   'Object.freeze(Array.from(pendingByTarget.keys()))', "reason: 'source-empty'", 'sourcePresence', 'targetPresence', 'force = false',
 ]) requireText('branch inheritance diagnostics', [

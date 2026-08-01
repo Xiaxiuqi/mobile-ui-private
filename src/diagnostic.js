@@ -3,7 +3,18 @@ import {
 } from './branch-scope-inheritance.js';
 import { loadBranchLineage } from './storage.js';
 
+export const DIAGNOSTIC_ENABLED_KEY = 'ST_SMS_DIAG_ENABLED';
+
 const freeze = value => Object.freeze(value);
+
+function diagnosticEnabled() {
+    if (globalThis.window?.__pmDiagEnabled === true) return true;
+    try {
+        return globalThis.localStorage?.getItem(DIAGNOSTIC_ENABLED_KEY) === 'true';
+    } catch (error) {
+        return false;
+    }
+}
 
 function safePresence(value) {
     if (!value || typeof value !== 'object') return null;
@@ -58,7 +69,7 @@ function safeError(error) {
 }
 
 export function installDiagnosticApi(deps) {
-    if (globalThis.window?.__pmDiagEnabled !== true) return false;
+    if (!diagnosticEnabled()) return false;
     const { runtime, getCtx, getStorageId, lifecycleDiagnostics } = deps;
     const snapshot = () => {
         const branch = resolveBranchInheritance(getCtx());

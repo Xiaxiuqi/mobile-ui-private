@@ -52,8 +52,14 @@ export function createCalendarOutfitController({ tasks, getStorageId, gatherCont
     }
     async function handleAction(button, app, storageId = getStorageId()) {
         const action = button?.dataset?.action;
-        if (action === 'calendar-outfit-generate') return generate(storageId);
-        if (action === 'calendar-outfit-regenerate') return generate(storageId, { replaceWindow: true });
+        if (action === 'calendar-outfit-generate') {
+            await generate(storageId);
+            return true;
+        }
+        if (action === 'calendar-outfit-regenerate') {
+            await generate(storageId, { replaceWindow: true });
+            return true;
+        }
         if (action === 'calendar-outfit-edit') { showEditor(storageId); return true; }
         if (action === 'calendar-outfit-delete') { const subject = getView(storageId).outfitSubject, date = getView(storageId).selectedDate; if (!outfitForDate(getProfile(storageId, subject), date) || !confirmImpl?.('删除当天 OOTD？')) return true; await commitOutfits(storageId, store => updateOutfitProfile(store, storageId, subject, value => deleteOutfit(value, date).profile)); status(storageId, 'OOTD 已删除。'); rerender(storageId); return true; }
         if (action === 'calendar-outfit-preferences-save') { const colorPreference = app?.querySelector('[data-outfit-color-preference]')?.value || '', preference = app?.querySelector('[data-outfit-preference]')?.value || ''; const subject = getView(storageId).outfitSubject; await commitOutfits(storageId, store => updateOutfitProfile(store, storageId, subject, value => ({ ...value, colorPreference, preference })), null, { refreshInjection: false }); status(storageId, '穿搭偏好已保存。'); rerender(storageId); return true; }
