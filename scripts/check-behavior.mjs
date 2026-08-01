@@ -26,7 +26,7 @@ import {
     loadWorldBookConfig, saveWorldBookConfig,
 } from '../src/storage.js';
 import { installConversation } from '../src/conversation.js';
-import { DIAGNOSTIC_ENABLED_KEY, installDiagnosticApi } from '../src/diagnostic.js';
+import { installDiagnosticApi } from '../src/diagnostic.js';
 import { gatherContext, getStorageIdFor, getUserPersona } from '../src/host-context.js';
 import { awaitPendingBranchInheritance, beginBranchInheritance, inheritPhoneDataOnBranch, mergeBranchScope, resolveBranchInheritance } from '../src/branch-scope-inheritance.js';
 import {
@@ -8422,18 +8422,12 @@ try {
     assert.equal(emptyContainerSaveCalls, 0, '空容器来源不得保存任何 store');
     assert.deepEqual(emptyContainerLineage, {}, '空容器来源不得写 lineage marker');
 
-    const previousDiagnosticStorage = globalThis.localStorage;
-    globalThis.localStorage = {
-        getItem: key => localValues.has(key) ? localValues.get(key) : null,
-        setItem: (key, value) => localValues.set(key, String(value)),
-        removeItem: key => localValues.delete(key),
-    };
     delete window.__pmDiagEnabled;
-    localStorage.removeItem(DIAGNOSTIC_ENABLED_KEY);
     assert.equal(installDiagnosticApi({}), false, '未显式启用时不得安装生产诊断 API');
-    localStorage.setItem(DIAGNOSTIC_ENABLED_KEY, '1');
-    assert.equal(installDiagnosticApi({}), false, '诊断持久化键必须只接受明确的 true 值');
-    localStorage.setItem(DIAGNOSTIC_ENABLED_KEY, 'true');
+    for (const invalidDiagnosticFlag of ['true', 1, {}, []]) {
+        window.__pmDiagEnabled = invalidDiagnosticFlag;
+        assert.equal(installDiagnosticApi({}), false, '诊断内存开关必须只接受严格布尔值 true');
+    }
     const diagnosticRuntime = createRuntimeState();
     const diagnosticLifecycle = createLifecycleDiagnostics();
     const diagnosticAppScope = createLifecycleScope({ label: 'app', diagnostics: diagnosticLifecycle });
@@ -8442,19 +8436,9 @@ try {
     diagnosticRuntime.lastBranchInheritance = emptySourceResult;
     const diagnosticDeps = { runtime: diagnosticRuntime, getCtx: () => branchContext,
         getStorageId: () => branchIds.target, lifecycleDiagnostics: diagnosticLifecycle };
-    assert.equal(installDiagnosticApi(diagnosticDeps), true,
-    '持久化打开诊断开关后必须在刷新后的 realm 挂载只读诊断面');
-    delete window.__pmDiag;
-    delete window.__pmRetryBranch;
-    delete window.__pmDiagEnabled;
-    globalThis.localStorage = { getItem() { throw new Error('storage blocked'); } };
-    assert.equal(installDiagnosticApi(diagnosticDeps), false,
-        '浏览器存储不可访问时诊断安装必须安全降级为关闭');
-    assert.equal(window.__pmDiag, undefined, '存储读取失败不得遗留半安装的诊断 API');
     window.__pmDiagEnabled = true;
     assert.equal(installDiagnosticApi(diagnosticDeps), true,
-        '显式内存开关必须在浏览器存储不可访问时保持兼容');
-    globalThis.localStorage = previousDiagnosticStorage;
+        '显式内存开关必须安装生产诊断 API');
     const diagnosticSnapshot = window.__pmDiag.snapshot();
     assert.equal(Object.isFrozen(window.__pmDiag), true, '诊断 API 顶层对象必须冻结');
     assert.equal(Object.isFrozen(diagnosticSnapshot), true, '诊断快照必须冻结');
@@ -8468,7 +8452,6 @@ try {
     diagnosticRuntime.lastBranchInheritanceError = { name: 'Error', message: '潜在聊天正文不得经诊断 API 暴露' };
     assert.equal(window.__pmDiag.snapshot().lastBranchInheritanceError?.message, '', '诊断 API 必须剥离原始错误文本');
     diagnosticAppScope.dispose('diagnostic-test-complete');
-    localValues.delete(DIAGNOSTIC_ENABLED_KEY);
     delete window.__pmDiagEnabled;
     delete window.__pmDiag;
     delete window.__pmRetryBranch;

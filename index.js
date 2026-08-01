@@ -8662,15 +8662,9 @@ ${entry2.content}` : entry2.content;
   }
 
   // src/diagnostic.js
-  var DIAGNOSTIC_ENABLED_KEY = "ST_SMS_DIAG_ENABLED";
   var freeze = (value) => Object.freeze(value);
   function diagnosticEnabled() {
-    if (globalThis.window?.__pmDiagEnabled === true) return true;
-    try {
-      return globalThis.localStorage?.getItem(DIAGNOSTIC_ENABLED_KEY) === "true";
-    } catch (error) {
-      return false;
-    }
+    return globalThis.window?.__pmDiagEnabled === true;
   }
   function safePresence(value) {
     if (!value || typeof value !== "object") return null;
@@ -14529,6 +14523,101 @@ ${antiFluff}`;
     Object.assign(deps, { showGroupForm });
   }
 
+  // src/phone-island-gesture.js
+  function bindIsland(el, handle, {
+    setTimer = globalThis.setTimeout,
+    clearTimer = globalThis.clearTimeout,
+    doubleTapDelay = 300,
+    lifecycleScope
+  } = {}) {
+    if (!lifecycleScope) throw new Error("Island gesture requires a lifecycle scope");
+    const scope = lifecycleScope.child("island-gesture");
+    let active = true;
+    let isDragging = false, startX, startY, startTX = 0, startTY = 0;
+    let moved = false, secondTap = false, tapTimer = null;
+    const getCoord = (e) => e.touches ? { x: e.touches[0].clientX, y: e.touches[0].clientY } : { x: e.clientX, y: e.clientY };
+    const getT = () => {
+      const match = (el.style.transform || "").match(/translate\(\s*([-\d.]+)px\s*,\s*([-\d.]+)px/);
+      return match ? { x: parseFloat(match[1]), y: parseFloat(match[2]) } : { x: 0, y: 0 };
+    };
+    const onStart = (e) => {
+      if (!active) return;
+      if (e.target.tagName === "BUTTON") return;
+      secondTap = el.classList.contains("is-min") && tapTimer !== null;
+      if (secondTap) {
+        tapTimer.cancel();
+        tapTimer = null;
+      }
+      isDragging = true;
+      moved = false;
+      const coords = getCoord(e);
+      startX = coords.x;
+      startY = coords.y;
+      const translation = getT();
+      startTX = translation.x;
+      startTY = translation.y;
+      el.style.transition = "none";
+      if (e.cancelable) e.preventDefault();
+    };
+    const onMove = (e) => {
+      if (!active) return;
+      if (!isDragging) return;
+      const coords = getCoord(e), dx = coords.x - startX, dy = coords.y - startY;
+      if (!moved && Math.abs(dx) < 5 && Math.abs(dy) < 5) return;
+      moved = true;
+      secondTap = false;
+      if (e.cancelable) e.preventDefault();
+      el.style.setProperty("transform", `translate(${startTX + dx}px, ${startTY + dy}px)`, "important");
+    };
+    const cancelGesture = ({ clearPendingTap = false } = {}) => {
+      isDragging = false;
+      moved = false;
+      secondTap = false;
+      el.style.transition = ".35s cubic-bezier(.18,.89,.32,1.2)";
+      if (clearPendingTap && tapTimer !== null) {
+        tapTimer.cancel();
+        tapTimer = null;
+      }
+    };
+    const cancelAll = () => cancelGesture({ clearPendingTap: true });
+    const onEnd = () => {
+      if (!active) return;
+      if (!isDragging) return;
+      isDragging = false;
+      el.style.transition = ".35s cubic-bezier(.18,.89,.32,1.2)";
+      if (moved) return;
+      if (!el.classList.contains("is-min")) return window.__pmToggleMin();
+      if (secondTap) {
+        secondTap = false;
+        window.__pmEnd();
+        return;
+      }
+      let releaseTimer = () => false;
+      const timerId = setTimer(() => {
+        releaseTimer();
+        tapTimer = null;
+        if (active && el.classList.contains("is-min")) window.__pmToggleMin();
+      }, doubleTapDelay);
+      releaseTimer = scope.addCleanup(() => clearTimer(timerId), "timeout");
+      tapTimer = { id: timerId, cancel: releaseTimer };
+    };
+    scope.listen(handle, "mousedown", onStart);
+    scope.listen(window, "mousemove", onMove);
+    scope.listen(window, "mouseup", onEnd);
+    scope.listen(handle, "touchstart", onStart, { passive: false });
+    scope.listen(window, "touchmove", onMove, { passive: false });
+    scope.listen(window, "touchend", onEnd);
+    scope.listen(window, "touchcancel", cancelAll);
+    scope.listen(window, "blur", cancelAll);
+    scope.addCleanup(() => {
+      active = false;
+      cancelGesture({ clearPendingTap: true });
+    }, "gesture-state");
+    return () => {
+      scope.dispose("island-gesture-unbound");
+    };
+  }
+
   // src/phone-appearance.js
   function createPhoneAppearance(state, deps) {
     const { getCtx, getStorageId: getStorageId2 } = deps;
@@ -14593,6 +14682,425 @@ ${antiFluff}`;
       }
     }
     return { applyBackground, fitNameFont, migrateOldHistory };
+  }
+
+  // src/phone-foundation-scale.js
+  var PHONE_BASE_WIDTH = 330;
+  var PHONE_BASE_HEIGHT = 580;
+  var PHONE_MIN_SCALE = 0.6;
+  var PHONE_MAX_SCALE = 1.5;
+  function normalizePhoneScale(value, viewportWidth = globalThis.window?.innerWidth ?? 1200) {
+    const width = Number(viewportWidth);
+    const compact = width <= 500;
+    const widthLimit = Math.max(0.1, (compact ? width * 0.92 : width - 24) / PHONE_BASE_WIDTH);
+    const maximum = Math.max(Math.min(PHONE_MAX_SCALE, widthLimit), Math.min(PHONE_MIN_SCALE, widthLimit));
+    const minimum = Math.min(PHONE_MIN_SCALE, maximum);
+    const numeric = Number(value);
+    const candidate = Number.isFinite(numeric) ? numeric : 1;
+    return Math.round(Math.min(maximum, Math.max(minimum, candidate)) * 1e3) / 1e3;
+  }
+  function phoneSizeForScale(scale) {
+    const normalized = Number.isFinite(Number(scale)) ? Number(scale) : 1;
+    return { width: Math.round(PHONE_BASE_WIDTH * normalized), height: Math.round(PHONE_BASE_HEIGHT * normalized) };
+  }
+  function phoneSizeForViewport(scale, viewportWidth = globalThis.window?.innerWidth ?? 1200, viewportHeight = globalThis.window?.visualViewport?.height ?? globalThis.window?.innerHeight ?? 1e3) {
+    const normalized = normalizePhoneScale(scale, viewportWidth);
+    const naturalSize = phoneSizeForScale(normalized);
+    const height = Number(viewportHeight);
+    const compact = Number(viewportWidth) <= 500 || height <= 700;
+    const heightBudget = Math.max(Math.round(PHONE_BASE_HEIGHT * 0.1), Math.round(compact ? height * 0.82 : height - 24));
+    return { scale: normalized, width: naturalSize.width, height: Math.min(naturalSize.height, heightBudget) };
+  }
+  function applyPhoneScale(element, scale = globalThis.window?.__pmTheme?.phoneScale) {
+    if (!element) return null;
+    const size = phoneSizeForViewport(scale);
+    element.style.setProperty("--pm-phone-width", `${size.width}px`);
+    element.style.setProperty("--pm-phone-height", `${size.height}px`);
+    return size;
+  }
+  function createPhoneResize(state) {
+    return function bindPhoneResize(el, handle, lifecycleScope) {
+      if (!lifecycleScope) throw new Error("Phone resize requires a phone lifecycle scope");
+      let resizing = false;
+      let pointerId = null;
+      let startX = 0;
+      let startY = 0;
+      let startScale = 1;
+      let previousScale = 1;
+      const visualViewport = window.visualViewport;
+      const onViewportResize = () => applyPhoneScale(el);
+      const onPointerMove = (event) => {
+        if (!resizing || event.pointerId !== pointerId) return;
+        const dx = event.clientX - startX;
+        const dy = event.clientY - startY;
+        const projected = (dx * PHONE_BASE_WIDTH + dy * PHONE_BASE_HEIGHT) / (PHONE_BASE_WIDTH ** 2 + PHONE_BASE_HEIGHT ** 2);
+        const nextScale = normalizePhoneScale(startScale + projected);
+        window.__pmTheme.phoneScale = nextScale;
+        applyPhoneScale(el, nextScale);
+        if (event.cancelable) event.preventDefault();
+      };
+      const finish = (event) => {
+        if (!resizing || event?.pointerId !== void 0 && event.pointerId !== pointerId) return;
+        resizing = false;
+        el.classList.remove("is-resizing");
+        try {
+          handle.releasePointerCapture?.(pointerId);
+        } catch (error) {
+        }
+        pointerId = null;
+        const nextScale = normalizePhoneScale(window.__pmTheme.phoneScale);
+        window.__pmTheme.phoneScale = nextScale;
+        if (!saveTheme()) {
+          window.__pmTheme.phoneScale = previousScale;
+          applyPhoneScale(el, previousScale);
+          alert("\u624B\u673A\u5C3A\u5BF8\u4FDD\u5B58\u5931\u8D25\uFF1A\u6D4F\u89C8\u5668\u5B58\u50A8\u4E0D\u53EF\u7528\u3002");
+        }
+      };
+      const onPointerDown = (event) => {
+        if (state.isMinimized || event.button !== 0) return;
+        resizing = true;
+        pointerId = event.pointerId;
+        startX = event.clientX;
+        startY = event.clientY;
+        previousScale = Number(window.__pmTheme.phoneScale) || 1;
+        startScale = normalizePhoneScale(previousScale);
+        window.__pmTheme.phoneScale = startScale;
+        el.classList.add("is-resizing");
+        handle.setPointerCapture?.(pointerId);
+        if (event.cancelable) event.preventDefault();
+      };
+      const releases = [];
+      try {
+        releases.push(lifecycleScope.listen(handle, "pointerdown", onPointerDown));
+        releases.push(lifecycleScope.listen(handle, "lostpointercapture", finish));
+        releases.push(lifecycleScope.listen(window, "pointermove", onPointerMove, { passive: false }));
+        releases.push(lifecycleScope.listen(window, "pointerup", finish));
+        releases.push(lifecycleScope.listen(window, "pointercancel", finish));
+        releases.push(lifecycleScope.listen(window, "blur", finish));
+        releases.push(lifecycleScope.listen(window, "resize", onViewportResize));
+        if (visualViewport) releases.push(lifecycleScope.listen(visualViewport, "resize", onViewportResize));
+        releases.push(lifecycleScope.addCleanup(() => finish()));
+        applyPhoneScale(el);
+      } catch (error) {
+        for (const release of releases.reverse()) {
+          try {
+            release();
+          } catch (cleanupError) {
+            console.error("[phone-mode] \u624B\u673A\u5C3A\u5BF8\u76D1\u542C\u5668\u5B89\u88C5\u5931\u8D25\u540E\u7684\u6E05\u7406\u5931\u8D25", cleanupError);
+          }
+        }
+        throw error;
+      }
+      return () => {
+        finish();
+        let released = false;
+        for (const release of releases.reverse()) released = release() || released;
+        return released;
+      };
+    };
+  }
+
+  // src/phone-foundation-theme.js
+  function initializePhoneFoundationGlobals(windowRef = window) {
+    windowRef.__pmHistories = windowRef.__pmHistories || {};
+    windowRef.__pmConfig = windowRef.__pmConfig || { apiUrl: "", apiKey: "", model: "", temperature: 1.2, useIndependent: false };
+    windowRef.__pmProfiles = windowRef.__pmProfiles || [];
+    windowRef.__pmInjectionConfig = normalizeInjectionConfig(windowRef.__pmInjectionConfig);
+    windowRef.__pmBidirectional = windowRef.__pmBidirectional || {};
+    windowRef.__pmTheme = windowRef.__pmTheme || {
+      preset: "default",
+      customRight: "",
+      customLeft: "",
+      borderColor: "",
+      layout: "standard",
+      darkMode: "light",
+      ambientStatusEnabled: false,
+      customTitle: "",
+      qrLabel: "\u5929\u97F3",
+      phoneScale: 1
+    };
+    windowRef.__pmDesktopBg = windowRef.__pmDesktopBg || "";
+    windowRef.__pmBgGlobal = windowRef.__pmBgGlobal || "";
+    windowRef.__pmBgLocal = windowRef.__pmBgLocal || {};
+    windowRef.__pmGroupMeta = windowRef.__pmGroupMeta || {};
+    windowRef.__pmPokeConfig = windowRef.__pmPokeConfig || {};
+    windowRef.__pmCharacterBehavior = windowRef.__pmCharacterBehavior || {};
+    windowRef.__pmWordyLimit = windowRef.__pmWordyLimit || false;
+    windowRef.__pmBudgetConfig = normalizeBudgetConfig(windowRef.__pmBudgetConfig);
+    windowRef.__pmEmojis = windowRef.__pmEmojis || [];
+  }
+  function createPhoneTheme(state) {
+    return function applyTheme() {
+      const t = window.__pmTheme || {}, p = THEME_PRESETS[t.preset] || THEME_PRESETS.default;
+      const interfaceMode = t.preset === "apple" ? "light" : t.darkMode || "light";
+      const customAccent = t.preset === "custom" ? String(t.customAccent || "").trim() : "";
+      const defaultRight = t.preset === "custom" && customAccent ? customAccent : interfaceMode === "dark" ? p.rightDark || p.right : p.right;
+      const defaultLeft = interfaceMode === "dark" ? p.leftDark || p.left : p.left;
+      const rBg = t.customRight || defaultRight, lBg = t.customLeft || defaultLeft;
+      const rTxt = t.customRight || t.preset === "custom" && customAccent ? contrastText(rBg) : p.rightText;
+      const lTxt = t.customLeft ? contrastText(t.customLeft) : interfaceMode === "dark" ? p.leftTextDark || p.leftText : p.leftText;
+      const border = t.borderColor || "#1a1a1a";
+      const skinTokens = { ...THEME_PRESETS.apple?.ui, ...THEME_PRESETS.pink?.uiDark };
+      const uiTokens = interfaceMode === "dark" ? p.uiDark || {} : p.ui || {};
+      const applyProperties = (element) => {
+        if (!element) return;
+        element.style.setProperty("--pm-r-bg", rBg);
+        element.style.setProperty("--pm-l-bg", lBg);
+        element.style.setProperty("--pm-r-txt", rTxt);
+        element.style.setProperty("--pm-l-txt", lTxt);
+        element.style.setProperty("--pm-border", border);
+        element.style.setProperty("--pm-frost", p.frost ? "1" : "0");
+        element.style.setProperty("--pm-color-accent", customAccent || p.accent || p.right);
+        for (const token of Object.keys(skinTokens)) element.style.removeProperty(token);
+        for (const [token, value] of Object.entries(uiTokens)) element.style.setProperty(token, value);
+        element.setAttribute("data-theme", interfaceMode);
+        if (t.preset === "apple") element.setAttribute("data-skin", "apple");
+        else element.removeAttribute("data-skin");
+      };
+      applyProperties(document.getElementById("pm-overlay"));
+      applyProperties(document.getElementById("pm-overlay-sub"));
+      applyProperties(document.getElementById("pm-model-dropdown"));
+      applyProperties(state.phoneWindow);
+      const desktopTitle = state.phoneWindow?.querySelector(".pm-desktop-toolbar span");
+      if (desktopTitle) desktopTitle.textContent = String(t.customTitle || "").trim() || "\u5929\u97F3\u5C0F\u7B3A";
+    };
+  }
+
+  // src/phone-foundation-overlay.js
+  function createPhoneOverlay(runtime, applyTheme) {
+    function closeOverlay(reason = "close") {
+      const current = document.getElementById("pm-overlay");
+      if (!current) return false;
+      const onClose = current.__pmOnClose;
+      const opener = current.__pmOpener;
+      current.remove();
+      if (typeof onClose === "function") onClose(reason);
+      if (!["replace", "phone-close", "conversation-switch"].includes(reason) && opener?.isConnected && typeof opener.focus === "function") {
+        opener.focus({ preventScroll: true });
+      }
+      return true;
+    }
+    function makeOverlay(html, options = {}) {
+      const previous = document.getElementById("pm-overlay");
+      const active = document.activeElement;
+      const opener = options.opener || runtime.overlayOpener || previous?.__pmOpener || (active && active !== document.body ? active : null);
+      runtime.overlayOpener = null;
+      closeOverlay("replace");
+      const ov = document.createElement("div");
+      ov.id = "pm-overlay";
+      ov.dataset.theme = window.__pmTheme?.darkMode || "light";
+      if (POPOVER_SUPPORTED) ov.setAttribute("popover", "manual");
+      ov.__pmOnClose = typeof options.onClose === "function" ? options.onClose : null;
+      ov.__pmOpener = opener;
+      ov.innerHTML = html;
+      ov.addEventListener("click", (e) => {
+        if (e.target === ov) closeOverlay("backdrop");
+      });
+      document.body.appendChild(ov);
+      applyTheme();
+      if (ov.showPopover) try {
+        ov.showPopover();
+      } catch (e) {
+      }
+      return ov;
+    }
+    return { makeOverlay, closeOverlay };
+  }
+
+  // src/phone-foundation-quote.js
+  function createPhoneQuote(state) {
+    let quoteHighlightTimer = null;
+    function renderActiveQuote() {
+      const preview = state.phoneWindow?.querySelector(".pm-quote-preview");
+      if (!preview) return;
+      const quote = state.activeQuote;
+      preview.hidden = !quote;
+      if (!quote) {
+        preview.querySelector(".pm-quote-preview-sender")?.replaceChildren();
+        preview.querySelector(".pm-quote-preview-text")?.replaceChildren();
+        return;
+      }
+      preview.querySelector(".pm-quote-preview-sender")?.replaceChildren(document.createTextNode(quote.sender || "\u7FA4\u804A\u6D88\u606F"));
+      preview.querySelector(".pm-quote-preview-text")?.replaceChildren(document.createTextNode(quote.text));
+    }
+    function clearActiveQuote() {
+      state.activeQuote = null;
+      renderActiveQuote();
+    }
+    function setActiveQuote(quote) {
+      if (!quote) return false;
+      state.activeQuote = quote;
+      renderActiveQuote();
+      state.phoneWindow?.querySelector(".pm-input")?.focus();
+      return true;
+    }
+    function findQuotedBubble(quote) {
+      const list2 = state.phoneWindow?.querySelector(".pm-msg-list");
+      if (!list2 || !quote?.bubbleId) return null;
+      return [...list2.querySelectorAll("[data-bubble-id]")].find((node) => node.dataset.bubbleId === quote.bubbleId && node.dataset.messageId === quote.messageId);
+    }
+    function syncReplyCardAvailability(card) {
+      if (!card) return false;
+      const quote = { messageId: card.dataset.quoteMessageId, bubbleId: card.dataset.quoteBubbleId };
+      const available = !!findQuotedBubble(quote);
+      card.classList.toggle("is-missing", !available);
+      card.disabled = !available;
+      card.setAttribute("aria-disabled", String(!available));
+      card.setAttribute("aria-label", available ? "\u5B9A\u4F4D\u5230\u88AB\u5F15\u7528\u7684\u6D88\u606F" : "\u539F\u6D88\u606F\u5DF2\u5220\u9664\u6216\u5DF2\u88AB\u88C1\u526A\uFF0C\u5F53\u524D\u663E\u793A\u5F15\u7528\u5FEB\u7167");
+      return available;
+    }
+    function refreshReplyCardAvailability() {
+      const list2 = state.phoneWindow?.querySelector(".pm-msg-list");
+      if (!list2) return 0;
+      const cards = [...list2.querySelectorAll(".pm-reply-card")];
+      cards.forEach(syncReplyCardAvailability);
+      return cards.length;
+    }
+    function locateQuotedBubble(quote) {
+      const target = findQuotedBubble(quote);
+      if (!target) return false;
+      const reduceMotion = globalThis.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches === true;
+      target.scrollIntoView?.({ behavior: reduceMotion ? "auto" : "smooth", block: "center" });
+      target.classList.add("pm-quote-target");
+      if (quoteHighlightTimer !== null) clearTimeout(quoteHighlightTimer);
+      quoteHighlightTimer = setTimeout(() => target.classList.remove("pm-quote-target"), 1800);
+      return true;
+    }
+    return { renderActiveQuote, clearActiveQuote, setActiveQuote, findQuotedBubble, syncReplyCardAvailability, refreshReplyCardAvailability, locateQuotedBubble };
+  }
+
+  // src/phone-foundation-messages.js
+  function createPhoneMessages(state, quote) {
+    let emojiRenderBudget = createEmojiRenderBudget();
+    const resetEmojiRenderBudget = () => {
+      emojiRenderBudget = createEmojiRenderBudget();
+    };
+    function applyBubbleMetadata(node, metadata) {
+      if (!metadata) return;
+      if (metadata.historyIndex !== void 0) node.dataset.historyIndex = String(metadata.historyIndex);
+      if (metadata.messageId) node.dataset.messageId = String(metadata.messageId);
+      if (metadata.bubbleId) node.dataset.bubbleId = String(metadata.bubbleId);
+      if (metadata.pendingId !== void 0) node.dataset.pendingId = String(metadata.pendingId);
+      if (metadata.pendingStatus) node.dataset.pendingStatus = metadata.pendingStatus;
+      if (metadata.pendingId !== void 0) node.classList.add("pm-pending-entry");
+    }
+    function attachQuoteUi(root, bubble, text5, senderName, metadata) {
+      if (metadata?.quote && !bubble.querySelector(".pm-reply-card")) {
+        const card = document.createElement("button");
+        card.type = "button";
+        card.className = "pm-reply-card";
+        card.dataset.quoteMessageId = metadata.quote.messageId;
+        card.dataset.quoteBubbleId = metadata.quote.bubbleId;
+        const sender = document.createElement("span");
+        sender.className = "pm-reply-card-sender";
+        sender.textContent = metadata.quote.sender || "\u7FA4\u804A\u6D88\u606F";
+        const snapshot = document.createElement("span");
+        snapshot.className = "pm-reply-card-text";
+        snapshot.textContent = metadata.quote.text;
+        card.append(sender, snapshot);
+        card.addEventListener("click", (event) => {
+          event.stopPropagation();
+          if (quote.syncReplyCardAvailability(card)) quote.locateQuotedBubble({ messageId: card.dataset.quoteMessageId, bubbleId: card.dataset.quoteBubbleId });
+        });
+        quote.syncReplyCardAvailability(card);
+        bubble.prepend(card);
+      }
+      if (metadata?.pendingId !== void 0 || !metadata?.messageId || !metadata?.bubbleId || root.querySelector(".pm-quote-action")) return;
+      const action = document.createElement("button");
+      action.type = "button";
+      action.className = "pm-quote-action";
+      action.textContent = "\u5F15\u7528";
+      action.setAttribute("aria-label", `\u5F15\u7528${senderName || (metadata.sender || "\u6211")}\u7684\u6D88\u606F`);
+      action.addEventListener("click", (event) => {
+        event.stopPropagation();
+        quote.setActiveQuote({ messageId: String(metadata.messageId), bubbleId: String(metadata.bubbleId), sender: String(senderName || metadata.sender || "\u6211"), text: String(text5 || "") });
+      });
+      root.appendChild(action);
+    }
+    function addBubble(text5, side, senderName, historyIndex, metadata) {
+      const list2 = state.phoneWindow?.querySelector(".pm-msg-list");
+      if (!list2) return [];
+      const nodes = createBubbles(text5, side, senderName, { groupColorMap: state.groupColorMap, groupMembers: state.groupMembers, emojis: window.__pmEmojis, emojiBudget: emojiRenderBudget });
+      nodes.forEach((b) => {
+        applyBubbleMetadata(b, metadata);
+        if (b.classList?.contains("pm-bubble")) {
+          b.dataset.side = side;
+          b.dataset.text = text5;
+          if (historyIndex !== void 0) b.dataset.historyIndex = historyIndex;
+          attachQuoteUi(b, b, text5, senderName, metadata);
+        } else if (b.classList?.contains("pm-group-bubble-wrap")) {
+          b.dataset.side = side;
+          b.dataset.text = text5;
+          if (historyIndex !== void 0) b.dataset.historyIndex = historyIndex;
+          const inner = b.querySelector(".pm-bubble");
+          if (inner) {
+            applyBubbleMetadata(inner, metadata);
+            inner.dataset.side = side;
+            inner.dataset.text = text5;
+            if (historyIndex !== void 0) inner.dataset.historyIndex = historyIndex;
+            attachQuoteUi(b, inner, text5, senderName, metadata);
+          }
+        }
+        list2.appendChild(b);
+      });
+      list2.scrollTop = list2.scrollHeight;
+      return nodes;
+    }
+    function rebaseRenderedHistory(trimmedCount) {
+      if (!Number.isInteger(trimmedCount) || trimmedCount <= 0) return;
+      const list2 = state.phoneWindow?.querySelector(".pm-msg-list");
+      if (!list2) return;
+      for (const child of [...list2.children]) {
+        const indexed = child.dataset.historyIndex !== void 0 ? child : child.querySelector?.("[data-history-index]");
+        if (!indexed) continue;
+        const previousIndex = Number(indexed.dataset.historyIndex);
+        if (!Number.isInteger(previousIndex)) continue;
+        if (previousIndex < trimmedCount) {
+          child.remove();
+          continue;
+        }
+        const nextIndex = String(previousIndex - trimmedCount);
+        if (child.dataset.historyIndex !== void 0) child.dataset.historyIndex = nextIndex;
+        child.querySelectorAll?.("[data-history-index]").forEach((node) => {
+          node.dataset.historyIndex = nextIndex;
+        });
+      }
+      quote.refreshReplyCardAvailability();
+    }
+    function addNote(text5) {
+      const list2 = state.phoneWindow?.querySelector(".pm-msg-list");
+      if (!list2) return;
+      const n = document.createElement("div");
+      n.className = "pm-note";
+      n.textContent = text5;
+      list2.appendChild(n);
+      list2.scrollTop = list2.scrollHeight;
+    }
+    function addDirector(text5, metadata) {
+      const list2 = state.phoneWindow?.querySelector(".pm-msg-list");
+      if (!list2) return null;
+      const d = document.createElement("div");
+      d.className = "pm-director";
+      applyBubbleMetadata(d, metadata);
+      d.innerHTML = `<span class="pm-director-icon">\u{1F3AC}</span><span class="pm-director-text">${escapeHtml(text5)}</span>`;
+      list2.appendChild(d);
+      list2.scrollTop = list2.scrollHeight;
+      return d;
+    }
+    function showTyping() {
+      const list2 = state.phoneWindow?.querySelector(".pm-msg-list");
+      if (!list2 || document.getElementById("pm-typing")) return;
+      const t = document.createElement("div");
+      t.id = "pm-typing";
+      t.className = "pm-bubble pm-left pm-typing-bubble";
+      t.innerHTML = "<span></span><span></span><span></span>";
+      list2.appendChild(t);
+      list2.scrollTop = list2.scrollHeight;
+    }
+    function hideTyping() {
+      document.getElementById("pm-typing")?.remove();
+    }
+    return { addBubble, addNote, addDirector, rebaseRenderedHistory, resetEmojiRenderBudget, showTyping, hideTyping };
   }
 
   // src/community-injection.js
@@ -15299,324 +15807,9 @@ ${lines}` : `\u3010\u4E0E ${name} \u7684\u77ED\u4FE1 \u2014 \u4EC5 ${name} \u4E0
 ${lines}`;
   }
 
-  // src/phone-island-gesture.js
-  function bindIsland(el, handle, {
-    setTimer = globalThis.setTimeout,
-    clearTimer = globalThis.clearTimeout,
-    doubleTapDelay = 300,
-    lifecycleScope
-  } = {}) {
-    if (!lifecycleScope) throw new Error("Island gesture requires a lifecycle scope");
-    const scope = lifecycleScope.child("island-gesture");
-    let active = true;
-    let isDragging = false, startX, startY, startTX = 0, startTY = 0;
-    let moved = false, secondTap = false, tapTimer = null;
-    const getCoord = (e) => e.touches ? { x: e.touches[0].clientX, y: e.touches[0].clientY } : { x: e.clientX, y: e.clientY };
-    const getT = () => {
-      const match = (el.style.transform || "").match(/translate\(\s*([-\d.]+)px\s*,\s*([-\d.]+)px/);
-      return match ? { x: parseFloat(match[1]), y: parseFloat(match[2]) } : { x: 0, y: 0 };
-    };
-    const onStart = (e) => {
-      if (!active) return;
-      if (e.target.tagName === "BUTTON") return;
-      secondTap = el.classList.contains("is-min") && tapTimer !== null;
-      if (secondTap) {
-        tapTimer.cancel();
-        tapTimer = null;
-      }
-      isDragging = true;
-      moved = false;
-      const coords = getCoord(e);
-      startX = coords.x;
-      startY = coords.y;
-      const translation = getT();
-      startTX = translation.x;
-      startTY = translation.y;
-      el.style.transition = "none";
-      if (e.cancelable) e.preventDefault();
-    };
-    const onMove = (e) => {
-      if (!active) return;
-      if (!isDragging) return;
-      const coords = getCoord(e), dx = coords.x - startX, dy = coords.y - startY;
-      if (!moved && Math.abs(dx) < 5 && Math.abs(dy) < 5) return;
-      moved = true;
-      secondTap = false;
-      if (e.cancelable) e.preventDefault();
-      el.style.setProperty("transform", `translate(${startTX + dx}px, ${startTY + dy}px)`, "important");
-    };
-    const cancelGesture = ({ clearPendingTap = false } = {}) => {
-      isDragging = false;
-      moved = false;
-      secondTap = false;
-      el.style.transition = ".35s cubic-bezier(.18,.89,.32,1.2)";
-      if (clearPendingTap && tapTimer !== null) {
-        tapTimer.cancel();
-        tapTimer = null;
-      }
-    };
-    const cancelAll = () => cancelGesture({ clearPendingTap: true });
-    const onEnd = () => {
-      if (!active) return;
-      if (!isDragging) return;
-      isDragging = false;
-      el.style.transition = ".35s cubic-bezier(.18,.89,.32,1.2)";
-      if (moved) return;
-      if (!el.classList.contains("is-min")) return window.__pmToggleMin();
-      if (secondTap) {
-        secondTap = false;
-        window.__pmEnd();
-        return;
-      }
-      let releaseTimer = () => false;
-      const timerId = setTimer(() => {
-        releaseTimer();
-        tapTimer = null;
-        if (active && el.classList.contains("is-min")) window.__pmToggleMin();
-      }, doubleTapDelay);
-      releaseTimer = scope.addCleanup(() => clearTimer(timerId), "timeout");
-      tapTimer = { id: timerId, cancel: releaseTimer };
-    };
-    scope.listen(handle, "mousedown", onStart);
-    scope.listen(window, "mousemove", onMove);
-    scope.listen(window, "mouseup", onEnd);
-    scope.listen(handle, "touchstart", onStart, { passive: false });
-    scope.listen(window, "touchmove", onMove, { passive: false });
-    scope.listen(window, "touchend", onEnd);
-    scope.listen(window, "touchcancel", cancelAll);
-    scope.listen(window, "blur", cancelAll);
-    scope.addCleanup(() => {
-      active = false;
-      cancelGesture({ clearPendingTap: true });
-    }, "gesture-state");
-    return () => {
-      scope.dispose("island-gesture-unbound");
-    };
-  }
-
-  // src/phone-foundation.js
-  var warnedHostEventRegistrationFailures = /* @__PURE__ */ new Set();
-  function warnHostEventRegistrationFailureOnce(key, eventName, error) {
-    if (warnedHostEventRegistrationFailures.has(key)) return;
-    warnedHostEventRegistrationFailures.add(key);
-    const errorType = typeof error?.name === "string" && error.name ? error.name : "Error";
-    console.warn(`[phone-mode] \u5BBF\u4E3B\u4E8B\u4EF6 ${eventName} \u6CE8\u518C\u5931\u8D25\uFF0C\u8BE5\u96C6\u6210\u529F\u80FD\u53EF\u80FD\u4E0D\u53EF\u7528\u3002`, errorType);
-  }
-  var PHONE_BASE_WIDTH = 330;
-  var PHONE_BASE_HEIGHT = 580;
-  var PHONE_MIN_SCALE = 0.6;
-  var PHONE_MAX_SCALE = 1.5;
-  function normalizePhoneScale(value, viewportWidth = globalThis.window?.innerWidth ?? 1200) {
-    const width = Number(viewportWidth);
-    const compact = width <= 500;
-    const widthLimit = Math.max(0.1, (compact ? width * 0.92 : width - 24) / PHONE_BASE_WIDTH);
-    const maximum = Math.max(Math.min(PHONE_MAX_SCALE, widthLimit), Math.min(PHONE_MIN_SCALE, widthLimit));
-    const minimum = Math.min(PHONE_MIN_SCALE, maximum);
-    const numeric = Number(value);
-    const candidate = Number.isFinite(numeric) ? numeric : 1;
-    return Math.round(Math.min(maximum, Math.max(minimum, candidate)) * 1e3) / 1e3;
-  }
-  function phoneSizeForScale(scale) {
-    const normalized = Number.isFinite(Number(scale)) ? Number(scale) : 1;
-    return {
-      width: Math.round(PHONE_BASE_WIDTH * normalized),
-      height: Math.round(PHONE_BASE_HEIGHT * normalized)
-    };
-  }
-  function phoneSizeForViewport(scale, viewportWidth = globalThis.window?.innerWidth ?? 1200, viewportHeight = globalThis.window?.visualViewport?.height ?? globalThis.window?.innerHeight ?? 1e3) {
-    const normalized = normalizePhoneScale(scale, viewportWidth);
-    const naturalSize = phoneSizeForScale(normalized);
-    const height = Number(viewportHeight);
-    const compact = Number(viewportWidth) <= 500 || height <= 700;
-    const heightBudget = Math.max(
-      Math.round(PHONE_BASE_HEIGHT * 0.1),
-      Math.round(compact ? height * 0.82 : height - 24)
-    );
-    return { scale: normalized, width: naturalSize.width, height: Math.min(naturalSize.height, heightBudget) };
-  }
-  function applyPhoneScale(element, scale = globalThis.window?.__pmTheme?.phoneScale) {
-    if (!element) return null;
-    const size = phoneSizeForViewport(scale);
-    element.style.setProperty("--pm-phone-width", `${size.width}px`);
-    element.style.setProperty("--pm-phone-height", `${size.height}px`);
-    return size;
-  }
-  function installPhonePageSuspensionListeners(windowRef = window, documentRef = document, lifecycleScope) {
-    if (windowRef.__pmBeforeUnloadRegistered) return false;
-    if (!lifecycleScope) throw new Error("Phone page suspension listeners require an app lifecycle scope");
-    const owner = {}, releases = [];
-    const beforeUnload = () => windowRef.__pmPageSuspensionListenerOwner === owner && windowRef.__pmPageSuspensionHandler?.("beforeunload");
-    const visibilityChange = () => windowRef.__pmPageSuspensionListenerOwner === owner && documentRef.visibilityState === "hidden" && windowRef.__pmPageSuspensionHandler?.("document-hidden");
-    try {
-      releases.push(lifecycleScope.listen(windowRef, "beforeunload", beforeUnload));
-      releases.push(lifecycleScope.listen(documentRef, "visibilitychange", visibilityChange));
-      releases.push(lifecycleScope.addCleanup(() => {
-        if (windowRef.__pmPageSuspensionListenerOwner !== owner) return;
-        windowRef.__pmPageSuspensionListenerOwner = null;
-        windowRef.__pmBeforeUnloadRegistered = false;
-      }));
-      windowRef.__pmPageSuspensionListenerOwner = owner;
-      windowRef.__pmBeforeUnloadRegistered = true;
-    } catch (error) {
-      const cleanupErrors = [];
-      for (const release of releases.reverse()) {
-        try {
-          release();
-        } catch (cleanupError) {
-          cleanupErrors.push(cleanupError);
-        }
-      }
-      if (cleanupErrors.length)
-        throw new AggregateError([error, ...cleanupErrors], "Phone page suspension listener installation failed");
-      throw error;
-    }
-    return true;
-  }
-  function updatePhonePageSuspensionHandler(windowRef, deps, disarm, save = saveHistoriesBeforeUnload) {
-    windowRef.__pmPageSuspensionHandler = (reason) => handlePhonePageSuspension(
-      deps,
-      reason,
-      { disarm, save }
-    );
-    return windowRef.__pmPageSuspensionHandler;
-  }
-  function handlePhonePageSuspension(deps, reason, {
-    save = saveHistoriesBeforeUnload,
-    disarm = () => {
-    }
-  } = {}) {
-    save();
-    deps.cancelCommunityGeneration?.(reason);
-    deps.cancelCalendarTasks?.(reason);
-    disarm(reason);
-  }
-  function handleHostChatChanged({
-    state,
-    runtime,
-    chatLength = 0,
-    cancelCommunityGeneration,
-    cancelCalendarTasks,
-    disarmAutoPoke,
-    endPhone = globalThis.window?.__pmEnd,
-    invalidateGeneration
-  }) {
-    runtime.lastChatLength = Number.isInteger(chatLength) && chatLength >= 0 ? chatLength : 0;
-    cancelCommunityGeneration?.("host-chat-changed");
-    cancelCalendarTasks?.("host-chat-changed");
-    disarmAutoPoke?.("host-chat-changed");
-    if (state.phoneActive && typeof endPhone === "function") {
-      endPhone(true);
-      return "closed";
-    }
-    invalidateGeneration?.();
-    return "invalidated";
-  }
-  function installPhoneFoundation(state, deps) {
+  // src/phone-foundation-generation.js
+  function createPhoneGeneration(state, deps, hideTyping) {
     const { runtime, getCtx, getStorageId: getStorageId2, getUserPersona: getUserPersona2 } = deps;
-    let quoteHighlightTimer = null;
-    function renderActiveQuote() {
-      const preview = state.phoneWindow?.querySelector(".pm-quote-preview");
-      if (!preview) return;
-      const quote = state.activeQuote;
-      preview.hidden = !quote;
-      if (!quote) {
-        preview.querySelector(".pm-quote-preview-sender")?.replaceChildren();
-        preview.querySelector(".pm-quote-preview-text")?.replaceChildren();
-        return;
-      }
-      preview.querySelector(".pm-quote-preview-sender")?.replaceChildren(document.createTextNode(quote.sender || "\u7FA4\u804A\u6D88\u606F"));
-      preview.querySelector(".pm-quote-preview-text")?.replaceChildren(document.createTextNode(quote.text));
-    }
-    function clearActiveQuote() {
-      state.activeQuote = null;
-      renderActiveQuote();
-    }
-    function setActiveQuote(quote) {
-      if (!quote) return false;
-      state.activeQuote = quote;
-      renderActiveQuote();
-      state.phoneWindow?.querySelector(".pm-input")?.focus();
-      return true;
-    }
-    function findQuotedBubble(quote) {
-      const list2 = state.phoneWindow?.querySelector(".pm-msg-list");
-      if (!list2 || !quote?.bubbleId) return null;
-      return [...list2.querySelectorAll("[data-bubble-id]")].find((node) => node.dataset.bubbleId === quote.bubbleId && node.dataset.messageId === quote.messageId);
-    }
-    function syncReplyCardAvailability(card) {
-      if (!card) return false;
-      const quote = {
-        messageId: card.dataset.quoteMessageId,
-        bubbleId: card.dataset.quoteBubbleId
-      };
-      const available = !!findQuotedBubble(quote);
-      card.classList.toggle("is-missing", !available);
-      card.disabled = !available;
-      card.setAttribute("aria-disabled", String(!available));
-      card.setAttribute("aria-label", available ? "\u5B9A\u4F4D\u5230\u88AB\u5F15\u7528\u7684\u6D88\u606F" : "\u539F\u6D88\u606F\u5DF2\u5220\u9664\u6216\u5DF2\u88AB\u88C1\u526A\uFF0C\u5F53\u524D\u663E\u793A\u5F15\u7528\u5FEB\u7167");
-      return available;
-    }
-    function refreshReplyCardAvailability() {
-      const list2 = state.phoneWindow?.querySelector(".pm-msg-list");
-      if (!list2) return 0;
-      const cards = [...list2.querySelectorAll(".pm-reply-card")];
-      cards.forEach(syncReplyCardAvailability);
-      return cards.length;
-    }
-    function locateQuotedBubble(quote) {
-      const target = findQuotedBubble(quote);
-      if (!target) return false;
-      const reduceMotion = globalThis.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches === true;
-      target.scrollIntoView?.({ behavior: reduceMotion ? "auto" : "smooth", block: "center" });
-      target.classList.add("pm-quote-target");
-      if (quoteHighlightTimer !== null) clearTimeout(quoteHighlightTimer);
-      quoteHighlightTimer = setTimeout(() => target.classList.remove("pm-quote-target"), 1800);
-      return true;
-    }
-    const automaticTasks = createAutomaticTaskController({
-      runtime,
-      state,
-      getStorageId: getStorageId2,
-      isDocumentVisible: () => typeof document.visibilityState !== "string" || document.visibilityState !== "hidden"
-    });
-    const isAutoPokeAllowed = automaticTasks.isAllowed;
-    const armAutoPoke = automaticTasks.arm;
-    const disarmAutoPoke = automaticTasks.disarm;
-    const beginAutomaticTask = automaticTasks.begin;
-    const isAutomaticTaskActive = automaticTasks.isActive;
-    const finishAutomaticTask = automaticTasks.finish;
-    let emojiRenderBudget = createEmojiRenderBudget();
-    const resetEmojiRenderBudget = () => {
-      emojiRenderBudget = createEmojiRenderBudget();
-    };
-    updatePhonePageSuspensionHandler(window, deps, disarmAutoPoke);
-    installPhonePageSuspensionListeners(window, document, deps.appLifecycleScope);
-    window.__pmHistories = window.__pmHistories || {};
-    window.__pmConfig = window.__pmConfig || { apiUrl: "", apiKey: "", model: "", temperature: 1.2, useIndependent: false };
-    window.__pmProfiles = window.__pmProfiles || [];
-    window.__pmInjectionConfig = normalizeInjectionConfig(window.__pmInjectionConfig);
-    window.__pmBidirectional = window.__pmBidirectional || {};
-    window.__pmTheme = window.__pmTheme || {
-      preset: "default",
-      customRight: "",
-      customLeft: "",
-      borderColor: "",
-      layout: "standard",
-      darkMode: "light",
-      ambientStatusEnabled: false,
-      customTitle: "",
-      qrLabel: "\u5929\u97F3",
-      phoneScale: 1
-    };
-    window.__pmDesktopBg = window.__pmDesktopBg || "";
-    window.__pmBgGlobal = window.__pmBgGlobal || "";
-    window.__pmBgLocal = window.__pmBgLocal || {};
-    window.__pmGroupMeta = window.__pmGroupMeta || {};
-    window.__pmPokeConfig = window.__pmPokeConfig || {};
-    window.__pmCharacterBehavior = window.__pmCharacterBehavior || {};
-    window.__pmWordyLimit = window.__pmWordyLimit || false;
-    window.__pmBudgetConfig = normalizeBudgetConfig(window.__pmBudgetConfig);
-    window.__pmEmojis = window.__pmEmojis || [];
     function syncGenerationControls() {
       const disabled = !!state.isGenerating;
       for (const button of document.querySelectorAll(".pm-submit-pending-btn")) {
@@ -15636,14 +15829,7 @@ ${lines}`;
       const context = getCtx();
       if (!context || !id2 || id2 === "sms_unknown__default") return null;
       const controller = new AbortController();
-      const task = Object.freeze({
-        id: ++state.generationSequence,
-        hostEpoch: state.hostEpoch,
-        storageId: id2,
-        context,
-        controller,
-        signal: controller.signal
-      });
+      const task = Object.freeze({ id: ++state.generationSequence, hostEpoch: state.hostEpoch, storageId: id2, context, controller, signal: controller.signal });
       state.generationTask = task;
       state.isGenerating = true;
       syncGenerationControls();
@@ -15673,41 +15859,6 @@ ${lines}`;
       hideTyping();
       syncGenerationControls();
     }
-    function applyTheme() {
-      const t = window.__pmTheme || {}, p = THEME_PRESETS[t.preset] || THEME_PRESETS.default;
-      const interfaceMode = t.preset === "apple" ? "light" : t.darkMode || "light";
-      const customAccent = t.preset === "custom" ? String(t.customAccent || "").trim() : "";
-      const defaultRight = t.preset === "custom" && customAccent ? customAccent : interfaceMode === "dark" ? p.rightDark || p.right : p.right;
-      const defaultLeft = interfaceMode === "dark" ? p.leftDark || p.left : p.left;
-      const rBg = t.customRight || defaultRight, lBg = t.customLeft || defaultLeft;
-      const rTxt = t.customRight || t.preset === "custom" && customAccent ? contrastText(rBg) : p.rightText;
-      const lTxt = t.customLeft ? contrastText(t.customLeft) : interfaceMode === "dark" ? p.leftTextDark || p.leftText : p.leftText;
-      const border = t.borderColor || "#1a1a1a";
-      const skinTokens = { ...THEME_PRESETS.apple?.ui, ...THEME_PRESETS.pink?.uiDark };
-      const uiTokens = interfaceMode === "dark" ? p.uiDark || {} : p.ui || {};
-      const applyProperties = (element) => {
-        if (!element) return;
-        element.style.setProperty("--pm-r-bg", rBg);
-        element.style.setProperty("--pm-l-bg", lBg);
-        element.style.setProperty("--pm-r-txt", rTxt);
-        element.style.setProperty("--pm-l-txt", lTxt);
-        element.style.setProperty("--pm-border", border);
-        element.style.setProperty("--pm-frost", p.frost ? "1" : "0");
-        element.style.setProperty("--pm-color-accent", customAccent || p.accent || p.right);
-        for (const token of Object.keys(skinTokens)) element.style.removeProperty(token);
-        for (const [token, value] of Object.entries(uiTokens)) element.style.setProperty(token, value);
-        element.setAttribute("data-theme", interfaceMode);
-        if (t.preset === "apple") element.setAttribute("data-skin", "apple");
-        else element.removeAttribute("data-skin");
-      };
-      applyProperties(document.getElementById("pm-overlay"));
-      applyProperties(document.getElementById("pm-overlay-sub"));
-      applyProperties(document.getElementById("pm-model-dropdown"));
-      applyProperties(state.phoneWindow);
-      const desktopTitle = state.phoneWindow?.querySelector(".pm-desktop-toolbar span");
-      if (desktopTitle) desktopTitle.textContent = String(t.customTitle || "").trim() || "\u5929\u97F3\u5C0F\u7B3A";
-    }
-    const { applyBackground, fitNameFont, migrateOldHistory } = createPhoneAppearance(state, deps);
     function clearBidirectionalInjection() {
       runtime.injectionEpoch += 1;
       return clearExtensionPrompts({ context: getCtx(), runtime });
@@ -15724,9 +15875,7 @@ ${lines}`;
       const epoch = ++runtime.injectionEpoch;
       const context = getCtx();
       const id2 = getStorageId2();
-      if (!context || !id2 || id2 === "sms_unknown__default") {
-        return clearExtensionPrompts({ context, runtime });
-      }
+      if (!context || !id2 || id2 === "sms_unknown__default") return clearExtensionPrompts({ context, runtime });
       const character = context.characters?.[context.characterId];
       const currentActorName = typeof character?.name === "string" ? character.name.trim() : "";
       if (!currentActorName) return clearExtensionPrompts({ context, runtime });
@@ -15761,7 +15910,49 @@ ${lines}`;
         calendarOutfits: getCalendarData("getCalendarOutfitStore")
       });
     }
-    function hookGenerationEvent() {
+    function installBidirectionalToggle() {
+      window.__pmToggleBidirectional = (name) => {
+        const id2 = getStorageId2();
+        const targetKey = String(name || "").trim();
+        const isGroup = Object.hasOwn(window.__pmGroupMeta?.[id2] || {}, targetKey);
+        return window.__pmToggleConversationInjection?.(id2, targetKey, isGroup) || Promise.resolve(false);
+      };
+    }
+    return { syncGenerationControls, beginGeneration, isGenerationTaskActive, finishGeneration, cancelGeneration, invalidateGeneration, clearBidirectionalInjection, applyBidirectionalInjection, installBidirectionalToggle };
+  }
+
+  // src/phone-foundation-host-events.js
+  var warnedHostEventRegistrationFailures = /* @__PURE__ */ new Set();
+  function warnHostEventRegistrationFailureOnce(key, eventName, error) {
+    if (warnedHostEventRegistrationFailures.has(key)) return;
+    warnedHostEventRegistrationFailures.add(key);
+    const errorType = typeof error?.name === "string" && error.name ? error.name : "Error";
+    console.warn(`[phone-mode] \u5BBF\u4E3B\u4E8B\u4EF6 ${eventName} \u6CE8\u518C\u5931\u8D25\uFF0C\u8BE5\u96C6\u6210\u529F\u80FD\u53EF\u80FD\u4E0D\u53EF\u7528\u3002`, errorType);
+  }
+  function handleHostChatChanged({
+    state,
+    runtime,
+    chatLength = 0,
+    cancelCommunityGeneration,
+    cancelCalendarTasks,
+    disarmAutoPoke,
+    endPhone = globalThis.window?.__pmEnd,
+    invalidateGeneration
+  }) {
+    runtime.lastChatLength = Number.isInteger(chatLength) && chatLength >= 0 ? chatLength : 0;
+    cancelCommunityGeneration?.("host-chat-changed");
+    cancelCalendarTasks?.("host-chat-changed");
+    disarmAutoPoke?.("host-chat-changed");
+    if (state.phoneActive && typeof endPhone === "function") {
+      endPhone(true);
+      return "closed";
+    }
+    invalidateGeneration?.();
+    return "invalidated";
+  }
+  function createPhoneHostEvents(state, deps, automaticTasks, generation) {
+    const { runtime, getCtx, getStorageId: getStorageId2 } = deps;
+    return function hookGenerationEvent() {
       const c = getCtx();
       const et = c?.eventTypes || c?.event_types;
       if (!c?.eventSource || !et) return;
@@ -15791,11 +15982,7 @@ ${lines}`;
           return false;
         }
       };
-      const results = injectionEvents.map((eventName) => registerOnce(
-        `injection:${eventName}`,
-        eventName,
-        () => applyBidirectionalInjection().catch(() => void 0)
-      ));
+      const results = injectionEvents.map((eventName) => registerOnce(`injection:${eventName}`, eventName, () => generation.applyBidirectionalInjection().catch(() => void 0)));
       for (const eventName of resolveCommunityMessageEvents(et)) {
         results.push(registerOnce(`community:${eventName}`, eventName, () => {
           const currentContext = getCtx();
@@ -15815,12 +16002,8 @@ ${lines}`;
         if (currentLen > runtime.lastChatLength) {
           runtime.lastChatLength = currentLen;
           const hasCompletedAssistantMessage = chat.slice(previousLen).some((message) => !message?.is_user);
-          if (hasCompletedAssistantMessage && isAutoPokeAllowed() && typeof window.__pmIncrementCounters === "function") {
-            window.__pmIncrementCounters();
-          }
-        } else if (currentLen < runtime.lastChatLength) {
-          runtime.lastChatLength = currentLen;
-        }
+          if (hasCompletedAssistantMessage && automaticTasks.isAllowed() && typeof window.__pmIncrementCounters === "function") window.__pmIncrementCounters();
+        } else if (currentLen < runtime.lastChatLength) runtime.lastChatLength = currentLen;
       }));
       const chatChangedEvent = resolveHostEvent(et, "CHAT_CHANGED");
       results.push(registerOnce("resolved:CHAT_CHANGED", chatChangedEvent, () => {
@@ -15842,25 +16025,12 @@ ${lines}`;
             targetPresence: result?.targetPresence || null
           };
           runtime.lastBranchInheritanceError = null;
-          if (result?.status === "cloned") {
-            console.info("[phone-mode] \u5206\u652F\u624B\u673A\u6570\u636E\u7EE7\u627F\u5B8C\u6210");
-          } else if (result?.status === "skipped" && branchMetadata?.main_chat) {
-            console.warn("[phone-mode] \u5206\u652F\u624B\u673A\u6570\u636E\u7EE7\u627F\u5DF2\u8DF3\u8FC7", result.reason || "unknown");
-          }
+          if (result?.status === "cloned") console.info("[phone-mode] \u5206\u652F\u624B\u673A\u6570\u636E\u7EE7\u627F\u5B8C\u6210");
+          else if (result?.status === "skipped" && branchMetadata?.main_chat) console.warn("[phone-mode] \u5206\u652F\u624B\u673A\u6570\u636E\u7EE7\u627F\u5DF2\u8DF3\u8FC7", result.reason || "unknown");
           return result;
         }).catch((error) => {
-          runtime.lastBranchInheritance = {
-            status: "failed",
-            reason: null,
-            sourceId: branch?.sourceId || null,
-            targetId: branch?.targetId || null,
-            sourcePresence: null,
-            targetPresence: null
-          };
-          runtime.lastBranchInheritanceError = {
-            name: typeof error?.name === "string" && error.name ? error.name : "Error",
-            message: typeof error?.message === "string" ? error.message.slice(0, 240) : ""
-          };
+          runtime.lastBranchInheritance = { status: "failed", reason: null, sourceId: branch?.sourceId || null, targetId: branch?.targetId || null, sourcePresence: null, targetPresence: null };
+          runtime.lastBranchInheritanceError = { name: typeof error?.name === "string" && error.name ? error.name : "Error", message: typeof error?.message === "string" ? error.message.slice(0, 240) : "" };
           console.warn("[phone-mode] \u5206\u652F\u624B\u673A\u6570\u636E\u7EE7\u627F\u5931\u8D25", error?.name || "Error");
           return { status: "failed", error };
         }).finally(() => {
@@ -15870,315 +16040,118 @@ ${lines}`;
             chatLength: (currentContext?.chat || []).length,
             cancelCommunityGeneration: deps.cancelCommunityGeneration,
             cancelCalendarTasks: deps.cancelCalendarTasks,
-            disarmAutoPoke,
+            disarmAutoPoke: automaticTasks.disarm,
             endPhone: window.__pmEnd,
-            invalidateGeneration
+            invalidateGeneration: generation.invalidateGeneration
           });
         });
       }));
       runtime.eventHooked = results.every(Boolean);
-      if (runtime.eventHooked) {
-        console.log("[phone-mode] hooked", injectionEvents.length, "injection events");
-      }
-    }
-    window.__pmToggleBidirectional = (name) => {
-      const id2 = getStorageId2();
-      const targetKey = String(name || "").trim();
-      const isGroup = Object.hasOwn(window.__pmGroupMeta?.[id2] || {}, targetKey);
-      return window.__pmToggleConversationInjection?.(id2, targetKey, isGroup) || Promise.resolve(false);
+      if (runtime.eventHooked) console.log("[phone-mode] hooked", injectionEvents.length, "injection events");
     };
-    function bindPhoneResize(el, handle, lifecycleScope) {
-      if (!lifecycleScope) throw new Error("Phone resize requires a phone lifecycle scope");
-      let resizing = false;
-      let pointerId = null;
-      let startX = 0;
-      let startY = 0;
-      let startScale = 1;
-      let previousScale = 1;
-      const visualViewport = window.visualViewport;
-      const onViewportResize = () => applyPhoneScale(el);
-      const onPointerMove = (event) => {
-        if (!resizing || event.pointerId !== pointerId) return;
-        const dx = event.clientX - startX;
-        const dy = event.clientY - startY;
-        const projected = (dx * PHONE_BASE_WIDTH + dy * PHONE_BASE_HEIGHT) / (PHONE_BASE_WIDTH ** 2 + PHONE_BASE_HEIGHT ** 2);
-        const nextScale = normalizePhoneScale(startScale + projected);
-        window.__pmTheme.phoneScale = nextScale;
-        applyPhoneScale(el, nextScale);
-        if (event.cancelable) event.preventDefault();
-      };
-      const finish = (event) => {
-        if (!resizing || event?.pointerId !== void 0 && event.pointerId !== pointerId) return;
-        resizing = false;
-        el.classList.remove("is-resizing");
+  }
+
+  // src/phone-foundation.js
+  function installPhonePageSuspensionListeners(windowRef = window, documentRef = document, lifecycleScope) {
+    if (windowRef.__pmBeforeUnloadRegistered) return false;
+    if (!lifecycleScope) throw new Error("Phone page suspension listeners require an app lifecycle scope");
+    const owner = {}, releases = [];
+    const beforeUnload = () => windowRef.__pmPageSuspensionListenerOwner === owner && windowRef.__pmPageSuspensionHandler?.("beforeunload");
+    const visibilityChange = () => windowRef.__pmPageSuspensionListenerOwner === owner && documentRef.visibilityState === "hidden" && windowRef.__pmPageSuspensionHandler?.("document-hidden");
+    try {
+      releases.push(lifecycleScope.listen(windowRef, "beforeunload", beforeUnload));
+      releases.push(lifecycleScope.listen(documentRef, "visibilitychange", visibilityChange));
+      releases.push(lifecycleScope.addCleanup(() => {
+        if (windowRef.__pmPageSuspensionListenerOwner !== owner) return;
+        windowRef.__pmPageSuspensionListenerOwner = null;
+        windowRef.__pmBeforeUnloadRegistered = false;
+      }));
+      windowRef.__pmPageSuspensionListenerOwner = owner;
+      windowRef.__pmBeforeUnloadRegistered = true;
+    } catch (error) {
+      const cleanupErrors = [];
+      for (const release of releases.reverse()) {
         try {
-          handle.releasePointerCapture?.(pointerId);
-        } catch (error) {
+          release();
+        } catch (cleanupError) {
+          cleanupErrors.push(cleanupError);
         }
-        pointerId = null;
-        const nextScale = normalizePhoneScale(window.__pmTheme.phoneScale);
-        window.__pmTheme.phoneScale = nextScale;
-        if (!saveTheme()) {
-          window.__pmTheme.phoneScale = previousScale;
-          applyPhoneScale(el, previousScale);
-          alert("\u624B\u673A\u5C3A\u5BF8\u4FDD\u5B58\u5931\u8D25\uFF1A\u6D4F\u89C8\u5668\u5B58\u50A8\u4E0D\u53EF\u7528\u3002");
-        }
-      };
-      const onPointerDown = (event) => {
-        if (state.isMinimized || event.button !== 0) return;
-        resizing = true;
-        pointerId = event.pointerId;
-        startX = event.clientX;
-        startY = event.clientY;
-        previousScale = Number(window.__pmTheme.phoneScale) || 1;
-        startScale = normalizePhoneScale(previousScale);
-        window.__pmTheme.phoneScale = startScale;
-        el.classList.add("is-resizing");
-        handle.setPointerCapture?.(pointerId);
-        if (event.cancelable) event.preventDefault();
-      };
-      const releases = [];
-      try {
-        releases.push(lifecycleScope.listen(handle, "pointerdown", onPointerDown));
-        releases.push(lifecycleScope.listen(handle, "lostpointercapture", finish));
-        releases.push(lifecycleScope.listen(window, "pointermove", onPointerMove, { passive: false }));
-        releases.push(lifecycleScope.listen(window, "pointerup", finish));
-        releases.push(lifecycleScope.listen(window, "pointercancel", finish));
-        releases.push(lifecycleScope.listen(window, "blur", finish));
-        releases.push(lifecycleScope.listen(window, "resize", onViewportResize));
-        if (visualViewport) releases.push(lifecycleScope.listen(visualViewport, "resize", onViewportResize));
-        releases.push(lifecycleScope.addCleanup(() => finish()));
-        applyPhoneScale(el);
-      } catch (error) {
-        for (const release of releases.reverse()) {
-          try {
-            release();
-          } catch (cleanupError) {
-            console.error("[phone-mode] \u624B\u673A\u5C3A\u5BF8\u76D1\u542C\u5668\u5B89\u88C5\u5931\u8D25\u540E\u7684\u6E05\u7406\u5931\u8D25", cleanupError);
-          }
-        }
-        throw error;
       }
-      return () => {
-        finish();
-        let released = false;
-        for (const release of releases.reverse()) released = release() || released;
-        return released;
-      };
+      if (cleanupErrors.length) throw new AggregateError([error, ...cleanupErrors], "Phone page suspension listener installation failed");
+      throw error;
     }
-    function applyBubbleMetadata(node, metadata) {
-      if (!metadata) return;
-      if (metadata.historyIndex !== void 0) node.dataset.historyIndex = String(metadata.historyIndex);
-      if (metadata.messageId) node.dataset.messageId = String(metadata.messageId);
-      if (metadata.bubbleId) node.dataset.bubbleId = String(metadata.bubbleId);
-      if (metadata.pendingId !== void 0) node.dataset.pendingId = String(metadata.pendingId);
-      if (metadata.pendingStatus) node.dataset.pendingStatus = metadata.pendingStatus;
-      if (metadata.pendingId !== void 0) node.classList.add("pm-pending-entry");
-    }
-    function attachQuoteUi(root, bubble, text5, senderName, metadata) {
-      if (metadata?.quote && !bubble.querySelector(".pm-reply-card")) {
-        const card = document.createElement("button");
-        card.type = "button";
-        card.className = "pm-reply-card";
-        card.dataset.quoteMessageId = metadata.quote.messageId;
-        card.dataset.quoteBubbleId = metadata.quote.bubbleId;
-        const sender = document.createElement("span");
-        sender.className = "pm-reply-card-sender";
-        sender.textContent = metadata.quote.sender || "\u7FA4\u804A\u6D88\u606F";
-        const snapshot = document.createElement("span");
-        snapshot.className = "pm-reply-card-text";
-        snapshot.textContent = metadata.quote.text;
-        card.append(sender, snapshot);
-        card.addEventListener("click", (event) => {
-          event.stopPropagation();
-          if (syncReplyCardAvailability(card)) locateQuotedBubble({
-            messageId: card.dataset.quoteMessageId,
-            bubbleId: card.dataset.quoteBubbleId
-          });
-        });
-        syncReplyCardAvailability(card);
-        bubble.prepend(card);
-      }
-      if (metadata?.pendingId !== void 0 || !metadata?.messageId || !metadata?.bubbleId || root.querySelector(".pm-quote-action")) return;
-      const action = document.createElement("button");
-      action.type = "button";
-      action.className = "pm-quote-action";
-      action.textContent = "\u5F15\u7528";
-      action.setAttribute("aria-label", `\u5F15\u7528${senderName || (metadata.sender || "\u6211")}\u7684\u6D88\u606F`);
-      action.addEventListener("click", (event) => {
-        event.stopPropagation();
-        setActiveQuote({
-          messageId: String(metadata.messageId),
-          bubbleId: String(metadata.bubbleId),
-          sender: String(senderName || metadata.sender || "\u6211"),
-          text: String(text5 || "")
-        });
-      });
-      root.appendChild(action);
-    }
-    function addBubble(text5, side, senderName, historyIndex, metadata) {
-      const list2 = state.phoneWindow?.querySelector(".pm-msg-list");
-      if (!list2) return [];
-      const nodes = createBubbles(text5, side, senderName, {
-        groupColorMap: state.groupColorMap,
-        groupMembers: state.groupMembers,
-        emojis: window.__pmEmojis,
-        emojiBudget: emojiRenderBudget
-      });
-      nodes.forEach((b) => {
-        applyBubbleMetadata(b, metadata);
-        if (b.classList?.contains("pm-bubble")) {
-          b.dataset.side = side;
-          b.dataset.text = text5;
-          if (historyIndex !== void 0) b.dataset.historyIndex = historyIndex;
-          attachQuoteUi(b, b, text5, senderName, metadata);
-        } else if (b.classList?.contains("pm-group-bubble-wrap")) {
-          b.dataset.side = side;
-          b.dataset.text = text5;
-          if (historyIndex !== void 0) b.dataset.historyIndex = historyIndex;
-          const inner = b.querySelector(".pm-bubble");
-          if (inner) {
-            applyBubbleMetadata(inner, metadata);
-            inner.dataset.side = side;
-            inner.dataset.text = text5;
-            if (historyIndex !== void 0) inner.dataset.historyIndex = historyIndex;
-            attachQuoteUi(b, inner, text5, senderName, metadata);
-          }
-        }
-        list2.appendChild(b);
-      });
-      list2.scrollTop = list2.scrollHeight;
-      return nodes;
-    }
-    function rebaseRenderedHistory(trimmedCount) {
-      if (!Number.isInteger(trimmedCount) || trimmedCount <= 0) return;
-      const list2 = state.phoneWindow?.querySelector(".pm-msg-list");
-      if (!list2) return;
-      for (const child of [...list2.children]) {
-        const indexed = child.dataset.historyIndex !== void 0 ? child : child.querySelector?.("[data-history-index]");
-        if (!indexed) continue;
-        const previousIndex = Number(indexed.dataset.historyIndex);
-        if (!Number.isInteger(previousIndex)) continue;
-        if (previousIndex < trimmedCount) {
-          child.remove();
-          continue;
-        }
-        const nextIndex = String(previousIndex - trimmedCount);
-        if (child.dataset.historyIndex !== void 0) child.dataset.historyIndex = nextIndex;
-        child.querySelectorAll?.("[data-history-index]").forEach((node) => {
-          node.dataset.historyIndex = nextIndex;
-        });
-      }
-      refreshReplyCardAvailability();
-    }
-    function addNote(text5) {
-      const list2 = state.phoneWindow?.querySelector(".pm-msg-list");
-      if (!list2) return;
-      const n = document.createElement("div");
-      n.className = "pm-note";
-      n.textContent = text5;
-      list2.appendChild(n);
-      list2.scrollTop = list2.scrollHeight;
-    }
-    function addDirector(text5, metadata) {
-      const list2 = state.phoneWindow?.querySelector(".pm-msg-list");
-      if (!list2) return null;
-      const d = document.createElement("div");
-      d.className = "pm-director";
-      applyBubbleMetadata(d, metadata);
-      d.innerHTML = `<span class="pm-director-icon">\u{1F3AC}</span><span class="pm-director-text">${escapeHtml(text5)}</span>`;
-      list2.appendChild(d);
-      list2.scrollTop = list2.scrollHeight;
-      return d;
-    }
-    function showTyping() {
-      const list2 = state.phoneWindow?.querySelector(".pm-msg-list");
-      if (!list2 || document.getElementById("pm-typing")) return;
-      const t = document.createElement("div");
-      t.id = "pm-typing";
-      t.className = "pm-bubble pm-left pm-typing-bubble";
-      t.innerHTML = "<span></span><span></span><span></span>";
-      list2.appendChild(t);
-      list2.scrollTop = list2.scrollHeight;
-    }
-    function hideTyping() {
-      document.getElementById("pm-typing")?.remove();
-    }
-    function closeOverlay(reason = "close") {
-      const current = document.getElementById("pm-overlay");
-      if (!current) return false;
-      const onClose = current.__pmOnClose;
-      const opener = current.__pmOpener;
-      current.remove();
-      if (typeof onClose === "function") onClose(reason);
-      if (!["replace", "phone-close", "conversation-switch"].includes(reason) && opener?.isConnected && typeof opener.focus === "function") {
-        opener.focus({ preventScroll: true });
-      }
-      return true;
-    }
-    function makeOverlay(html, options = {}) {
-      const previous = document.getElementById("pm-overlay");
-      const active = document.activeElement;
-      const opener = options.opener || runtime.overlayOpener || previous?.__pmOpener || (active && active !== document.body ? active : null);
-      runtime.overlayOpener = null;
-      closeOverlay("replace");
-      const ov = document.createElement("div");
-      ov.id = "pm-overlay";
-      ov.dataset.theme = window.__pmTheme?.darkMode || "light";
-      if (POPOVER_SUPPORTED) ov.setAttribute("popover", "manual");
-      ov.__pmOnClose = typeof options.onClose === "function" ? options.onClose : null;
-      ov.__pmOpener = opener;
-      ov.innerHTML = html;
-      ov.addEventListener("click", (e) => {
-        if (e.target === ov) closeOverlay("backdrop");
-      });
-      document.body.appendChild(ov);
-      applyTheme();
-      if (ov.showPopover) try {
-        ov.showPopover();
-      } catch (e) {
-      }
-      return ov;
-    }
-    window.__pmCloseOverlay = () => closeOverlay("close");
+    return true;
+  }
+  function updatePhonePageSuspensionHandler(windowRef, deps, disarm, save = saveHistoriesBeforeUnload) {
+    windowRef.__pmPageSuspensionHandler = (reason) => handlePhonePageSuspension(deps, reason, { disarm, save });
+    return windowRef.__pmPageSuspensionHandler;
+  }
+  function handlePhonePageSuspension(deps, reason, { save = saveHistoriesBeforeUnload, disarm = () => {
+  } } = {}) {
+    save();
+    deps.cancelCommunityGeneration?.(reason);
+    deps.cancelCalendarTasks?.(reason);
+    disarm(reason);
+  }
+  function installPhoneFoundation(state, deps) {
+    const { runtime, getStorageId: getStorageId2 } = deps;
+    const quote = createPhoneQuote(state);
+    const automaticTasks = createAutomaticTaskController({
+      runtime,
+      state,
+      getStorageId: getStorageId2,
+      isDocumentVisible: () => typeof document.visibilityState !== "string" || document.visibilityState !== "hidden"
+    });
+    const messages = createPhoneMessages(state, quote);
+    updatePhonePageSuspensionHandler(window, deps, automaticTasks.disarm);
+    installPhonePageSuspensionListeners(window, document, deps.appLifecycleScope);
+    initializePhoneFoundationGlobals(window);
+    const generation = createPhoneGeneration(state, deps, messages.hideTyping);
+    const applyTheme = createPhoneTheme(state);
+    const { applyBackground, fitNameFont, migrateOldHistory } = createPhoneAppearance(state, deps);
+    const overlay = createPhoneOverlay(runtime, applyTheme);
+    const bindPhoneResize = createPhoneResize(state);
+    const hookGenerationEvent = createPhoneHostEvents(state, deps, automaticTasks, generation);
+    generation.installBidirectionalToggle();
+    window.__pmCloseOverlay = () => overlay.closeOverlay("close");
     Object.assign(deps, {
       applyTheme,
       applyBackground,
       fitNameFont,
       migrateOldHistory,
-      applyBidirectionalInjection,
-      clearBidirectionalInjection,
+      applyBidirectionalInjection: generation.applyBidirectionalInjection,
+      clearBidirectionalInjection: generation.clearBidirectionalInjection,
       hookGenerationEvent,
       bindIsland,
       bindPhoneResize,
       applyPhoneScale,
-      addBubble,
-      addNote,
-      addDirector,
-      rebaseRenderedHistory,
-      resetEmojiRenderBudget,
-      showTyping,
-      hideTyping,
-      makeOverlay,
-      closeOverlay,
-      beginGeneration,
-      isGenerationTaskActive,
-      finishGeneration,
-      cancelGeneration,
-      invalidateGeneration,
-      syncGenerationControls,
-      isAutoPokeAllowed,
-      armAutoPoke,
-      disarmAutoPoke,
-      beginAutomaticTask,
-      isAutomaticTaskActive,
-      finishAutomaticTask,
-      setActiveQuote,
-      clearActiveQuote,
-      renderActiveQuote,
-      findQuotedBubble,
-      locateQuotedBubble,
-      refreshReplyCardAvailability
+      addBubble: messages.addBubble,
+      addNote: messages.addNote,
+      addDirector: messages.addDirector,
+      rebaseRenderedHistory: messages.rebaseRenderedHistory,
+      resetEmojiRenderBudget: messages.resetEmojiRenderBudget,
+      showTyping: messages.showTyping,
+      hideTyping: messages.hideTyping,
+      makeOverlay: overlay.makeOverlay,
+      closeOverlay: overlay.closeOverlay,
+      beginGeneration: generation.beginGeneration,
+      isGenerationTaskActive: generation.isGenerationTaskActive,
+      finishGeneration: generation.finishGeneration,
+      cancelGeneration: generation.cancelGeneration,
+      invalidateGeneration: generation.invalidateGeneration,
+      syncGenerationControls: generation.syncGenerationControls,
+      isAutoPokeAllowed: automaticTasks.isAllowed,
+      armAutoPoke: automaticTasks.arm,
+      disarmAutoPoke: automaticTasks.disarm,
+      beginAutomaticTask: automaticTasks.begin,
+      isAutomaticTaskActive: automaticTasks.isActive,
+      finishAutomaticTask: automaticTasks.finish,
+      setActiveQuote: quote.setActiveQuote,
+      clearActiveQuote: quote.clearActiveQuote,
+      renderActiveQuote: quote.renderActiveQuote,
+      findQuotedBubble: quote.findQuotedBubble,
+      locateQuotedBubble: quote.locateQuotedBubble,
+      refreshReplyCardAvailability: quote.refreshReplyCardAvailability
     });
   }
 

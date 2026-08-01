@@ -1022,7 +1022,8 @@ const LEGACY_WINDOW_ENTRIES = [
 ];
 
 const PHONE_ENTRY_OWNERS = {
-  'phone-foundation.js': ['__pmToggleBidirectional', '__pmCloseOverlay'],
+  'phone-foundation-generation.js': ['__pmToggleBidirectional'],
+  'phone-foundation.js': ['__pmCloseOverlay'],
   'phone-chat.js': ['__pmSend', '__pmSubmitPending', '__pmIncrementCounters'],
   'phone-control-center.js': [
     '__pmShowControlCenter', '__pmOpenSettingsTab',
@@ -1203,7 +1204,7 @@ for (const expected of [
   'dataset.messageId', 'dataset.bubbleId', 'pm-reply-card', 'locateQuotedBubble', 'setActiveQuote',
   'syncReplyCardAvailability', 'refreshReplyCardAvailability',
   "matchMedia?.('(prefers-reduced-motion: reduce)')", "reduceMotion ? 'auto' : 'smooth'",
-]) requireText('phone-foundation.js', sourceModuleByName.get('phone-foundation.js')?.code || '', expected);
+]) requireText('phone foundation quote/messages modules', [sourceModuleByName.get('phone-foundation-quote.js')?.code || '', sourceModuleByName.get('phone-foundation-messages.js')?.code || ''].join('\n'), expected);
 for (const expected of [
   'pm-quote-preview', 'deleteSelectedMessages', 'refreshReplyCardAvailability?.()',
   "phoneLifecycleScope?.dispose(force ? 'phone-force-closed' : 'phone-closed')",
@@ -1416,6 +1417,14 @@ const interactiveViewsCode = sourceModuleByName.get('interactive-scene-views.js'
 const interactivePhoneCode = sourceModuleByName.get('interactive-scene-phone.js')?.code || '';
 const interactiveSchedulerCode = sourceModuleByName.get('interactive-scene-scheduler.js')?.code || '';
 const foundationCode = sourceModuleByName.get('phone-foundation.js')?.code || '';
+const foundationScaleCode = sourceModuleByName.get('phone-foundation-scale.js')?.code || '';
+const foundationThemeCode = sourceModuleByName.get('phone-foundation-theme.js')?.code || '';
+const foundationOverlayCode = sourceModuleByName.get('phone-foundation-overlay.js')?.code || '';
+const foundationQuoteCode = sourceModuleByName.get('phone-foundation-quote.js')?.code || '';
+const foundationMessagesCode = sourceModuleByName.get('phone-foundation-messages.js')?.code || '';
+const foundationGenerationCode = sourceModuleByName.get('phone-foundation-generation.js')?.code || '';
+const foundationHostEventsCode = sourceModuleByName.get('phone-foundation-host-events.js')?.code || '';
+const foundationModuleCode = [foundationCode, foundationScaleCode, foundationThemeCode, foundationOverlayCode, foundationQuoteCode, foundationMessagesCode, foundationGenerationCode, foundationHostEventsCode].join('\n');
 const calendarCode = sourceModuleByName.get('calendar.js')?.code || '';
 const calendarPageViewCode = sourceModuleByName.get('calendar-page-view.js')?.code || '';
 const calendarCommitCode = sourceModuleByName.get('calendar-commit.js')?.code || '';
@@ -1888,13 +1897,15 @@ for (const expected of [
   'runtime.eventHooked = results.every(Boolean)',
   'handleHostChatChanged({', "cancelCommunityGeneration?.('host-chat-changed')", "cancelCalendarTasks?.('host-chat-changed')",
   "disarmAutoPoke?.('host-chat-changed')", 'endPhone(true)',
+]) requireText('phone-foundation-host-events.js', foundationHostEventsCode, expected);
+for (const expected of [
   'installPhonePageSuspensionListeners', 'updatePhonePageSuspensionHandler', '__pmPageSuspensionHandler', '__pmPageSuspensionListenerOwner',
   "__pmPageSuspensionHandler?.('beforeunload')", "__pmPageSuspensionHandler?.('document-hidden')",
-]) requireText('phone-foundation.js', sourceModuleByName.get('phone-foundation.js')?.code || '', expected);
+]) requireText('phone-foundation.js', foundationCode, expected);
 for (const expected of ['hostEventSource: null', 'hostEventRegistrations: new Set()']) requireText('runtime.js', sourceModuleByName.get('runtime.js')?.code || '', expected);
 for (const expected of [
-  'installDiagnosticApi(deps)', "DIAGNOSTIC_ENABLED_KEY = 'ST_SMS_DIAG_ENABLED'", "globalThis.window?.__pmDiagEnabled === true",
-  "globalThis.localStorage?.getItem(DIAGNOSTIC_ENABLED_KEY) === 'true'", 'window.__pmDiag = freeze({ snapshot, readLineage })',
+  'installDiagnosticApi(deps)', "globalThis.window?.__pmDiagEnabled === true",
+  'window.__pmDiag = freeze({ snapshot, readLineage })',
   'lifecycleResources: lifecycleDiagnostics?.snapshot?.() || null',
   'Object.freeze(Array.from(pendingByTarget.keys()))', "reason: 'source-empty'", 'sourcePresence', 'targetPresence', 'force = false',
 ]) requireText('branch inheritance diagnostics', [
@@ -1909,7 +1920,7 @@ for (const forbidden of [
   "et.MESSAGE_SENT || 'message_sent'", "et.MESSAGE_EDITED || 'message_edited'",
   "et.MESSAGE_DELETED || 'message_deleted'", "et.MESSAGE_SWIPED || 'message_swiped'",
 ]) {
-  if (foundationCode.includes(forbidden)) failures.push(`phone-foundation.js: community observer must not guess host event ${forbidden}`);
+  if (foundationHostEventsCode.includes(forbidden)) failures.push(`phone-foundation-host-events.js: community observer must not guess host event ${forbidden}`);
 }
 for (const expected of [
   "cancelCommunityGeneration?.('phone-closed')",
@@ -1983,11 +1994,12 @@ const forumHandlerAssignments = sourceModules.reduce((count, module) => {
 if (forumHandlerAssignments !== 1) failures.push(`source: expected exactly one __pmOpenForumMode assignment, got ${forumHandlerAssignments}`);
 const settingsCode = sourceModuleByName.get('settings-ui.js')?.code || '';
 const modelPickerCode = sourceModuleByName.get('settings-model-picker.js')?.code || '';
-const foundationAnalysis = analyze(foundationCode, 'module');
+const foundationThemeAnalysis = analyze(foundationThemeCode, 'module');
+const foundationOverlayAnalysis = analyze(foundationOverlayCode, 'module');
 const settingsAnalysis = analyze(settingsCode, 'module');
 const modelPickerAnalysis = analyze(modelPickerCode, 'module');
-const makeOverlaySource = foundationAnalysis.functionSource.get('makeOverlay') || '';
-const applyThemeSource = foundationAnalysis.functionSource.get('applyTheme') || '';
+const makeOverlaySource = foundationOverlayAnalysis.functionSource.get('makeOverlay') || foundationOverlayCode;
+const applyThemeSource = foundationThemeAnalysis.functionSource.get('applyTheme') || foundationThemeCode;
 const setDarkModeSource = settingsAnalysis.windowAssignmentSource.get('__pmSetDarkMode') || '';
 const showModelPickerSource = settingsAnalysis.windowAssignmentSource.get('__pmShowModelPicker') || '';
 const modelPickerImplementation = modelPickerAnalysis.functionSource.get('showModelPicker') || '';
@@ -1997,17 +2009,17 @@ const overlayThemeHelperSyncPattern = /const\s+applyProperties\s*=\s*element\s*=
 if (!/createElement\(['"]div['"]\)/.test(makeOverlaySource)
     || !/\.id\s*=\s*['"]pm-overlay['"]/.test(makeOverlaySource)
     || !/\.dataset\.theme\s*=/.test(makeOverlaySource)) {
-  failures.push('phone-foundation.js: makeOverlay must initialize data-theme on the real pm-overlay root');
+  failures.push('phone-foundation-overlay.js: makeOverlay must initialize data-theme on the real pm-overlay root');
 }
 if (!overlayThemeDirectSyncPattern.test(applyThemeSource)
     && !overlayThemeHelperSyncPattern.test(applyThemeSource)) {
-  failures.push('phone-foundation.js: applyTheme must synchronize data-theme to an existing pm-overlay');
+  failures.push('phone-foundation-theme.js: applyTheme must synchronize data-theme to an existing pm-overlay');
 }
 if (!setDarkModeSource.includes('persistThemeMutation') || !persistThemeMutationSource.includes('applyTheme()')) {
   failures.push('settings-ui.js: __pmSetDarkMode must persist the mutation and apply the synchronized theme');
 }
 if (!applyThemeSource.includes("applyProperties(document.getElementById('pm-model-dropdown'))")) {
-  failures.push('phone-foundation.js: applyTheme must synchronize data-theme to an existing body-level model dropdown');
+  failures.push('phone-foundation-theme.js: applyTheme must synchronize data-theme to an existing body-level model dropdown');
 }
 if (!showModelPickerSource.includes('showModelPicker(runtime, appLifecycleScope)')) {
   failures.push('settings-ui.js: __pmShowModelPicker must delegate with runtime and app lifecycle scope');
@@ -2380,10 +2392,12 @@ for (const [owner, code, expected] of [
     'toggleMessageSelection({ checkbox: cb, wrap, list })', 'handleMessageSelectionKey(event, cb)',
     "list.classList.add('is-selecting')", 'wrap.appendChild(b);', 'wrap.appendChild(cb);', "list.classList.remove('is-selecting')",
   ]],
-  ['phone-foundation.js', foundationCode, [
+  ['phone-foundation-generation.js', foundationGenerationCode, [
     'window.__pmToggleBidirectional = name => {', 'const targetKey = String(name || \'\').trim();',
     'Object.hasOwn(window.__pmGroupMeta?.[id] || {}, targetKey)',
     'window.__pmToggleConversationInjection?.(id, targetKey, isGroup) || Promise.resolve(false)',
+  ]],
+  ['phone-foundation-scale.js', foundationScaleCode, [
     "lifecycleScope.listen(handle, 'lostpointercapture', finish)", "lifecycleScope.listen(window, 'blur', finish)",
     "for (const release of releases.reverse())", 'finish();',
     'export function phoneSizeForViewport(', 'const visualViewport = window.visualViewport;',
@@ -2454,7 +2468,8 @@ const phoneChatPokeCode = sourceModuleByName.get('phone-chat-poke.js')?.code || 
 const phoneChatPokeAnalysis = analyze(phoneChatPokeCode, 'module');
 const showContactConfigSource = phoneChatPokeAnalysis.functionSource.get('showContactConfig') || '';
 const saveContactConfigSource = phoneChatPokeAnalysis.windowAssignmentSource.get('__pmSaveContactConfig') || '';
-const foundationInjectionSource = foundationAnalysis.functionSource.get('applyBidirectionalInjection') || '';
+const foundationGenerationAnalysis = analyze(foundationGenerationCode, 'module');
+const foundationInjectionSource = foundationGenerationAnalysis.functionSource.get('applyBidirectionalInjection') || '';
 const preferenceCallCount = (phoneChatCode.match(/buildChatPreferencePrompt\s*\(/g) || []).length
   + (phoneChatPokeCode.match(/buildChatPreferencePrompt\s*\(/g) || []).length;
 if (preferenceCallCount !== 4) {
@@ -2674,7 +2689,7 @@ for (const expected of [
 ]) requireText('phone-directory.js group settings back action', directoryCode, expected);
 requireText('conversation.js quote sender attribution', sourceModuleByName.get('conversation.js')?.code || '',
   "sender: bubble.sender || (m.role === 'user' ? '我' : state.currentPersona)");
-requireText('phone-foundation.js quote sender snapshot', foundationCode,
+requireText('phone-foundation-messages.js quote sender snapshot', foundationMessagesCode,
   "sender: String(senderName || metadata.sender || '我')");
 if (!/pm-contact-settings-scroll[\s\S]*pm-modal-add pm-contact-settings-actions[\s\S]*保存角色设置[\s\S]*<\/div>\s*<\/div>\s*<\/div>`/.test(showContactConfigSource)) {
   failures.push('phone-chat-poke.js: character settings save action must remain inside the scroll content');
@@ -2692,7 +2707,7 @@ if (!showContactConfigSource || !saveContactConfigSource) {
 for (const expected of [
   'calendarWeather', "getCalendarData('getCalendarWeatherStore')",
   'calendarCycles', "getCalendarData('getCalendarCycleStore')",
-]) requireText('phone-foundation.js', foundationInjectionSource, expected);
+]) requireText('phone-foundation-generation.js', foundationInjectionSource, expected);
 for (const expected of [
   'class="pm-calendar-cycle-input" name="enabled" type="checkbox"',
   'class="pm-custom-check" aria-hidden="true"', 'pm-calendar-status-card', 'pm-calendar-status-watermark',
@@ -2793,7 +2808,7 @@ for (const expected of ['isRenderableEmojiSource(url)', "typeof emojiBudget === 
   requireText('messaging.js', messagingCode, expected);
 }
 for (const expected of ['createEmojiRenderBudget()', 'emojiBudget: emojiRenderBudget', 'resetEmojiRenderBudget']) {
-  requireText('phone-foundation.js', foundationCode, expected);
+  requireText('phone-foundation-messages.js', foundationMessagesCode, expected);
 }
 for (const expected of ['resetEmojiRenderBudget()', "list.innerHTML = ''"]) {
   requireText('conversation.js', conversationCode, expected);
@@ -2811,11 +2826,262 @@ for (const expected of [
   'runAutoPokeCounterCycle', 'await run(contactName)', 'commitAutomaticResult', 'await persistHistory()', 'persistCounter()',
 ]) requireText('runtime.js', runtimeCode, expected);
 for (const expected of [
-  'updatePhonePageSuspensionHandler(window, deps, disarmAutoPoke)',
+  'updatePhonePageSuspensionHandler(window, deps, automaticTasks.disarm)',
   'installPhonePageSuspensionListeners(window, document, deps.appLifecycleScope)', "disarmAutoPoke?.('host-chat-changed')",
-  'hasCompletedAssistantMessage && isAutoPokeAllowed()',
+  'hasCompletedAssistantMessage && automaticTasks.isAllowed()',
   'createAutomaticTaskController', 'automaticTasks.begin', 'automaticTasks.isActive', 'automaticTasks.finish',
-]) requireText('phone-foundation.js', foundationCode, expected);
+]) requireText('phone foundation automatic task modules', foundationModuleCode, expected);
+
+const foundationAst = parseJavaScript(foundationCode, 'module');
+const foundationInspection = inspectModule(foundationCode);
+const expectedFoundationImports = new Map([
+  ['./phone-island-gesture.js', ['bindIsland']],
+  ['./phone-appearance.js', ['createPhoneAppearance']],
+  ['./runtime.js', ['createAutomaticTaskController']],
+  ['./storage.js', ['saveHistoriesBeforeUnload']],
+  ['./phone-foundation-scale.js', ['PHONE_BASE_WIDTH', 'PHONE_BASE_HEIGHT', 'PHONE_MIN_SCALE', 'PHONE_MAX_SCALE', 'normalizePhoneScale', 'phoneSizeForScale', 'phoneSizeForViewport', 'applyPhoneScale', 'createPhoneResize']],
+  ['./phone-foundation-theme.js', ['initializePhoneFoundationGlobals', 'createPhoneTheme']],
+  ['./phone-foundation-overlay.js', ['createPhoneOverlay']],
+  ['./phone-foundation-quote.js', ['createPhoneQuote']],
+  ['./phone-foundation-messages.js', ['createPhoneMessages']],
+  ['./phone-foundation-generation.js', ['createPhoneGeneration']],
+  ['./phone-foundation-host-events.js', ['createPhoneHostEvents', 'handleHostChatChanged']],
+]);
+const foundationImportDeclarations = foundationAst.body.filter(statement => statement.type === 'ImportDeclaration');
+const actualFoundationImports = new Map();
+for (const declaration of foundationImportDeclarations) {
+  const sourcePath = declaration.source.value;
+  if (actualFoundationImports.has(sourcePath)) {
+    failures.push(`phone-foundation.js: duplicate import declaration from ${sourcePath}`);
+    continue;
+  }
+  const names = [];
+  for (const specifier of declaration.specifiers) {
+    if (specifier.type !== 'ImportSpecifier' || specifier.imported?.name !== specifier.local?.name) {
+      failures.push(`phone-foundation.js: ${sourcePath} must use unaliased named imports only`);
+      continue;
+    }
+    names.push(specifier.imported.name);
+  }
+  actualFoundationImports.set(sourcePath, names.sort());
+}
+for (const [sourcePath, expectedNames] of expectedFoundationImports) {
+  const actualNames = actualFoundationImports.get(sourcePath) || [];
+  const sortedExpectedNames = [...expectedNames].sort();
+  if (actualNames.length !== sortedExpectedNames.length
+      || actualNames.some((name, index) => name !== sortedExpectedNames[index])) {
+    failures.push(`phone-foundation.js: imports from ${sourcePath} changed; expected ${sortedExpectedNames.join(', ')}, got ${actualNames.join(', ') || '<missing>'}`);
+  }
+}
+for (const sourcePath of actualFoundationImports.keys()) {
+  if (!expectedFoundationImports.has(sourcePath)) failures.push(`phone-foundation.js: unexpected facade import source ${sourcePath}`);
+}
+
+const expectedFoundationExports = [
+  'PHONE_BASE_WIDTH', 'PHONE_BASE_HEIGHT', 'PHONE_MIN_SCALE', 'PHONE_MAX_SCALE',
+  'normalizePhoneScale', 'phoneSizeForScale', 'phoneSizeForViewport', 'applyPhoneScale',
+  'handleHostChatChanged', 'installPhonePageSuspensionListeners', 'updatePhonePageSuspensionHandler',
+  'handlePhonePageSuspension', 'installPhoneFoundation',
+].sort();
+const actualFoundationExports = [...foundationInspection.exports].sort();
+for (const statement of foundationAst.body) {
+  if (statement.type === 'ExportDefaultDeclaration') failures.push('phone-foundation.js: default export is forbidden by the compatibility surface');
+  if (statement.type === 'ExportAllDeclaration') failures.push('phone-foundation.js: export-all is forbidden by the compatibility surface');
+  if (statement.type === 'ExportNamedDeclaration' && statement.source) {
+    failures.push(`phone-foundation.js: re-export from ${statement.source.value} is forbidden by the compatibility surface`);
+  }
+}
+if (actualFoundationExports.length !== expectedFoundationExports.length
+    || actualFoundationExports.some((name, index) => name !== expectedFoundationExports[index])) {
+  failures.push(`phone-foundation.js: exported compatibility surface changed; expected ${expectedFoundationExports.join(', ')}, got ${actualFoundationExports.join(', ')}`);
+}
+
+const foundationInstaller = foundationAst.body.find(statement => statement.type === 'ExportNamedDeclaration'
+  && statement.declaration?.type === 'FunctionDeclaration'
+  && statement.declaration.id?.name === 'installPhoneFoundation')?.declaration;
+if (!foundationInstaller) {
+  failures.push('phone-foundation.js: missing exported installPhoneFoundation function');
+} else {
+  const parameterNames = foundationInstaller.params.map(parameter => parameter.type === 'Identifier' ? parameter.name : '<non-identifier>');
+  if (foundationInstaller.async || foundationInstaller.generator
+      || parameterNames.length !== 2 || parameterNames[0] !== 'state' || parameterNames[1] !== 'deps') {
+    failures.push(`phone-foundation.js: installPhoneFoundation must remain a synchronous non-generator function with signature (state, deps), got ${foundationInstaller.async ? 'async ' : ''}${foundationInstaller.generator ? 'generator ' : ''}(${parameterNames.join(', ')})`);
+  }
+
+  const expressionPath = node => {
+    if (node?.type === 'Identifier') return node.name;
+    if (node?.type !== 'MemberExpression' || node.computed) return null;
+    const objectPath = expressionPath(node.object);
+    return objectPath && node.property?.type === 'Identifier' ? `${objectPath}.${node.property.name}` : null;
+  };
+  const allDepsAssignments = [];
+  walk(foundationInstaller.body, node => {
+    if (node.type === 'CallExpression' && expressionPath(node.callee) === 'Object.assign'
+        && node.arguments[0]?.type === 'Identifier' && node.arguments[0].name === 'deps') allDepsAssignments.push(node);
+  });
+  const directDepsAssignments = [];
+  const directStatementSequence = [];
+  const bindingName = pattern => {
+    if (pattern?.type === 'Identifier') return pattern.name;
+    if (pattern?.type !== 'ObjectPattern') return null;
+    const names = pattern.properties.map(property => propertyName(property));
+    return names.every(Boolean) ? `{${names.join(',')}}` : null;
+  };
+  for (const statement of foundationInstaller.body.body) {
+    if (statement.type === 'VariableDeclaration' && statement.kind === 'const' && statement.declarations.length === 1) {
+      const declaration = statement.declarations[0];
+      const target = bindingName(declaration.id);
+      if (target === '{runtime,getStorageId}' && expressionPath(declaration.init) === 'deps') {
+        directStatementSequence.push('{runtime,getStorageId}=deps');
+        continue;
+      }
+      if (declaration.init?.type === 'CallExpression') {
+        const callee = expressionPath(declaration.init.callee);
+        if (target && callee) {
+          directStatementSequence.push(`${target}=${callee}`);
+          continue;
+        }
+      }
+    }
+    if (statement.type === 'ExpressionStatement') {
+      const expression = statement.expression;
+      if (expression.type === 'CallExpression') {
+        const path = expressionPath(expression.callee);
+        if (path === 'Object.assign'
+            && expression.arguments[0]?.type === 'Identifier' && expression.arguments[0].name === 'deps') {
+          directDepsAssignments.push(expression);
+        }
+        if (path) {
+          directStatementSequence.push(path);
+          continue;
+        }
+      }
+      if (expression.type === 'AssignmentExpression' && expressionPath(expression.left) === 'window.__pmCloseOverlay') {
+        directStatementSequence.push('window.__pmCloseOverlay=');
+        continue;
+      }
+    }
+    directStatementSequence.push(`<unexpected:${statement.type}>`);
+  }
+
+  if (allDepsAssignments.length !== 1 || directDepsAssignments.length !== 1
+      || directDepsAssignments[0]?.arguments.length !== 2) {
+    failures.push(`phone-foundation.js: expected exactly one direct Object.assign(deps, ...) compatibility mapping, got ${directDepsAssignments.length} direct and ${allDepsAssignments.length} total`);
+  } else {
+    const assignedObject = directDepsAssignments[0].arguments[1];
+    const expectedDepsMappings = new Map(Object.entries({
+      applyTheme: 'applyTheme', applyBackground: 'applyBackground', fitNameFont: 'fitNameFont', migrateOldHistory: 'migrateOldHistory',
+      applyBidirectionalInjection: 'generation.applyBidirectionalInjection', clearBidirectionalInjection: 'generation.clearBidirectionalInjection',
+      hookGenerationEvent: 'hookGenerationEvent', bindIsland: 'bindIsland', bindPhoneResize: 'bindPhoneResize', applyPhoneScale: 'applyPhoneScale',
+      addBubble: 'messages.addBubble', addNote: 'messages.addNote', addDirector: 'messages.addDirector',
+      rebaseRenderedHistory: 'messages.rebaseRenderedHistory', resetEmojiRenderBudget: 'messages.resetEmojiRenderBudget',
+      showTyping: 'messages.showTyping', hideTyping: 'messages.hideTyping', makeOverlay: 'overlay.makeOverlay', closeOverlay: 'overlay.closeOverlay',
+      beginGeneration: 'generation.beginGeneration', isGenerationTaskActive: 'generation.isGenerationTaskActive',
+      finishGeneration: 'generation.finishGeneration', cancelGeneration: 'generation.cancelGeneration',
+      invalidateGeneration: 'generation.invalidateGeneration', syncGenerationControls: 'generation.syncGenerationControls',
+      isAutoPokeAllowed: 'automaticTasks.isAllowed', armAutoPoke: 'automaticTasks.arm', disarmAutoPoke: 'automaticTasks.disarm',
+      beginAutomaticTask: 'automaticTasks.begin', isAutomaticTaskActive: 'automaticTasks.isActive', finishAutomaticTask: 'automaticTasks.finish',
+      setActiveQuote: 'quote.setActiveQuote', clearActiveQuote: 'quote.clearActiveQuote', renderActiveQuote: 'quote.renderActiveQuote',
+      findQuotedBubble: 'quote.findQuotedBubble', locateQuotedBubble: 'quote.locateQuotedBubble',
+      refreshReplyCardAvailability: 'quote.refreshReplyCardAvailability',
+    }));
+    if (assignedObject?.type !== 'ObjectExpression') {
+      failures.push('phone-foundation.js: Object.assign(deps, ...) second argument must remain an object literal');
+    } else {
+      const actualMappings = new Map();
+      let invalidProperty = false;
+      for (const property of assignedObject.properties) {
+        const name = propertyName(property);
+        const target = expressionPath(property?.value);
+        if (!name || !target) invalidProperty = true;
+        else actualMappings.set(name, target);
+      }
+      if (invalidProperty || actualMappings.size !== assignedObject.properties.length) {
+        failures.push('phone-foundation.js: deps compatibility mapping must contain only unique static properties');
+      }
+      for (const [name, target] of expectedDepsMappings) {
+        if (actualMappings.get(name) !== target) failures.push(`phone-foundation.js: deps.${name} must map to ${target}, got ${actualMappings.get(name) ?? '<missing>'}`);
+      }
+      for (const name of actualMappings.keys()) {
+        if (!expectedDepsMappings.has(name)) failures.push(`phone-foundation.js: unexpected deps compatibility key ${name}`);
+      }
+    }
+  }
+
+  const expectedDirectStatementSequence = [
+    '{runtime,getStorageId}=deps',
+    'quote=createPhoneQuote',
+    'automaticTasks=createAutomaticTaskController',
+    'messages=createPhoneMessages',
+    'updatePhonePageSuspensionHandler', 'installPhonePageSuspensionListeners', 'initializePhoneFoundationGlobals',
+    'generation=createPhoneGeneration',
+    'applyTheme=createPhoneTheme',
+    '{applyBackground,fitNameFont,migrateOldHistory}=createPhoneAppearance',
+    'overlay=createPhoneOverlay',
+    'bindPhoneResize=createPhoneResize',
+    'hookGenerationEvent=createPhoneHostEvents',
+    'generation.installBidirectionalToggle', 'window.__pmCloseOverlay=', 'Object.assign',
+  ];
+  if (directStatementSequence.length !== expectedDirectStatementSequence.length
+      || directStatementSequence.some((name, index) => name !== expectedDirectStatementSequence[index])) {
+    failures.push(`phone-foundation.js: direct compatibility installation sequence changed; expected ${expectedDirectStatementSequence.join(' -> ')}, got ${directStatementSequence.join(' -> ')}`);
+  }
+
+  const canonicalAst = value => {
+    if (Array.isArray(value)) return value.map(canonicalAst);
+    if (!value || typeof value !== 'object') return value;
+    const normalized = {};
+    for (const key of Object.keys(value).sort()) {
+      if (['start', 'end', 'raw'].includes(key)) continue;
+      normalized[key] = canonicalAst(value[key]);
+    }
+    return normalized;
+  };
+  const expectedFoundationInstallerSource = `function installPhoneFoundation(state, deps) {
+    const { runtime, getStorageId } = deps;
+    const quote = createPhoneQuote(state);
+    const automaticTasks = createAutomaticTaskController({
+        runtime, state, getStorageId,
+        isDocumentVisible: () => typeof document.visibilityState !== 'string' || document.visibilityState !== 'hidden',
+    });
+    const messages = createPhoneMessages(state, quote);
+    updatePhonePageSuspensionHandler(window, deps, automaticTasks.disarm);
+    installPhonePageSuspensionListeners(window, document, deps.appLifecycleScope);
+    initializePhoneFoundationGlobals(window);
+
+    const generation = createPhoneGeneration(state, deps, messages.hideTyping);
+    const applyTheme = createPhoneTheme(state);
+    const { applyBackground, fitNameFont, migrateOldHistory } = createPhoneAppearance(state, deps);
+    const overlay = createPhoneOverlay(runtime, applyTheme);
+    const bindPhoneResize = createPhoneResize(state);
+    const hookGenerationEvent = createPhoneHostEvents(state, deps, automaticTasks, generation);
+
+    generation.installBidirectionalToggle();
+    window.__pmCloseOverlay = () => overlay.closeOverlay('close');
+    Object.assign(deps, {
+        applyTheme, applyBackground, fitNameFont, migrateOldHistory,
+        applyBidirectionalInjection: generation.applyBidirectionalInjection,
+        clearBidirectionalInjection: generation.clearBidirectionalInjection, hookGenerationEvent,
+        bindIsland, bindPhoneResize, applyPhoneScale,
+        addBubble: messages.addBubble, addNote: messages.addNote, addDirector: messages.addDirector,
+        rebaseRenderedHistory: messages.rebaseRenderedHistory, resetEmojiRenderBudget: messages.resetEmojiRenderBudget,
+        showTyping: messages.showTyping, hideTyping: messages.hideTyping,
+        makeOverlay: overlay.makeOverlay, closeOverlay: overlay.closeOverlay,
+        beginGeneration: generation.beginGeneration, isGenerationTaskActive: generation.isGenerationTaskActive,
+        finishGeneration: generation.finishGeneration, cancelGeneration: generation.cancelGeneration,
+        invalidateGeneration: generation.invalidateGeneration, syncGenerationControls: generation.syncGenerationControls,
+        isAutoPokeAllowed: automaticTasks.isAllowed, armAutoPoke: automaticTasks.arm, disarmAutoPoke: automaticTasks.disarm,
+        beginAutomaticTask: automaticTasks.begin, isAutomaticTaskActive: automaticTasks.isActive, finishAutomaticTask: automaticTasks.finish,
+        setActiveQuote: quote.setActiveQuote, clearActiveQuote: quote.clearActiveQuote, renderActiveQuote: quote.renderActiveQuote,
+        findQuotedBubble: quote.findQuotedBubble, locateQuotedBubble: quote.locateQuotedBubble,
+        refreshReplyCardAvailability: quote.refreshReplyCardAvailability,
+    });
+}`;
+  const expectedFoundationInstaller = parseJavaScript(expectedFoundationInstallerSource, 'script').body[0];
+  if (JSON.stringify(canonicalAst(foundationInstaller)) !== JSON.stringify(canonicalAst(expectedFoundationInstaller))) {
+    failures.push('phone-foundation.js: installPhoneFoundation AST changed from the Phase 2 compatibility baseline');
+  }
+}
 for (const expected of [
   "disarmAutoPoke('phone-minimized')", "disarmAutoPoke('phone-closed')",
 ]) requireText('phone-lifecycle.js', lifecycleCode, expected);

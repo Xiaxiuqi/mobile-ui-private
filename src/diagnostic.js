@@ -3,17 +3,10 @@ import {
 } from './branch-scope-inheritance.js';
 import { loadBranchLineage } from './storage.js';
 
-export const DIAGNOSTIC_ENABLED_KEY = 'ST_SMS_DIAG_ENABLED';
-
 const freeze = value => Object.freeze(value);
 
 function diagnosticEnabled() {
-    if (globalThis.window?.__pmDiagEnabled === true) return true;
-    try {
-        return globalThis.localStorage?.getItem(DIAGNOSTIC_ENABLED_KEY) === 'true';
-    } catch (error) {
-        return false;
-    }
+    return globalThis.window?.__pmDiagEnabled === true;
 }
 
 function safePresence(value) {
