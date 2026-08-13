@@ -9,6 +9,7 @@
     "check:syntax": "node --check index.js",
     "check:ai": "node scripts/check-ai.mjs",
     "check:emoji": "node scripts/check-emoji.mjs",
+    "check:storage-emoji": "node scripts/check-storage-emoji.mjs",
     "check:behavior": "node scripts/check-behavior.mjs",
     "check:interactive": "node scripts/check-interactive.mjs",
     "check:pending": "node scripts/check-pending.mjs",
@@ -20,7 +21,7 @@
     "check:permissions": "node scripts/check-permissions.mjs",
     "check:contracts": "node scripts/check-contracts.mjs",
     "check:today-trend": "node scripts/check-today-trend.mjs",
-    "check": "npm run build && npm run check:syntax && npm run check:ai && npm run check:emoji && npm run check:behavior && npm run check:interactive && npm run check:pending && npm run check:press && npm run check:ambient && npm run check:cropper && npm run check:calendar && npm run check:budget && npm run check:permissions && npm run check:contracts && npm run check:today-trend"
+    "check": "npm run build && npm run check:syntax && npm run check:ai && npm run check:emoji && npm run check:storage-emoji && npm run check:behavior && npm run check:interactive && npm run check:pending && npm run check:press && npm run check:ambient && npm run check:cropper && npm run check:calendar && npm run check:budget && npm run check:permissions && npm run check:contracts && npm run check:today-trend"
   },
   "devDependencies": {
     "acorn": "8.15.0",

@@ -56,6 +56,15 @@ export const PLUGIN_IDB_STATIC_KEYS = Object.freeze([
 export const PLUGIN_IDB_DYNAMIC_PREFIXES = Object.freeze(['ST_SMS_BG_LOCAL_']);
 
 export async function loadEmojis() {
+    const primary = await pmIDBReadEntry(EMOJI_STORE_KEY);
+    if (primary.ok && Array.isArray(primary.value)) {
+        window.__pmEmojis = primary.value;
+        try { localStorage.removeItem(EMOJI_FALLBACK_KEY); }
+        catch (error) {
+            console.warn('[phone-mode] 表情包后备数据清理失败', error);
+        }
+        return;
+    }
     try {
         const fallback = localStorage.getItem(EMOJI_FALLBACK_KEY);
         if (fallback) {
@@ -64,16 +73,22 @@ export async function loadEmojis() {
             return;
         }
     } catch (error) {
-        try { localStorage.removeItem(EMOJI_FALLBACK_KEY); } catch (removeError) {}
+        console.warn('[phone-mode] 表情包后备数据读取失败', error);
+        try { localStorage.removeItem(EMOJI_FALLBACK_KEY); }
+        catch (removeError) {
+            console.warn('[phone-mode] 表情包损坏后备数据清理失败', removeError);
+        }
     }
-    const value = await pmIDBGet(EMOJI_STORE_KEY);
-    window.__pmEmojis = Array.isArray(value) ? value : [];
+    window.__pmEmojis = [];
 }
 
 export async function saveEmojis() {
     const saved = await pmIDBSet(EMOJI_STORE_KEY, window.__pmEmojis);
     if (saved) {
-        try { localStorage.removeItem(EMOJI_FALLBACK_KEY); } catch (error) {}
+        try { localStorage.removeItem(EMOJI_FALLBACK_KEY); }
+        catch (error) {
+            console.warn('[phone-mode] 表情包后备数据清理失败', error);
+        }
         return;
     }
     try {
@@ -201,7 +216,10 @@ export async function loadInteractiveScenes() {
         if (fallback) return JSON.parse(fallback);
     } catch (error) {
         console.warn('[phone-mode] 互动场景后备数据读取失败', error);
-        try { localStorage.removeItem(INTERACTIVE_FALLBACK_KEY); } catch (removeError) {}
+        try { localStorage.removeItem(INTERACTIVE_FALLBACK_KEY); }
+        catch (removeError) {
+            console.warn('[phone-mode] 互动场景损坏后备数据清理失败', removeError);
+        }
     }
     try {
         return await pmIDBGet(INTERACTIVE_STORE_KEY);

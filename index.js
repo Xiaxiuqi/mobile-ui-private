@@ -7338,6 +7338,16 @@ ${lines.join("\n")}
   ]);
   var PLUGIN_IDB_DYNAMIC_PREFIXES = Object.freeze(["ST_SMS_BG_LOCAL_"]);
   async function loadEmojis() {
+    const primary = await pmIDBReadEntry(EMOJI_STORE_KEY);
+    if (primary.ok && Array.isArray(primary.value)) {
+      window.__pmEmojis = primary.value;
+      try {
+        localStorage.removeItem(EMOJI_FALLBACK_KEY);
+      } catch (error) {
+        console.warn("[phone-mode] \u8868\u60C5\u5305\u540E\u5907\u6570\u636E\u6E05\u7406\u5931\u8D25", error);
+      }
+      return;
+    }
     try {
       const fallback = localStorage.getItem(EMOJI_FALLBACK_KEY);
       if (fallback) {
@@ -7346,13 +7356,14 @@ ${lines.join("\n")}
         return;
       }
     } catch (error) {
+      console.warn("[phone-mode] \u8868\u60C5\u5305\u540E\u5907\u6570\u636E\u8BFB\u53D6\u5931\u8D25", error);
       try {
         localStorage.removeItem(EMOJI_FALLBACK_KEY);
       } catch (removeError) {
+        console.warn("[phone-mode] \u8868\u60C5\u5305\u635F\u574F\u540E\u5907\u6570\u636E\u6E05\u7406\u5931\u8D25", removeError);
       }
     }
-    const value = await pmIDBGet(EMOJI_STORE_KEY);
-    window.__pmEmojis = Array.isArray(value) ? value : [];
+    window.__pmEmojis = [];
   }
   async function saveEmojis() {
     const saved = await pmIDBSet(EMOJI_STORE_KEY, window.__pmEmojis);
@@ -7360,6 +7371,7 @@ ${lines.join("\n")}
       try {
         localStorage.removeItem(EMOJI_FALLBACK_KEY);
       } catch (error) {
+        console.warn("[phone-mode] \u8868\u60C5\u5305\u540E\u5907\u6570\u636E\u6E05\u7406\u5931\u8D25", error);
       }
       return;
     }
@@ -7487,6 +7499,7 @@ ${lines.join("\n")}
       try {
         localStorage.removeItem(INTERACTIVE_FALLBACK_KEY);
       } catch (removeError) {
+        console.warn("[phone-mode] \u4E92\u52A8\u573A\u666F\u635F\u574F\u540E\u5907\u6570\u636E\u6E05\u7406\u5931\u8D25", removeError);
       }
     }
     try {
