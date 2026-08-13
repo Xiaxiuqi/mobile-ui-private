@@ -1,6 +1,7 @@
 import { TODAY_TREND_FALLBACK_KEY, TODAY_TREND_STORAGE_KEY } from './constants.js';
 import { createEmptyTodayTrendStore, migrateTodayTrendStore, normalizeTodayTrendStore } from './today-trend-model.js';
 import { pmIDBGet, pmIDBSet } from './pm-idb.js';
+import { todayTrendJournal } from './today-trend-journal.js';
 import { createTodayTrendV2Authority } from './today-trend-v2-authority.js';
 
 export const TODAY_TREND_STORAGE_KEYS = Object.freeze({ primary: TODAY_TREND_STORAGE_KEY, fallback: TODAY_TREND_FALLBACK_KEY });
@@ -22,7 +23,8 @@ function normalizeLoaded(value) {
 }
 
 export function createTodayTrendStorage({
-    idbGet = pmIDBGet, idbSet = pmIDBSet, storage = globalThis.localStorage, v2Authority = createTodayTrendV2Authority({ storage }),
+    idbGet = pmIDBGet, idbSet = pmIDBSet, storage = globalThis.localStorage,
+    v2Authority = createTodayTrendV2Authority({ storage }), journal = null,
 } = {}) {
     const load = async () => {
         const v2 = await v2Authority.load();
@@ -42,6 +44,7 @@ export function createTodayTrendStorage({
     };
 
     const save = async (value, options = {}) => {
+        if (journal) { await journal.ready(); journal.assertWritable(options.transactionId ?? null); }
         const normalized = normalizeTodayTrendStore(value);
         const v2 = await v2Authority.status();
         if (!v2.available) {
@@ -100,6 +103,11 @@ export function createTodayTrendStorage({
             error.code = v2.authority.ownerTabId ? 'TT_AUTHORITY_LOST' : 'TT_V1_WRITE_FROZEN';
             throw error;
         }
+        if (options.transactionId || options.journalWrite) {
+            const error = new Error('Today Trend 可恢复事务要求 v2 authority 写入，禁止降级到 v1 或 localStorage');
+            error.code = 'TT_SAGA_REQUIRES_V2';
+            throw error;
+        }
         const snapshot = clone(normalized);
         if (await idbSet(TODAY_TREND_STORAGE_KEY, snapshot)) {
             try { storage?.removeItem(TODAY_TREND_FALLBACK_KEY); }
@@ -115,10 +123,13 @@ export function createTodayTrendStorage({
         }
     };
 
-    return { load, save, v2Authority };
+    const status = () => v2Authority.status();
+    return { load, save, status, v2Authority, journal };
 }
 
-const defaultStorage = createTodayTrendStorage();
+const defaultStorage = createTodayTrendStorage({ journal: todayTrendJournal });
 export const loadTodayTrendStore = () => defaultStorage.load();
 export const saveTodayTrendStore = (value, options) => defaultStorage.save(value, options);
+export const getTodayTrendStorageStatus = () => defaultStorage.status();
 export const todayTrendV2Authority = defaultStorage.v2Authority;
+export { todayTrendJournal };

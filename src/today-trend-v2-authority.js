@@ -1,5 +1,5 @@
 import {
-    TODAY_TREND_V2_AUTHORITY_KEY, TODAY_TREND_V2_FALLBACK_KEY, TODAY_TREND_V2_STORAGE_KEY,
+    TODAY_TREND_V2_AUTHORITY_KEY, TODAY_TREND_V2_FALLBACK_KEY, TODAY_TREND_V2_JOURNAL_PREFIX, TODAY_TREND_V2_STORAGE_KEY,
 } from './constants.js';
 import { normalizeTodayTrendStore } from './today-trend-model.js';
 import { pmIDBCompareAndSwap, pmIDBReadEntry } from './pm-idb.js';
@@ -225,12 +225,16 @@ export function createTodayTrendV2Authority({
         }
         return actual;
     };
-    const saveInternal = async (value, { scopeId = null, changedScopeIds, expectedStoreRevision = null } = {}) => {
+    const saveInternal = async (value, { scopeId = null, changedScopeIds, expectedStoreRevision = null, journalWrite = null } = {}) => {
         if (closed) throw failure('TT_AUTHORITY_CLOSED', 'v2 authority owner 已关闭');
         if (!token || token.lost || token.authority.ownerTabId !== tabId || !token.authority.writeV2) {
             throw failure('TT_AUTHORITY_LOST', '当前标签不具备 v2 写入权威');
         }
         if (scopeId !== null && (typeof scopeId !== 'string' || !scopeId)) throw new TypeError('scopeId 必须是非空字符串或 null');
+        if (journalWrite !== null && (!journalWrite || typeof journalWrite.key !== 'string'
+            || !journalWrite.key.startsWith(TODAY_TREND_V2_JOURNAL_PREFIX) || !Object.hasOwn(journalWrite, 'value'))) {
+            throw new TypeError('journalWrite 必须是受控 Today Trend journal 写入');
+        }
         const previous = token.authority;
         if (expectedStoreRevision !== null && expectedStoreRevision !== previous.storeRevision) {
             throw failure('TT_STORE_REVISION_CONFLICT', 'v2 store 已在当前提交后发生变化，拒绝覆盖');
@@ -243,12 +247,14 @@ export function createTodayTrendV2Authority({
             scopeRevisionByStorageId: scopeRevisions,
         });
         const envelope = createTodayTrendV2Envelope(value, next.storeRevision);
+        const writes = [
+            { key: TODAY_TREND_V2_STORAGE_KEY, value: envelope },
+            { key: TODAY_TREND_V2_AUTHORITY_KEY, value: next },
+        ];
+        if (journalWrite) writes.push(clone(journalWrite));
         const result = await compareAndSwap({
             guardKey: TODAY_TREND_V2_AUTHORITY_KEY, expectedGuard: previous,
-            writes: [
-                { key: TODAY_TREND_V2_STORAGE_KEY, value: envelope },
-                { key: TODAY_TREND_V2_AUTHORITY_KEY, value: next },
-            ],
+            writes,
         });
         if (!result?.ok) {
             invalidateToken();

@@ -18,7 +18,13 @@ export function installTodayTrend(_state, deps = {}) {
         localRuntime.store = loaded;
         return loaded;
     };
-    const committer = createTodayTrendCommitter({ runtime: localRuntime, load, save, refreshInjection: deps.applyBidirectionalInjection });
+    const committer = createTodayTrendCommitter({
+        runtime: localRuntime,
+        load,
+        save,
+        refreshInjection: deps.applyBidirectionalInjection,
+        prepareInjection: deps.prepareBidirectionalInjection,
+    });
     const controller = (deps.createTodayTrendGenerationController || createTodayTrendGenerationController)({ callAI, getCtx });
     const getHostFloor = () => {
         try {

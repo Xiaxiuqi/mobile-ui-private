@@ -3912,7 +3912,9 @@ const phoneChatPokeCode = sourceModuleByName.get('phone-chat-poke.js')?.code || 
 const phoneChatPokeAnalysis = analyze(phoneChatPokeCode, 'module');
 const showContactConfigSource = phoneChatPokeAnalysis.functionSource.get('showContactConfig') || '';
 const saveContactConfigSource = phoneChatPokeAnalysis.windowAssignmentSource.get('__pmSaveContactConfig') || '';
-const foundationInjectionSource = analyze(phoneInjectionControllerCode, 'module').functionSource.get('applyBidirectionalInjection') || '';
+const phoneInjectionControllerAnalysis = analyze(phoneInjectionControllerCode, 'module');
+const foundationInjectionSource = phoneInjectionControllerAnalysis.functionSource.get('collectInjectionInput')
+  || phoneInjectionControllerAnalysis.functionSource.get('applyBidirectionalInjection') || '';
 const preferenceCallCount = (phoneChatCode.match(/buildChatPreferencePrompt\s*\(/g) || []).length
   + (phoneChatPokeCode.match(/buildChatPreferencePrompt\s*\(/g) || []).length;
 if (preferenceCallCount !== 4) {

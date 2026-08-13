@@ -135,7 +135,7 @@ export function installPhoneFoundation(state, deps) {
     const {
         beginGeneration, isGenerationTaskActive, finishGeneration, cancelGeneration, invalidateGeneration, syncGenerationControls,
     } = createPhoneGenerationController({ state, getCtx, getStorageId, hideTyping });
-    const { applyBidirectionalInjection, clearBidirectionalInjection } = createPhoneInjectionController({
+    const { applyBidirectionalInjection, prepareBidirectionalInjection, clearBidirectionalInjection } = createPhoneInjectionController({
         state, runtime, deps, getCtx, getStorageId, getUserPersona,
     });
     const { hookGenerationEvent } = createPhoneHostEventController({
@@ -231,7 +231,7 @@ export function installPhoneFoundation(state, deps) {
 
     Object.assign(deps, {
         applyTheme, applyBackground, fitNameFont, migrateOldHistory,
-        applyBidirectionalInjection, clearBidirectionalInjection, hookGenerationEvent,
+        applyBidirectionalInjection, prepareBidirectionalInjection, clearBidirectionalInjection, hookGenerationEvent,
         bindIsland, bindPhoneResize, applyPhoneScale,
         addBubble, addNote, addDirector, rebaseRenderedHistory, resetEmojiRenderBudget,
         showTyping, hideTyping, clearBubbleQuoteGesture, clearBubbleQuoteGestures,

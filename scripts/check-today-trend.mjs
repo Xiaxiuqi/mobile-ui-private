@@ -18,7 +18,9 @@ import {
     createTodayTrendV2Authority, createTodayTrendV2Envelope, normalizeTodayTrendV2Authority, normalizeTodayTrendV2Envelope,
 } from '../src/today-trend-v2-authority.js';
 import { createTodayTrendCommitter } from '../src/today-trend-commit.js';
-import { TODAY_TREND_V2_AUTHORITY_KEY, TODAY_TREND_V2_FALLBACK_KEY, TODAY_TREND_V2_STORAGE_KEY } from '../src/constants.js';
+import { createTodayTrendJournal, todayTrendStoreDigest } from '../src/today-trend-journal.js';
+import { createPhoneInjectionController } from '../src/phone-injection-controller.js';
+import { TODAY_TREND_V2_AUTHORITY_KEY, TODAY_TREND_V2_FALLBACK_KEY, TODAY_TREND_V2_JOURNAL_PREFIX, TODAY_TREND_V2_STORAGE_KEY } from '../src/constants.js';
 import { pmIDBCompareAndSwap } from '../src/pm-idb.js';
 import { gatherTodayTrendContext } from '../src/today-trend-context.js';
 import {
@@ -1518,6 +1520,346 @@ try {
 } finally {
     if (originalIndexedDB === undefined) delete globalThis.indexedDB;
     else globalThis.indexedDB = originalIndexedDB;
+}
+
+const sagaHarness = createAuthorityHarness();
+const sagaCasWrites = [];
+const sagaAuthority = createTodayTrendV2Authority({
+    readEntry: sagaHarness.readEntry,
+    compareAndSwap: async request => {
+        sagaCasWrites.push(request.writes.map(entry => entry.key));
+        return sagaHarness.compareAndSwap(request);
+    },
+    tabId: 'saga-owner', BroadcastChannelImpl: undefined,
+});
+await sagaAuthority.acquire({ readV2: true, writeV2: true, initialStore: valid });
+let sagaNow = 1000;
+const sagaPhases = [];
+const createSagaJournal = () => createTodayTrendJournal({
+    listKeys: async () => [...sagaHarness.records.keys()],
+    readEntry: sagaHarness.readEntry,
+    writeEntry: async (key, value) => {
+        sagaHarness.records.set(key, structuredClone(value));
+        sagaPhases.push(value.phase);
+        return true;
+    },
+    deleteEntry: async key => sagaHarness.records.delete(key),
+    now: () => ++sagaNow,
+    transactionId: () => `saga-${sagaNow}`,
+});
+const sagaJournal = createSagaJournal();
+const invalidTransitionEntry = await sagaJournal.begin({
+    scopeId: 'chat', affectedScopeIds: ['chat'], baseStoreRevision: 1, previous: valid, candidate: valid,
+});
+await assert.rejects(() => sagaJournal.transition(invalidTransitionEntry, 'injection-written'),
+    error => error?.code === 'TT_JOURNAL_TRANSITION_INVALID',
+    'journal 必须拒绝 prepared 直接跳到 injection-written');
+await sagaJournal.complete(invalidTransitionEntry, 'rejected');
+
+const sagaStorage = createTodayTrendStorage({ v2Authority: sagaAuthority, journal: sagaJournal, storage: memoryStorage() });
+const sagaRuntime = {};
+const sagaRefreshes = [];
+let sagaPrepareCalls = 0;
+const sagaCommitter = createTodayTrendCommitter({
+    runtime: sagaRuntime, load: sagaStorage.load, save: sagaStorage.save, storageStatus: sagaStorage.status, journal: sagaJournal,
+    prepareInjection: async () => { sagaPrepareCalls += 1; },
+    refreshInjection: async store => { sagaRefreshes.push(structuredClone(store)); return { failedWrites: 0, failedKeys: [] }; },
+});
+const sagaAccepted = await sagaCommitter.commitScope('chat', scope => ({
+    ...scope, operation: { ...scope.operation, lastSuccessfulRunAt: scope.operation.lastSuccessfulRunAt + 10 },
+}));
+assert.equal(sagaPrepareCalls, 1, '双写提交必须在 store CAS 前执行纯注入预检');
+assert.equal(sagaRefreshes.length, 1, '双写提交成功后只能执行一次真实 candidate 注入');
+assert.equal(sagaRuntime.pendingInjectionStore, undefined, '双写提交结束后不得泄漏 pending injection override');
+assert.ok(sagaCasWrites.some(keys => keys.length === 3 && keys.some(key => key.startsWith(TODAY_TREND_V2_JOURNAL_PREFIX))),
+    'candidate store、authority 与 store-written journal 必须进入同一个 CAS writes');
+assert.equal([...sagaHarness.records.keys()].some(key => key.startsWith(TODAY_TREND_V2_JOURNAL_PREFIX)), false,
+    'accepted journal 必须在终态持久化后清理开放记录');
+assert.equal(sagaAccepted.scopes.chat.operation.lastSuccessfulRunAt,
+    valid.scopes.chat.operation.lastSuccessfulRunAt + 10, 'saga 成功必须返回 candidate store');
+
+const beforeSagaCompensation = structuredClone(await sagaStorage.load());
+let compensationInjectionCalls = 0;
+const compensatingSaga = createTodayTrendCommitter({
+    runtime: {}, load: sagaStorage.load, save: sagaStorage.save, storageStatus: sagaStorage.status, journal: sagaJournal,
+    prepareInjection: async () => {},
+    refreshInjection: async () => {
+        compensationInjectionCalls += 1;
+        return compensationInjectionCalls === 1 ? { failedWrites: 1, failedKeys: [] } : { failedWrites: 0, failedKeys: [] };
+    },
+});
+await assert.rejects(() => compensatingSaga.commitScope('chat', scope => ({
+    ...scope, operation: { ...scope.operation, lastSuccessfulRunAt: scope.operation.lastSuccessfulRunAt + 1 },
+})), /注入刷新失败/, 'candidate 注入失败必须抛回原始失败');
+assert.equal(compensationInjectionCalls, 2, 'candidate 注入失败后必须只补偿一次 previous 注入');
+assert.deepEqual(await sagaStorage.load(), beforeSagaCompensation, '补偿 CAS 必须恢复提交前 store');
+assert.ok(sagaCasWrites.some(keys => keys.length === 3 && keys.some(key => key.startsWith(TODAY_TREND_V2_JOURNAL_PREFIX))),
+    '补偿 store、authority 与 compensation-store-written journal 必须同事务提交');
+assert.ok(sagaPhases.includes('compensation-requested') && sagaPhases.includes('rejected'),
+    '注入失败必须留下 compensation-requested 到 rejected 的可诊断 phase 轨迹');
+
+const recoveryPrevious = structuredClone(await sagaStorage.load());
+const recoveryCandidate = structuredClone(recoveryPrevious);
+recoveryCandidate.scopes.chat.operation.lastSuccessfulRunAt += 20;
+const recoveryStatus = await sagaStorage.status();
+const recoveryEntry = await sagaJournal.begin({
+    scopeId: 'chat', affectedScopeIds: ['chat'], baseStoreRevision: recoveryStatus.authority.storeRevision,
+    previous: recoveryPrevious, candidate: recoveryCandidate,
+});
+const recoveryWrite = sagaJournal.atomicTransition(recoveryEntry, 'store-written', {
+    candidateStoreRevision: recoveryStatus.authority.storeRevision + 1,
+});
+await sagaStorage.save(recoveryCandidate, {
+    scopeId: 'chat', changedScopeIds: ['chat'], expectedStoreRevision: recoveryStatus.authority.storeRevision,
+    transactionId: recoveryEntry.transactionId, journalWrite: recoveryWrite, returnReceipt: true,
+});
+const restartedJournal = createSagaJournal();
+let recoveryRefreshes = 0;
+const restartedCommitter = createTodayTrendCommitter({
+    runtime: {}, load: sagaStorage.load, save: sagaStorage.save, storageStatus: sagaStorage.status, journal: restartedJournal,
+    refreshInjection: async store => {
+        recoveryRefreshes += 1;
+        assert.equal(todayTrendStoreDigest(store), todayTrendStoreDigest(recoveryCandidate));
+        return { failedWrites: 0, failedKeys: [] };
+    },
+});
+for (let index = 0; index < 20; index += 1) await restartedCommitter.ready();
+assert.equal(recoveryRefreshes, 1, '同一启动恢复循环重复等待 20 次只能重放一次 candidate 注入');
+assert.equal([...sagaHarness.records.keys()].some(key => key.startsWith(TODAY_TREND_V2_JOURNAL_PREFIX)), false,
+    'store-written 恢复成功后必须清理 terminal journal');
+await sagaJournal.reload();
+const preparedPrevious = structuredClone(await sagaStorage.load());
+const preparedStatus = await sagaStorage.status();
+await sagaJournal.begin({
+    scopeId: 'chat', affectedScopeIds: ['chat'], baseStoreRevision: preparedStatus.authority.storeRevision,
+    previous: preparedPrevious, candidate: structuredClone(preparedPrevious),
+});
+let preparedRecoveryRefreshes = 0;
+const preparedRecovery = createTodayTrendCommitter({
+    runtime: {}, load: sagaStorage.load, save: sagaStorage.save, storageStatus: sagaStorage.status, journal: createSagaJournal(),
+    refreshInjection: async () => { preparedRecoveryRefreshes += 1; },
+});
+await preparedRecovery.ready();
+assert.equal(preparedRecoveryRefreshes, 0, 'prepared 恢复必须直接 rejected，不得执行真实注入');
+await sagaJournal.reload();
+
+const injectionWrittenPrevious = structuredClone(await sagaStorage.load());
+const injectionWrittenCandidate = structuredClone(injectionWrittenPrevious);
+injectionWrittenCandidate.scopes.chat.operation.lastSuccessfulRunAt += 30;
+const injectionWrittenStatus = await sagaStorage.status();
+let injectionWrittenEntry = await sagaJournal.begin({
+    scopeId: 'chat', affectedScopeIds: ['chat'], baseStoreRevision: injectionWrittenStatus.authority.storeRevision,
+    previous: injectionWrittenPrevious, candidate: injectionWrittenCandidate,
+});
+const injectionWrittenAtomic = sagaJournal.atomicTransition(injectionWrittenEntry, 'store-written', {
+    candidateStoreRevision: injectionWrittenStatus.authority.storeRevision + 1,
+});
+await sagaStorage.save(injectionWrittenCandidate, {
+    scopeId: 'chat', changedScopeIds: ['chat'], expectedStoreRevision: injectionWrittenStatus.authority.storeRevision,
+    transactionId: injectionWrittenEntry.transactionId, journalWrite: injectionWrittenAtomic, returnReceipt: true,
+});
+injectionWrittenEntry = sagaJournal.acceptAtomicTransition(injectionWrittenAtomic.value);
+await sagaJournal.transition(injectionWrittenEntry, 'injection-written');
+let injectionWrittenRefreshes = 0;
+const injectionWrittenRecovery = createTodayTrendCommitter({
+    runtime: {}, load: sagaStorage.load, save: sagaStorage.save, storageStatus: sagaStorage.status, journal: createSagaJournal(),
+    refreshInjection: async () => { injectionWrittenRefreshes += 1; },
+});
+await injectionWrittenRecovery.ready();
+assert.equal(injectionWrittenRefreshes, 0, 'injection-written 恢复只能收尾 accepted，不得重复注入');
+await sagaJournal.reload();
+
+const requestedPrevious = structuredClone(await sagaStorage.load());
+const requestedCandidate = structuredClone(requestedPrevious);
+requestedCandidate.scopes.chat.operation.lastSuccessfulRunAt += 40;
+const requestedStatus = await sagaStorage.status();
+let requestedEntry = await sagaJournal.begin({
+    scopeId: 'chat', affectedScopeIds: ['chat'], baseStoreRevision: requestedStatus.authority.storeRevision,
+    previous: requestedPrevious, candidate: requestedCandidate,
+});
+const requestedAtomic = sagaJournal.atomicTransition(requestedEntry, 'store-written', {
+    candidateStoreRevision: requestedStatus.authority.storeRevision + 1,
+});
+const requestedReceipt = await sagaStorage.save(requestedCandidate, {
+    scopeId: 'chat', changedScopeIds: ['chat'], expectedStoreRevision: requestedStatus.authority.storeRevision,
+    transactionId: requestedEntry.transactionId, journalWrite: requestedAtomic, returnReceipt: true,
+});
+requestedEntry = sagaJournal.acceptAtomicTransition(requestedAtomic.value);
+await sagaJournal.transition(requestedEntry, 'compensation-requested', { lastErrorCode: 'TT_TEST_RECOVERY' });
+let requestedRefreshDigest = null;
+const requestedRecovery = createTodayTrendCommitter({
+    runtime: {}, load: sagaStorage.load, save: sagaStorage.save, storageStatus: sagaStorage.status, journal: createSagaJournal(),
+    refreshInjection: async store => { requestedRefreshDigest = todayTrendStoreDigest(store); return { failedWrites: 0, failedKeys: [] }; },
+});
+await requestedRecovery.ready();
+assert.equal(requestedReceipt.storeRevision + 1, (await sagaStorage.status()).authority.storeRevision,
+    'compensation-requested 恢复必须基于 candidate revision 原子递增一次');
+assert.equal(requestedRefreshDigest, todayTrendStoreDigest(requestedPrevious),
+    'compensation-requested 恢复必须重放 previous 注入');
+assert.deepEqual(await sagaStorage.load(), requestedPrevious, 'compensation-requested 恢复必须还原 previous store');
+await sagaJournal.reload();
+
+const failedRecoveryPrevious = structuredClone(await sagaStorage.load());
+const failedRecoveryCandidate = structuredClone(failedRecoveryPrevious);
+failedRecoveryCandidate.scopes.chat.operation.lastSuccessfulRunAt += 50;
+const failedRecoveryStatus = await sagaStorage.status();
+const failedRecoveryEntry = await sagaJournal.begin({
+    scopeId: 'chat', affectedScopeIds: ['chat'], baseStoreRevision: failedRecoveryStatus.authority.storeRevision,
+    previous: failedRecoveryPrevious, candidate: failedRecoveryCandidate,
+});
+const failedRecoveryAtomic = sagaJournal.atomicTransition(failedRecoveryEntry, 'store-written', {
+    candidateStoreRevision: failedRecoveryStatus.authority.storeRevision + 1,
+});
+await sagaStorage.save(failedRecoveryCandidate, {
+    scopeId: 'chat', changedScopeIds: ['chat'], expectedStoreRevision: failedRecoveryStatus.authority.storeRevision,
+    transactionId: failedRecoveryEntry.transactionId, journalWrite: failedRecoveryAtomic, returnReceipt: true,
+});
+let failedRecoveryRefreshes = 0;
+const failedRecoveryCommitter = createTodayTrendCommitter({
+    runtime: {}, load: sagaStorage.load, save: sagaStorage.save, storageStatus: sagaStorage.status, journal: createSagaJournal(),
+    refreshInjection: async () => {
+        failedRecoveryRefreshes += 1;
+        return failedRecoveryRefreshes === 1 ? { failedWrites: 1, failedKeys: [] } : { failedWrites: 0, failedKeys: [] };
+    },
+});
+await failedRecoveryCommitter.ready();
+assert.equal(failedRecoveryRefreshes, 2, 'store-written 恢复注入失败后必须补偿 previous 注入，而不是直接 blocked');
+assert.deepEqual(await sagaStorage.load(), failedRecoveryPrevious, 'store-written 恢复注入失败后必须还原 previous store');
+assert.equal(failedRecoveryCommitter.isBlocked(), false, '可成功补偿的恢复失败不得升级为 blocked');
+await sagaJournal.reload();
+
+const compensationCrashPrevious = structuredClone(await sagaStorage.load());
+const compensationCrashCandidate = structuredClone(compensationCrashPrevious);
+compensationCrashCandidate.scopes.chat.operation.lastSuccessfulRunAt += 60;
+const compensationCrashStatus = await sagaStorage.status();
+let compensationCrashEntry = await sagaJournal.begin({
+    scopeId: 'chat', affectedScopeIds: ['chat'], baseStoreRevision: compensationCrashStatus.authority.storeRevision,
+    previous: compensationCrashPrevious, candidate: compensationCrashCandidate,
+});
+const compensationCrashStoreWrite = sagaJournal.atomicTransition(compensationCrashEntry, 'store-written', {
+    candidateStoreRevision: compensationCrashStatus.authority.storeRevision + 1,
+});
+const compensationCrashReceipt = await sagaStorage.save(compensationCrashCandidate, {
+    scopeId: 'chat', changedScopeIds: ['chat'], expectedStoreRevision: compensationCrashStatus.authority.storeRevision,
+    transactionId: compensationCrashEntry.transactionId, journalWrite: compensationCrashStoreWrite, returnReceipt: true,
+});
+compensationCrashEntry = sagaJournal.acceptAtomicTransition(compensationCrashStoreWrite.value);
+compensationCrashEntry = await sagaJournal.transition(compensationCrashEntry, 'compensation-requested', {
+    lastErrorCode: 'TT_TEST_COMPENSATION_CRASH',
+});
+const compensationCrashWrite = sagaJournal.atomicTransition(compensationCrashEntry, 'compensation-store-written', {
+    compensationStoreRevision: compensationCrashReceipt.storeRevision + 1,
+});
+await sagaStorage.save(compensationCrashPrevious, {
+    scopeId: 'chat', changedScopeIds: ['chat'], expectedStoreRevision: compensationCrashReceipt.storeRevision,
+    transactionId: compensationCrashEntry.transactionId, journalWrite: compensationCrashWrite, returnReceipt: true,
+});
+let compensationCrashRefreshes = 0;
+const compensationCrashRecovery = createTodayTrendCommitter({
+    runtime: {}, load: sagaStorage.load, save: sagaStorage.save, storageStatus: sagaStorage.status, journal: createSagaJournal(),
+    refreshInjection: async store => {
+        compensationCrashRefreshes += 1;
+        assert.equal(todayTrendStoreDigest(store), todayTrendStoreDigest(compensationCrashPrevious));
+        return { failedWrites: 0, failedKeys: [] };
+    },
+});
+await compensationCrashRecovery.ready();
+assert.equal(compensationCrashRefreshes, 1,
+    'compensation-store-written 重启恢复必须只重放一次 previous 注入');
+assert.deepEqual(await sagaStorage.load(), compensationCrashPrevious,
+    'compensation-store-written 重启恢复不得改写已补偿的 previous store');
+await sagaJournal.reload();
+
+const blockedStatus = await sagaStorage.status();
+const blockedEntry = await sagaJournal.begin({
+    scopeId: 'chat', affectedScopeIds: ['chat'], baseStoreRevision: blockedStatus.authority.storeRevision,
+    previous: compensationCrashPrevious, candidate: compensationCrashPrevious,
+});
+await sagaJournal.markBlocked(blockedEntry, Object.assign(new Error('persistent blocked evidence'), { code: 'TT_TEST_BLOCKED' }));
+const blockedJournal = createSagaJournal();
+const blockedCommitter = createTodayTrendCommitter({
+    runtime: {}, load: sagaStorage.load, save: sagaStorage.save, storageStatus: sagaStorage.status, journal: blockedJournal,
+    refreshInjection: async () => ({ failedWrites: 0, failedKeys: [] }),
+});
+assert.deepEqual(await blockedCommitter.ready(), [false],
+    '真实 blocked journal 重启后必须保留而不是自动恢复或清理');
+assert.equal(blockedCommitter.isBlocked(), true, '真实 blocked journal 重启后必须继续报告 blocked');
+await assert.rejects(() => blockedCommitter.commitStore(store => store),
+    error => error?.code === 'TT_TRANSACTION_BLOCKED', '真实 blocked journal 必须阻止后续 store 提交');
+for (const key of [...sagaHarness.records.keys()]) {
+    if (key.startsWith(TODAY_TREND_V2_JOURNAL_PREFIX)) sagaHarness.records.delete(key);
+}
+await sagaJournal.reload();
+
+const terminalRecords = new Map();
+let terminalDeleteAttempts = 0;
+const terminalJournal = createTodayTrendJournal({
+    listKeys: async () => [...terminalRecords.keys()],
+    readEntry: async key => ({ ok: true, value: structuredClone(terminalRecords.get(key)) }),
+    writeEntry: async (key, value) => { terminalRecords.set(key, structuredClone(value)); return true; },
+    deleteEntry: async key => { terminalDeleteAttempts += 1; return terminalDeleteAttempts > 1 ? terminalRecords.delete(key) : false; },
+    now: (() => { let value = 5000; return () => ++value; })(), transactionId: () => 'terminal-gc',
+});
+const terminalEntry = await terminalJournal.begin({
+    scopeId: 'chat', affectedScopeIds: [], baseStoreRevision: 0, previous: valid, candidate: valid,
+});
+await terminalJournal.complete(terminalEntry, 'rejected');
+assert.equal(terminalRecords.size, 1, 'terminal 删除暂态失败时必须保留已完成记录而不是伪装清理成功');
+const terminalRestart = createTodayTrendJournal({
+    listKeys: async () => [...terminalRecords.keys()],
+    readEntry: async key => ({ ok: true, value: structuredClone(terminalRecords.get(key)) }),
+    deleteEntry: async key => { terminalDeleteAttempts += 1; return terminalRecords.delete(key); },
+});
+assert.deepEqual(await terminalRestart.ready(), [], '遗留 terminal journal 启动时不得重新进入开放事务');
+assert.equal(terminalRecords.size, 0, '遗留 terminal journal 必须在后续启动时再次尝试回收');
+
+
+let transientLists = 0;
+const transientJournal = createTodayTrendJournal({
+    listKeys: async () => {
+        transientLists += 1;
+        if (transientLists === 1) throw Object.assign(new Error('temporary IDB failure'), { code: 'TT_JOURNAL_UNAVAILABLE' });
+        return [];
+    },
+});
+const transientRuntime = {};
+const transientCommitter = createTodayTrendCommitter({ runtime: transientRuntime, journal: transientJournal });
+await assert.rejects(() => transientCommitter.ready(), error => error?.code === 'TT_JOURNAL_UNAVAILABLE',
+    '首次暂态 journal 读取失败必须向调用方报告');
+await transientCommitter.ready();
+assert.equal(transientLists, 2, '暂态恢复失败后同一 committer 必须允许受控重试');
+assert.equal(transientRuntime.recoveryError, undefined, '恢复重试成功后必须清除旧 recoveryError');
+
+
+await sagaAuthority.release({ readV2: true, serveV2: false });
+sagaAuthority.close();
+
+let blockedGenerateCalls = 0;
+const blockedScheduler = createTodayTrendScheduler({
+    controller: { generate: async () => { blockedGenerateCalls += 1; return { scope: valid.scopes.chat }; } },
+    committer: { commitStore: async () => valid, invalidateCommits() {}, ready: async () => [], isBlocked: () => true },
+    getStore: async () => valid, getStorageId: () => 'chat', getChat: () => [],
+});
+await assert.rejects(() => blockedScheduler.manual({ storageId: 'chat', floor: 1 }), error => error?.code === 'TT_TRANSACTION_BLOCKED',
+    'blocked journal 必须在昂贵生成前拒绝 scheduler');
+assert.equal(blockedGenerateCalls, 0, 'blocked scheduler 不得调用生成控制器');
+
+const originalInjectionWindow = globalThis.window;
+let preflightPromptWrites = 0;
+globalThis.window = {};
+try {
+    const injectionRuntime = { injectionEpoch: 0, trackedExtensionPromptKeys: new Set(), todayTrend: { store: valid } };
+    const injectionController = createPhoneInjectionController({
+        state: { isGroupChat: false, currentPersona: 'chat' }, runtime: injectionRuntime,
+        deps: {}, getStorageId: () => 'chat', getUserPersona: () => ({ name: '用户' }),
+        getCtx: () => ({ characterId: 'character', characters: { character: { name: '小明' } }, setExtensionPrompt: () => { preflightPromptWrites += 1; } }),
+    });
+    const preflight = await injectionController.prepareBidirectionalInjection(valid);
+    assert.ok(Array.isArray(preflight.prompts), '纯注入预检必须返回可验证 prompt plan');
+    assert.equal(preflightPromptWrites, 0, '纯注入预检绝不能调用 setExtensionPrompt');
+} finally {
+    if (originalInjectionWindow === undefined) delete globalThis.window;
+    else globalThis.window = originalInjectionWindow;
 }
 
 let committed = structuredClone(valid);

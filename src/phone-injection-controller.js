@@ -1,6 +1,8 @@
-import { applyContextInjections, clearExtensionPrompts } from './phone-injection.js';
+import { applyContextInjections, buildContextInjectionPrompts, clearExtensionPrompts } from './phone-injection.js';
 
 export function createPhoneInjectionController({ state, runtime, deps, getCtx, getStorageId, getUserPersona }) {
+    let injectionQueue = Promise.resolve();
+
     function clearBidirectionalInjection() {
         runtime.injectionEpoch += 1;
         return clearExtensionPrompts({ context: getCtx(), runtime });
@@ -10,22 +12,22 @@ export function createPhoneInjectionController({ state, runtime, deps, getCtx, g
         try { return deps[getter]?.() || null; } catch (error) { return null; }
     }
 
-    async function applyBidirectionalInjection() {
-        const epoch = ++runtime.injectionEpoch;
+    async function collectInjectionInput(todayTrendStore, { reserveEpoch = true } = {}) {
+        const epoch = reserveEpoch ? ++runtime.injectionEpoch : runtime.injectionEpoch;
         const context = getCtx();
         const storageId = getStorageId();
         if (!context || !storageId || storageId === 'sms_unknown__default') {
-            return clearExtensionPrompts({ context, runtime });
+            return { epoch, context, storageId, clear: true };
         }
         const character = context.characters?.[context.characterId];
         const currentActorName = typeof character?.name === 'string' ? character.name.trim() : '';
-        if (!currentActorName) return clearExtensionPrompts({ context, runtime });
+        if (!currentActorName) return { epoch, context, storageId, clear: true };
         const currentConversationKey = state.isGroupChat && state.currentGroupKey
             ? state.currentGroupKey : state.currentPersona;
         let interactiveStore;
         try { interactiveStore = await deps.getInteractiveStore?.(); } catch (error) { interactiveStore = null; }
-        if (epoch !== runtime.injectionEpoch || getStorageId() !== storageId) return;
-        return applyContextInjections({
+        if (epoch !== runtime.injectionEpoch || getStorageId() !== storageId) return null;
+        return {
             context, runtime, currentStorageId: storageId, currentActorName, currentConversationKey,
             injectionConfig: window.__pmInjectionConfig, selectedByStorage: window.__pmBidirectional,
             historiesByStorage: window.__pmHistories, groupsByStorage: window.__pmGroupMeta,
@@ -38,9 +40,27 @@ export function createPhoneInjectionController({ state, runtime, deps, getCtx, g
             calendarCycles: getCalendarData('getCalendarCycleStore'),
             calendarRecipes: getCalendarData('getCalendarRecipeStore'),
             calendarOutfits: getCalendarData('getCalendarOutfitStore'),
-            todayTrendStore: runtime.todayTrend?.store,
-        });
+            todayTrendStore: todayTrendStore === undefined
+                ? runtime.todayTrend?.pendingInjectionStore ?? runtime.todayTrend?.store : todayTrendStore,
+        };
     }
 
-    return { applyBidirectionalInjection, clearBidirectionalInjection };
+    async function prepareBidirectionalInjection(todayTrendStore) {
+        const input = await collectInjectionInput(todayTrendStore, { reserveEpoch: false });
+        if (!input) return null;
+        if (input.clear) return { prompts: [], diagnostics: null };
+        return buildContextInjectionPrompts(input);
+    }
+
+    function applyBidirectionalInjection(todayTrendStore) {
+        const operation = injectionQueue.then(async () => {
+            const input = await collectInjectionInput(todayTrendStore);
+            if (!input) return undefined;
+            return input.clear ? clearExtensionPrompts({ context: input.context, runtime }) : applyContextInjections(input);
+        });
+        injectionQueue = operation.catch(() => {});
+        return operation;
+    }
+
+    return { applyBidirectionalInjection, prepareBidirectionalInjection, clearBidirectionalInjection };
 }

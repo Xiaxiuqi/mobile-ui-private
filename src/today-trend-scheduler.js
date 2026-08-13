@@ -224,6 +224,13 @@ export function createTodayTrendScheduler({
         activeTask = task;
         setPhase('queued', null);
         try {
+            if (typeof committer.ready === 'function') await committer.ready();
+            if (committer.isBlocked?.()) {
+                const error = new Error('Today Trend 存在 blocked 恢复事务，拒绝开始生成');
+                error.code = 'TT_TRANSACTION_BLOCKED';
+                throw error;
+            }
+            if (!isActive(task)) throw cancelled();
             const source = await getStore();
             if (!isActive(task)) throw cancelled();
             const scope = source?.scopes?.[id];
