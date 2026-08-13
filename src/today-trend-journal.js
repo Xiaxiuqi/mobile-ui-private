@@ -54,6 +54,35 @@ export function todayTrendJournalKey(scopeId, transactionId) {
     return `${TODAY_TREND_V2_JOURNAL_PREFIX}${encodeURIComponent(scope)}:${encodeURIComponent(transaction)}`;
 }
 
+function assertRevisionInvariant(entry) {
+    const { phase, baseStoreRevision, candidateStoreRevision, compensationStoreRevision } = entry;
+    const hasCandidate = candidateStoreRevision !== null;
+    const hasCompensation = compensationStoreRevision !== null;
+    if (candidateStoreRevision !== null && candidateStoreRevision !== baseStoreRevision + 1) {
+        throw failure('TT_JOURNAL_INVALID', 'Today Trend journal candidateStoreRevision 必须等于 baseStoreRevision + 1');
+    }
+    if (hasCompensation && (!hasCandidate || compensationStoreRevision !== candidateStoreRevision + 1)) {
+        throw failure('TT_JOURNAL_INVALID', 'Today Trend journal compensationStoreRevision 必须等于 candidateStoreRevision + 1');
+    }
+    if ((phase === 'pending' || phase === 'prepared') && (hasCandidate || hasCompensation)) {
+        throw failure('TT_JOURNAL_INVALID', `Today Trend journal ${phase} phase 不得包含已提交 revision`);
+    }
+    if (new Set(['store-written', 'injection-written', 'compensation-requested', 'accepted']).has(phase)
+        && (!hasCandidate || hasCompensation)) {
+        throw failure('TT_JOURNAL_INVALID', `Today Trend journal ${phase} phase 只允许 candidateStoreRevision`);
+    }
+    if (phase === 'compensation-store-written' && (!hasCandidate || !hasCompensation)) {
+        throw failure('TT_JOURNAL_INVALID', 'Today Trend journal compensation-store-written phase 缺少提交 revision');
+    }
+    if (phase === 'rejected' && hasCandidate !== hasCompensation) {
+        throw failure('TT_JOURNAL_INVALID', 'Today Trend journal rejected phase revision 来源无效');
+    }
+    if (!new Set(['pending', 'prepared', 'rejected', 'blocked']).has(phase)
+        && !hasCandidate) {
+        throw failure('TT_JOURNAL_INVALID', `Today Trend journal ${phase} phase 缺少 candidateStoreRevision`);
+    }
+}
+
 export function normalizeTodayTrendJournal(value) {
     if (!value || typeof value !== 'object' || Array.isArray(value)) throw failure('TT_JOURNAL_INVALID', 'Today Trend journal 必须是对象');
     if (value.schemaVersion > VERSION) throw failure('TT_JOURNAL_FUTURE_VERSION', 'Today Trend journal 版本高于当前支持版本');
@@ -62,7 +91,7 @@ export function normalizeTodayTrendJournal(value) {
     const scopeId = value.scopeId === null ? null : String(value.scopeId || '').trim();
     if (!transactionId || (scopeId !== null && !scopeId)) throw failure('TT_JOURNAL_INVALID', 'Today Trend journal 标识无效');
     const affectedScopeIds = [...new Set((value.affectedScopeIds || []).map(item => String(item || '').trim()))].filter(Boolean).sort();
-    return {
+    const normalized = {
         schemaVersion: VERSION, transactionId, scopeId, affectedScopeIds, phase: value.phase,
         baseStoreRevision: safeInteger(value.baseStoreRevision, 'baseStoreRevision'),
         candidateStoreRevision: safeInteger(value.candidateStoreRevision, 'candidateStoreRevision', { nullable: true }),
@@ -72,6 +101,8 @@ export function normalizeTodayTrendJournal(value) {
         createdAt: safeInteger(value.createdAt, 'createdAt'), updatedAt: safeInteger(value.updatedAt, 'updatedAt'),
         attemptCount: safeInteger(value.attemptCount ?? 0, 'attemptCount'), lastErrorCode: value.lastErrorCode ? String(value.lastErrorCode) : null,
     };
+    assertRevisionInvariant(normalized);
+    return normalized;
 }
 
 

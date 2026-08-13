@@ -12,19 +12,37 @@ export function installTodayTrend(_state, deps = {}) {
     const localRuntime = runtime.todayTrend || (runtime.todayTrend = {});
     const load = deps.loadTodayTrendStore || loadTodayTrendStore;
     const save = deps.saveTodayTrendStore || saveTodayTrendStore;
-    const loadStore = async ({ force = false } = {}) => {
-        if (!force && localRuntime.store) return localRuntime.store;
-        const loaded = await load();
-        localRuntime.store = loaded;
-        return loaded;
-    };
-    const committer = createTodayTrendCommitter({
+    const committer = (deps.createTodayTrendCommitter || createTodayTrendCommitter)({
         runtime: localRuntime,
         load,
         save,
         refreshInjection: deps.applyBidirectionalInjection,
         prepareInjection: deps.prepareBidirectionalInjection,
     });
+    const ensureReady = async () => {
+        try {
+            if (typeof committer.ready === 'function') await committer.ready();
+            if (committer.isBlocked?.()) {
+                const error = new Error('Today Trend 存在 blocked 恢复事务，拒绝读取或生成');
+                error.code = 'TT_TRANSACTION_BLOCKED';
+                throw error;
+            }
+            delete localRuntime.recoveryError;
+        } catch (error) {
+            localRuntime.recoveryError = error;
+            throw error;
+        }
+    };
+    const loadStore = async ({ force = false } = {}) => {
+        await ensureReady();
+        if (!force && localRuntime.store) return localRuntime.store;
+        const loaded = await load();
+        localRuntime.store = loaded;
+        return loaded;
+    };
+    if (typeof committer.ready === 'function') {
+        ensureReady().catch(() => {});
+    }
     const controller = (deps.createTodayTrendGenerationController || createTodayTrendGenerationController)({ callAI, getCtx });
     const getHostFloor = () => {
         try {

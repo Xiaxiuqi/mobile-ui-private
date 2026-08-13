@@ -18,7 +18,7 @@ import {
     createTodayTrendV2Authority, createTodayTrendV2Envelope, normalizeTodayTrendV2Authority, normalizeTodayTrendV2Envelope,
 } from '../src/today-trend-v2-authority.js';
 import { createTodayTrendCommitter } from '../src/today-trend-commit.js';
-import { createTodayTrendJournal, todayTrendStoreDigest } from '../src/today-trend-journal.js';
+import { createTodayTrendJournal, normalizeTodayTrendJournal, todayTrendStoreDigest } from '../src/today-trend-journal.js';
 import { createPhoneInjectionController } from '../src/phone-injection-controller.js';
 import { TODAY_TREND_V2_AUTHORITY_KEY, TODAY_TREND_V2_FALLBACK_KEY, TODAY_TREND_V2_JOURNAL_PREFIX, TODAY_TREND_V2_STORAGE_KEY } from '../src/constants.js';
 import { pmIDBCompareAndSwap } from '../src/pm-idb.js';
@@ -1554,6 +1554,38 @@ const invalidTransitionEntry = await sagaJournal.begin({
 await assert.rejects(() => sagaJournal.transition(invalidTransitionEntry, 'injection-written'),
     error => error?.code === 'TT_JOURNAL_TRANSITION_INVALID',
     'journal 必须拒绝 prepared 直接跳到 injection-written');
+assert.throws(() => normalizeTodayTrendJournal({ ...invalidTransitionEntry, phase: 'store-written' }),
+    error => error?.code === 'TT_JOURNAL_INVALID',
+    '持久化 store-written journal 缺少 candidate revision 时必须在反序列化边界拒绝');
+assert.throws(() => normalizeTodayTrendJournal({
+    ...invalidTransitionEntry, phase: 'compensation-store-written', candidateStoreRevision: 2, compensationStoreRevision: 4,
+}), error => error?.code === 'TT_JOURNAL_INVALID',
+    '持久化 compensation journal 的 revision 不连续时必须明确拒绝而不是误报 split-brain');
+assert.throws(() => normalizeTodayTrendJournal({
+    ...invalidTransitionEntry, phase: 'store-written', candidateStoreRevision: 2, compensationStoreRevision: 3,
+}), error => error?.code === 'TT_JOURNAL_INVALID',
+    '数值连续的 compensation revision 出现在 store-written phase 时也必须拒绝');
+assert.doesNotThrow(() => normalizeTodayTrendJournal({ ...invalidTransitionEntry, phase: 'rejected' }),
+    'prepared 直接 rejected 必须允许不携带已提交 revision');
+assert.throws(() => normalizeTodayTrendJournal({
+    ...invalidTransitionEntry, phase: 'rejected', candidateStoreRevision: 2,
+}), error => error?.code === 'TT_JOURNAL_INVALID',
+    '状态机不可达的 candidate-only rejected journal 必须拒绝');
+assert.doesNotThrow(() => normalizeTodayTrendJournal({
+    ...invalidTransitionEntry, phase: 'rejected', candidateStoreRevision: 2, compensationStoreRevision: 3,
+}), '补偿完成后的 rejected journal 必须允许连续的 candidate 与 compensation revision');
+assert.doesNotThrow(() => normalizeTodayTrendJournal({ ...invalidTransitionEntry, phase: 'blocked' }),
+    'prepared 阶段 blocked 必须允许不携带已提交 revision');
+assert.doesNotThrow(() => normalizeTodayTrendJournal({
+    ...invalidTransitionEntry, phase: 'blocked', candidateStoreRevision: 2,
+}), 'candidate 已提交后的 blocked 必须允许只携带 candidate revision');
+assert.doesNotThrow(() => normalizeTodayTrendJournal({
+    ...invalidTransitionEntry, phase: 'blocked', candidateStoreRevision: 2, compensationStoreRevision: 3,
+}), '补偿 store 已提交后的 blocked 必须允许连续的两级 revision');
+assert.throws(() => normalizeTodayTrendJournal({
+    ...invalidTransitionEntry, phase: 'blocked', compensationStoreRevision: 2,
+}), error => error?.code === 'TT_JOURNAL_INVALID',
+    'blocked journal 不得只携带 compensation revision');
 await sagaJournal.complete(invalidTransitionEntry, 'rejected');
 
 const sagaStorage = createTodayTrendStorage({ v2Authority: sagaAuthority, journal: sagaJournal, storage: memoryStorage() });
@@ -1932,6 +1964,50 @@ continueFailedRefresh();
 await assert.rejects(() => fencedCommit, error => error?.rollbackError?.code === 'TT_STORE_REVISION_CONFLICT',
     '候选提交后的 revision 已变化时，迟到补偿必须报告明确冲突而不是覆盖新数据');
 assert.deepEqual(fencedStore, laterSuccessfulStore, '迟到补偿冲突后必须保留稍后成功提交的数据');
+
+let startupReadyCalls = 0;
+let releaseStartupRecovery;
+let startupRawLoads = 0;
+let startupBlocked = false;
+let blockedInitializationCalls = 0;
+let blockedRuleRegenerationCalls = 0;
+let startupReadyPromise = null;
+const startupDeps = {
+    runtime: {}, getStorageId: () => 'chat',
+    getCtx: () => ({ characterId: 'character', characters: { character: { avatar: 'character', name: '小明' } }, chat: [] }),
+    getLastMessageId: () => 1,
+    callAI: async () => { throw new Error('恢复屏障测试不应调用真实 AI'); },
+    loadTodayTrendStore: async () => { startupRawLoads += 1; return structuredClone(valid); },
+    saveTodayTrendStore: async value => value,
+    createTodayTrendCommitter: () => ({
+        ready: () => startupReadyPromise || (startupReadyPromise = new Promise(resolve => {
+            startupReadyCalls += 1;
+            releaseStartupRecovery = resolve;
+        })),
+        isBlocked: () => startupBlocked,
+        commitStore: async () => { throw new Error('恢复屏障测试不应进入提交'); },
+        invalidateCommits() {},
+    }),
+    createTodayTrendGenerationController: () => ({
+        generate: async () => ({ scope: structuredClone(valid.scopes.chat) }),
+        initialize: async () => { blockedInitializationCalls += 1; return { store: structuredClone(valid) }; },
+        regenerateRule: async () => { blockedRuleRegenerationCalls += 1; return '不应生成'; },
+    }),
+};
+installTodayTrend({}, startupDeps);
+await Promise.resolve();
+assert.equal(startupReadyCalls, 1, '安装 Today Trend 时必须立即启动一次恢复，而不是等待下一次写入或生成');
+const startupRead = startupDeps.getTodayTrendStore();
+await Promise.resolve();
+assert.equal(startupRawLoads, 0, '启动恢复完成前不得向 UI 暴露持久化 store');
+releaseStartupRecovery([]);
+await startupRead;
+assert.equal(startupRawLoads, 1, '启动恢复完成后读取链才能加载 store');
+startupBlocked = true;
+await assert.rejects(() => startupDeps.initializeTodayTrend(), error => error?.code === 'TT_TRANSACTION_BLOCKED');
+await assert.rejects(() => startupDeps.regenerateTodayTrendRule('world'), error => error?.code === 'TT_TRANSACTION_BLOCKED');
+assert.equal(blockedInitializationCalls, 0, 'blocked journal 必须在初始化 AI 调用前拒绝');
+assert.equal(blockedRuleRegenerationCalls, 0, 'blocked journal 必须在规则重生成 AI 调用前拒绝');
 
 let installedStore = structuredClone(valid);
 installedStore.presets.free = { ...structuredClone(installedStore.presets.preset), id: 'free', name: '未绑定预设' };

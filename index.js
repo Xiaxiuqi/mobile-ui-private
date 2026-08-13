@@ -9489,6 +9489,32 @@ ${entry2.content}` : entry2.content;
     if (!scope || !transaction) throw new TypeError("Today Trend journal key \u7F3A\u5C11 scopeId \u6216 transactionId");
     return `${TODAY_TREND_V2_JOURNAL_PREFIX}${encodeURIComponent(scope)}:${encodeURIComponent(transaction)}`;
   }
+  function assertRevisionInvariant(entry2) {
+    const { phase, baseStoreRevision, candidateStoreRevision, compensationStoreRevision } = entry2;
+    const hasCandidate = candidateStoreRevision !== null;
+    const hasCompensation = compensationStoreRevision !== null;
+    if (candidateStoreRevision !== null && candidateStoreRevision !== baseStoreRevision + 1) {
+      throw failure("TT_JOURNAL_INVALID", "Today Trend journal candidateStoreRevision \u5FC5\u987B\u7B49\u4E8E baseStoreRevision + 1");
+    }
+    if (hasCompensation && (!hasCandidate || compensationStoreRevision !== candidateStoreRevision + 1)) {
+      throw failure("TT_JOURNAL_INVALID", "Today Trend journal compensationStoreRevision \u5FC5\u987B\u7B49\u4E8E candidateStoreRevision + 1");
+    }
+    if ((phase === "pending" || phase === "prepared") && (hasCandidate || hasCompensation)) {
+      throw failure("TT_JOURNAL_INVALID", `Today Trend journal ${phase} phase \u4E0D\u5F97\u5305\u542B\u5DF2\u63D0\u4EA4 revision`);
+    }
+    if ((/* @__PURE__ */ new Set(["store-written", "injection-written", "compensation-requested", "accepted"])).has(phase) && (!hasCandidate || hasCompensation)) {
+      throw failure("TT_JOURNAL_INVALID", `Today Trend journal ${phase} phase \u53EA\u5141\u8BB8 candidateStoreRevision`);
+    }
+    if (phase === "compensation-store-written" && (!hasCandidate || !hasCompensation)) {
+      throw failure("TT_JOURNAL_INVALID", "Today Trend journal compensation-store-written phase \u7F3A\u5C11\u63D0\u4EA4 revision");
+    }
+    if (phase === "rejected" && hasCandidate !== hasCompensation) {
+      throw failure("TT_JOURNAL_INVALID", "Today Trend journal rejected phase revision \u6765\u6E90\u65E0\u6548");
+    }
+    if (!(/* @__PURE__ */ new Set(["pending", "prepared", "rejected", "blocked"])).has(phase) && !hasCandidate) {
+      throw failure("TT_JOURNAL_INVALID", `Today Trend journal ${phase} phase \u7F3A\u5C11 candidateStoreRevision`);
+    }
+  }
   function normalizeTodayTrendJournal(value) {
     if (!value || typeof value !== "object" || Array.isArray(value)) throw failure("TT_JOURNAL_INVALID", "Today Trend journal \u5FC5\u987B\u662F\u5BF9\u8C61");
     if (value.schemaVersion > VERSION) throw failure("TT_JOURNAL_FUTURE_VERSION", "Today Trend journal \u7248\u672C\u9AD8\u4E8E\u5F53\u524D\u652F\u6301\u7248\u672C");
@@ -9497,7 +9523,7 @@ ${entry2.content}` : entry2.content;
     const scopeId = value.scopeId === null ? null : String(value.scopeId || "").trim();
     if (!transactionId || scopeId !== null && !scopeId) throw failure("TT_JOURNAL_INVALID", "Today Trend journal \u6807\u8BC6\u65E0\u6548");
     const affectedScopeIds = [...new Set((value.affectedScopeIds || []).map((item) => String(item || "").trim()))].filter(Boolean).sort();
-    return {
+    const normalized = {
       schemaVersion: VERSION,
       transactionId,
       scopeId,
@@ -9515,6 +9541,8 @@ ${entry2.content}` : entry2.content;
       attemptCount: safeInteger(value.attemptCount ?? 0, "attemptCount"),
       lastErrorCode: value.lastErrorCode ? String(value.lastErrorCode) : null
     };
+    assertRevisionInvariant(normalized);
+    return normalized;
   }
   var isJournalKey = (key) => typeof key === "string" && key.startsWith(TODAY_TREND_V2_JOURNAL_PREFIX);
   function createTodayTrendJournal({
@@ -23711,19 +23739,38 @@ ${targetInstruction}`
     const localRuntime = runtime.todayTrend || (runtime.todayTrend = {});
     const load = deps.loadTodayTrendStore || loadTodayTrendStore;
     const save = deps.saveTodayTrendStore || saveTodayTrendStore;
-    const loadStore2 = async ({ force = false } = {}) => {
-      if (!force && localRuntime.store) return localRuntime.store;
-      const loaded = await load();
-      localRuntime.store = loaded;
-      return loaded;
-    };
-    const committer = createTodayTrendCommitter({
+    const committer = (deps.createTodayTrendCommitter || createTodayTrendCommitter)({
       runtime: localRuntime,
       load,
       save,
       refreshInjection: deps.applyBidirectionalInjection,
       prepareInjection: deps.prepareBidirectionalInjection
     });
+    const ensureReady = async () => {
+      try {
+        if (typeof committer.ready === "function") await committer.ready();
+        if (committer.isBlocked?.()) {
+          const error = new Error("Today Trend \u5B58\u5728 blocked \u6062\u590D\u4E8B\u52A1\uFF0C\u62D2\u7EDD\u8BFB\u53D6\u6216\u751F\u6210");
+          error.code = "TT_TRANSACTION_BLOCKED";
+          throw error;
+        }
+        delete localRuntime.recoveryError;
+      } catch (error) {
+        localRuntime.recoveryError = error;
+        throw error;
+      }
+    };
+    const loadStore2 = async ({ force = false } = {}) => {
+      await ensureReady();
+      if (!force && localRuntime.store) return localRuntime.store;
+      const loaded = await load();
+      localRuntime.store = loaded;
+      return loaded;
+    };
+    if (typeof committer.ready === "function") {
+      ensureReady().catch(() => {
+      });
+    }
     const controller = (deps.createTodayTrendGenerationController || createTodayTrendGenerationController)({ callAI, getCtx });
     const getHostFloor = () => {
       try {
