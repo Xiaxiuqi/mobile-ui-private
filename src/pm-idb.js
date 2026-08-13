@@ -56,8 +56,10 @@ export async function pmIDBCompareAndSwap({ guardKey, expectedGuard, writes, ope
     if (typeof guardKey !== 'string' || !guardKey) throw new TypeError('IDB CAS guard key 必须是非空字符串');
     if (!Array.isArray(writes) || !writes.length) throw new TypeError('IDB CAS writes 必须是非空数组');
     for (const entry of writes) {
-        if (!entry || typeof entry.key !== 'string' || !entry.key || !Object.hasOwn(entry, 'value')) {
-            throw new TypeError('IDB CAS write 必须包含非空 key 与 value');
+        const hasValue = entry && Object.hasOwn(entry, 'value');
+        const deletes = entry?.delete === true;
+        if (!entry || typeof entry.key !== 'string' || !entry.key || hasValue === deletes) {
+            throw new TypeError('IDB CAS write 必须包含非空 key，并且恰好指定 value 或 delete=true');
         }
     }
     if (typeof openIDB !== 'function') throw new TypeError('IDB CAS openIDB 必须是函数');
@@ -81,7 +83,10 @@ export async function pmIDBCompareAndSwap({ guardKey, expectedGuard, writes, ope
                     transaction.abort();
                     return;
                 }
-                for (const entry of writes) store.put(entry.value, entry.key);
+                for (const entry of writes) {
+                    if (entry.delete === true) store.delete(entry.key);
+                    else store.put(entry.value, entry.key);
+                }
             };
             request.onerror = () => {
                 try { transaction.abort(); } catch {

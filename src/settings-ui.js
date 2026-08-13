@@ -95,7 +95,7 @@ export function installSettingsUi(deps) {
             emojis: [], characterBehavior: {}, worldBookConfig: null, wordyLimit: false, galBubbleEnabled: false,
             desktopBg: '', bgGlobal: '', bgLocal: {},
             interactiveScenes: normalizeInteractiveStore(null), phoneUiState: normalizePhoneUiState(null), ambientStatus: normalizeAmbientStatus(),
-            ...createEmptyCalendarBackupFields(), todayTrend: createEmptyTodayTrendStore(),
+            ...createEmptyCalendarBackupFields(), todayTrend: createEmptyTodayTrendStore(), todayTrendV2: null,
         }),
         afterApplyEmpty: () => { window.__pmBudgetConfig = normalizeBudgetConfig(); },
     });

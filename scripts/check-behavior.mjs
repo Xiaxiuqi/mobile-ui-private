@@ -10,6 +10,7 @@ import {
 } from '../src/gal-bubble.js';
 import { createDefaultTodayTrendDynamicsSettings, createEmptyTodayTrendStore, normalizeTodayTrendStore } from '../src/today-trend-model.js';
 import { createTodayTrendStorage, todayTrendV2Authority } from '../src/today-trend-storage.js';
+import { migrateTodayTrendStoreToV2 } from '../src/today-trend-v2-model.js';
 import { normalizeThemePreset, THEME_PRESETS } from '../src/config.js';
 import { createWorldBookEntryKey, getCurrentChatWorldBooks, getEnabledWorldBookNames, getReadableWorldBookNames, getTavernDbColumn, isMemberPrivateWorldBookEntryAllowed, isWorldBookEntryAllowed, normalizeWorldBookConfig } from '../src/worldbook-config.js';
 import { buildWorldBookContext } from '../src/worldbook-context.js';
@@ -5362,6 +5363,39 @@ assert.throws(() => parseBackupData({ schemaVersion: 14, branchLineage: validBra
 assert.deepEqual(parseBackupData({ schemaVersion: 14, branchLineage: validBranchLineage, worldBookConfig: { entries: {}, columns: {} },
     calendarOutfits: importedOutfits, budgetConfig: importedBudgetConfig, todayTrend: createEmptyTodayTrendStore() }, currentBackup).todayTrend,
 createEmptyTodayTrendStore(), 'schema 14 必须恢复今日风向数据');
+const schema16TodayTrend = normalizeTodayTrendStore(createTodayTrendV1Fixture(createDefaultTodayTrendDynamicsSettings));
+const schema16V2Store = migrateTodayTrendStoreToV2(schema16TodayTrend).store;
+const schema16BackupBase = {
+    schemaVersion: 16, branchLineage: validBranchLineage, worldBookConfig: { entries: {}, columns: {} },
+    budgetConfig: importedBudgetConfig, todayTrend: schema16TodayTrend, galBubbleEnabled: false,
+};
+const parsedSchema16Backup = parseBackupData({
+    ...schema16BackupBase,
+    todayTrendV2: { v2Store: schema16V2Store, migrationBackup: null, storeRevision: 1 },
+}, currentBackup);
+assert.deepEqual(parsedSchema16Backup.todayTrendV2, {
+    v2Store: schema16V2Store, migrationBackup: null, storeRevision: 1,
+}, 'schema 16 必须恢复规范 v2 store、migration backup 与 revision');
+assert.equal(parseBackupData({
+    ...schema16BackupBase, schemaVersion: 15,
+}, currentBackup).todayTrendV2, null, 'schema 15 及更早备份不得伪造 todayTrendV2');
+assert.throws(() => parseBackupData(schema16BackupBase, currentBackup), /缺少 todayTrendV2/,
+    'schema 16 缺少 todayTrendV2 必须拒绝导入');
+assert.throws(() => parseBackupData({
+    ...schema16BackupBase,
+    todayTrendV2: { v2Store: schema16V2Store, migrationBackup: null, storeRevision: 2 },
+}, currentBackup), /todayTrendV2 内容无效或不是规范格式/,
+    'schema 16 todayTrendV2 必须拒绝与 v2 envelope 不一致的正整数 storeRevision');
+assert.throws(() => parseBackupData({
+    ...schema16BackupBase,
+    todayTrendV2: { v2Store: schema16V2Store, migrationBackup: null, storeRevision: 0 },
+}, currentBackup), /todayTrendV2 内容无效或不是规范格式/,
+    'schema 16 todayTrendV2 必须拒绝非正 storeRevision');
+assert.throws(() => parseBackupData({
+    ...schema16BackupBase,
+    todayTrendV2: { v2Store: schema16V2Store, migrationBackup: null, storeRevision: 1, unexpected: true },
+}, currentBackup), /todayTrendV2 内容无效或不是规范格式/,
+    'schema 16 todayTrendV2 必须拒绝额外字段，避免非规范备份静默进入事务');
 const parsedV4Backup = parseBackupData({
     schemaVersion: 4,
     theme: { darkMode: 'light', ambientStatusEnabled: true },

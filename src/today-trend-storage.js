@@ -26,21 +26,44 @@ export function createTodayTrendStorage({
     idbGet = pmIDBGet, idbSet = pmIDBSet, storage = globalThis.localStorage,
     v2Authority = createTodayTrendV2Authority({ storage }), journal = null,
 } = {}) {
-    const load = async () => {
-        const v2 = await v2Authority.load();
-        if (v2.active) return normalizeTodayTrendStore(v2.store);
+    const readV1Source = async () => {
         try {
             const primary = await idbGet(TODAY_TREND_STORAGE_KEY);
-            if (primary !== null && primary !== undefined) return normalizeLoaded(primary);
+            if (primary !== null && primary !== undefined) return { store: normalizeLoaded(primary), sourceMedium: 'idb' };
         } catch (error) {
             console.warn('[phone-mode] 今日风向主存储读取失败', error);
         }
         const fallback = readFallback(storage);
         if (fallback !== null) {
-            try { return normalizeLoaded(fallback); }
+            try { return { store: normalizeLoaded(fallback), sourceMedium: 'localStorage' }; }
             catch (error) { console.warn('[phone-mode] 今日风向后备数据无效', error); }
         }
-        return createEmptyTodayTrendStore();
+        return { store: createEmptyTodayTrendStore(), sourceMedium: 'idb' };
+    };
+    const load = async () => {
+        const v2 = await v2Authority.load();
+        if (v2.active) {
+            const migrationBackup = typeof v2Authority.readMigrationBackup === 'function'
+                ? await v2Authority.readMigrationBackup() : null;
+            if (v2.authority?.serveV2 || v2.authority?.writeV2 || migrationBackup === null) {
+                return normalizeTodayTrendStore(v2.store);
+            }
+        }
+        const source = await readV1Source();
+        if (v2.active) {
+            if (JSON.stringify(normalizeTodayTrendStore(v2.store)) !== JSON.stringify(source.store)) {
+                const error = new Error('v2 只读影子与 v1 服务数据不一致');
+                error.code = 'TT_SHADOW_MISMATCH';
+                throw error;
+            }
+            return source.store;
+        }
+        return source.store;
+    };
+    const migrateToV2 = async () => {
+        if (typeof v2Authority.migrate !== 'function') throw new TypeError('v2 authority 不支持迁移');
+        const source = await readV1Source();
+        return v2Authority.migrate(source.store, { sourceMedium: source.sourceMedium });
     };
 
     const save = async (value, options = {}) => {
@@ -124,12 +147,28 @@ export function createTodayTrendStorage({
     };
 
     const status = () => v2Authority.status();
-    return { load, save, status, v2Authority, journal };
+    const readMigrationBackup = () => v2Authority.readMigrationBackup?.() ?? null;
+    const captureV2Backup = async () => {
+        const state = await v2Authority.status();
+        if (!state.available) throw Object.assign(new Error('无法确认 v2 authority 状态'), { code: 'TT_V2_AUTHORITY_UNAVAILABLE' });
+        if (!state.authority?.readV2 || state.authority.storeRevision === 0) return null;
+        const loaded = await v2Authority.load();
+        return { v2Store: loaded.v2Store, migrationBackup: await readMigrationBackup(), storeRevision: state.authority.storeRevision };
+    };
+    const restoreV2Backup = (value, options) => {
+        if (typeof v2Authority.restoreBackup !== 'function') throw new TypeError('v2 authority 不支持备份恢复');
+        return v2Authority.restoreBackup(value, options);
+    };
+    return { load, save, status, migrateToV2, readMigrationBackup, captureV2Backup, restoreV2Backup, v2Authority, journal };
 }
 
 const defaultStorage = createTodayTrendStorage({ journal: todayTrendJournal });
 export const loadTodayTrendStore = () => defaultStorage.load();
 export const saveTodayTrendStore = (value, options) => defaultStorage.save(value, options);
 export const getTodayTrendStorageStatus = () => defaultStorage.status();
+export const migrateTodayTrendStorageToV2 = () => defaultStorage.migrateToV2();
+export const loadTodayTrendMigrationBackup = () => defaultStorage.readMigrationBackup();
+export const captureTodayTrendV2Backup = () => defaultStorage.captureV2Backup();
+export const restoreTodayTrendV2Backup = (value, options) => defaultStorage.restoreV2Backup(value, options);
 export const todayTrendV2Authority = defaultStorage.v2Authority;
 export { todayTrendJournal };

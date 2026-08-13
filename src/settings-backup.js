@@ -17,7 +17,9 @@ import { normalizeInjectionConfig } from './behavior-config.js';
 import { normalizeAmbientStatus, normalizeInteractiveStore, normalizePhoneUiState } from './interactive-scene-model.js';
 import { materializeLocalBackgrounds, saveBgGlobal, saveBgLocal, saveDesktopBg } from './storage-background.js';
 import { normalizeTodayTrendStore } from './today-trend-model.js';
-import { loadTodayTrendStore, saveTodayTrendStore } from './today-trend-storage.js';
+import {
+    captureTodayTrendV2Backup, loadTodayTrendStore, restoreTodayTrendV2Backup, saveTodayTrendStore,
+} from './today-trend-storage.js';
 import { normalizeWorldBookConfig } from './worldbook-config.js';
 import {
     loadInteractiveScenes, loadPhoneUiState, saveBidirectional, saveInjectionConfig,
@@ -152,6 +154,7 @@ export function createBackupStateHandlers(deps = {}) {
             calendarHolidays: loadCalendarHolidays(), calendarWeather: loadCalendarWeather(),
             calendarCycles: loadCalendarCycles(), calendarRecipes: loadCalendarRecipes(), calendarOutfits: loadCalendarOutfits(),
             todayTrend: normalizeTodayTrendStore(await loadTodayTrendStore()),
+            todayTrendV2: await (deps.captureTodayTrendV2Backup || captureTodayTrendV2Backup)(),
             branchLineage: clone(branchLineage),
         };
     };
@@ -182,7 +185,7 @@ export function createBackupStateHandlers(deps = {}) {
             calendarCycles: normalizeCycleStore(state.calendarCycles),
             calendarRecipes: normalizeRecipeStore(state.calendarRecipes),
             calendarOutfits: normalizeOutfitStore(state.calendarOutfits),
-            todayTrend: normalizeTodayTrendStore(state.todayTrend),
+            todayTrend: normalizeTodayTrendStore(state.todayTrend), todayTrendV2: clone(state.todayTrendV2 ?? null),
             branchLineage: clone(state.branchLineage || {}),
         };
     };
@@ -209,12 +212,15 @@ export function createBackupStateHandlers(deps = {}) {
         }
         let todayTrendReceipt;
         try {
-            todayTrendReceipt = await (deps.saveTodayTrendStore || saveTodayTrendStore)(state.todayTrend, {
-                allowAuthorityAcquire: true,
-                returnReceipt: true,
-                expectedStoreRevision: phase === 'rollback' && Number.isSafeInteger(applied?.todayTrendReceipt?.storeRevision)
-                    ? applied.todayTrendReceipt.storeRevision : null,
-            });
+            const expectedStoreRevision = phase === 'rollback' && Number.isSafeInteger(applied?.todayTrendReceipt?.storeRevision)
+                ? applied.todayTrendReceipt.storeRevision : null;
+            if (state.todayTrendV2) {
+                todayTrendReceipt = await (deps.restoreTodayTrendV2Backup || restoreTodayTrendV2Backup)(state.todayTrendV2, { expectedStoreRevision });
+            } else {
+                todayTrendReceipt = await (deps.saveTodayTrendStore || saveTodayTrendStore)(state.todayTrend, {
+                    allowAuthorityAcquire: true, returnReceipt: true, expectedStoreRevision,
+                });
+            }
         } catch (error) {
             if (error?.committedReceipt) {
                 error.partialApplied = { ...(error.partialApplied || {}), todayTrendReceipt: error.committedReceipt };

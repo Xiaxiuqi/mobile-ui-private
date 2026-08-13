@@ -15,12 +15,19 @@ import {
 } from '../src/today-trend-model.js';
 import { createTodayTrendStorage } from '../src/today-trend-storage.js';
 import {
-    createTodayTrendV2Authority, createTodayTrendV2Envelope, normalizeTodayTrendV2Authority, normalizeTodayTrendV2Envelope,
+    createTodayTrendV2Authority, createTodayTrendV2Envelope, normalizeTodayTrendMigrationBackup,
+    normalizeTodayTrendV2Authority, normalizeTodayTrendV2Envelope,
 } from '../src/today-trend-v2-authority.js';
+import {
+    buildReadOnlyShadow, diffReadOnlyShadow, extractArchivedFixedCore, migrateTodayTrendStoreToV2, normalizeTodayTrendV2Store,
+} from '../src/today-trend-v2-model.js';
 import { createTodayTrendCommitter } from '../src/today-trend-commit.js';
 import { createTodayTrendJournal, normalizeTodayTrendJournal, todayTrendStoreDigest } from '../src/today-trend-journal.js';
 import { createPhoneInjectionController } from '../src/phone-injection-controller.js';
-import { TODAY_TREND_V2_AUTHORITY_KEY, TODAY_TREND_V2_FALLBACK_KEY, TODAY_TREND_V2_JOURNAL_PREFIX, TODAY_TREND_V2_STORAGE_KEY } from '../src/constants.js';
+import {
+    TODAY_TREND_V1_MIGRATION_BACKUP_KEY, TODAY_TREND_V2_AUTHORITY_KEY, TODAY_TREND_V2_FALLBACK_KEY,
+    TODAY_TREND_V2_JOURNAL_PREFIX, TODAY_TREND_V2_STORAGE_KEY,
+} from '../src/constants.js';
 import { pmIDBCompareAndSwap } from '../src/pm-idb.js';
 import { gatherTodayTrendContext } from '../src/today-trend-context.js';
 import {
@@ -324,6 +331,24 @@ assert.deepEqual(TODAY_TREND_STATUS_LABELS, { hostile: '敌对', dislike: '厌�
 const fixture = () => createTodayTrendV1Fixture(createDefaultTodayTrendDynamicsSettings);
 const assertCode = (mutate, code) => assert.throws(() => normalizeTodayTrendStore(mutate()), error => error?.code === code);
 const valid = normalizeTodayTrendStore(fixture());
+const migratedValidV2 = migrateTodayTrendStoreToV2(valid).store;
+const archivedFixedCore = extractArchivedFixedCore(migratedValidV2.globalEnvelope.payload.scopes.chat.payload.dynamics.archived[0]);
+assert.equal(archivedFixedCore.id, 'rumor', 'fixed core 必须保留归档事件身份');
+assert.equal(archivedFixedCore.archivedSequence, 1, 'fixed core 必须保留确定性 archivedSequence');
+const originalArchivedParticipant = migratedValidV2.globalEnvelope.payload.scopes.chat.payload.dynamics.archived[0].participants[0];
+archivedFixedCore.participants[0] = '被篡改的副本';
+assert.equal(migratedValidV2.globalEnvelope.payload.scopes.chat.payload.dynamics.archived[0].participants[0], originalArchivedParticipant,
+    'fixed core 必须深拷贝嵌套字段，调用方修改结果不得污染 v2 store');
+assert.throws(() => extractArchivedFixedCore(migratedValidV2.globalEnvelope.payload.scopes.chat.payload.dynamics.active[0]),
+    error => error?.code === 'TT_V2_SCHEMA_INVALID', 'fixed core 必须拒绝从 active event 提取');
+const equalShadowDiff = diffReadOnlyShadow(valid, migratedValidV2);
+assert.deepEqual({ equal: equalShadowDiff.equal, byteDifference: equalShadowDiff.byteDifference }, { equal: true, byteDifference: 0 },
+    'v2 只读影子与迁移源语义一致时必须报告零差异');
+const changedShadowStore = structuredClone(migratedValidV2);
+changedShadowStore.globalEnvelope.payload.presets.preset.name = '不同的节目世界';
+const changedShadowDiff = diffReadOnlyShadow(valid, changedShadowStore);
+assert.equal(changedShadowDiff.equal, false, 'v2 只读影子的用户可见字段变化必须被识别');
+assert.ok(changedShadowDiff.byteDifference > 0, 'shadow diff 不一致时必须提供非零差异量');
 assert.deepEqual(valid.scopes.chat.generationSnapshots.map(item => item.assistantCount), [0, 7], '旧 scope 缺少快照历史时必须同时生成初始化基线与当前 checkpoint 兼容快照');
 assert.deepEqual(valid.scopes.chat.generationSnapshots[0].world, valid.scopes.chat.world, '兼容迁移无法反推历史时必须以现有资料建立安全基线，不能清空用户数据');
 const emptySnapshotStore = fixture();
@@ -1173,11 +1198,128 @@ const createAuthorityHarness = () => {
     const readEntry = async key => ({ ok: true, value: cloneValue(records.get(key)) });
     const compareAndSwap = async ({ guardKey, expectedGuard, writes }) => {
         if (!same(records.get(guardKey), expectedGuard)) return { ok: false, reason: 'CAS_CONFLICT' };
-        for (const entry of writes) records.set(entry.key, cloneValue(entry.value));
+        for (const entry of writes) {
+            if (entry.delete === true) records.delete(entry.key);
+            else records.set(entry.key, cloneValue(entry.value));
+        }
         return { ok: true };
     };
     return { records, readEntry, compareAndSwap };
 };
+
+const migrationHarness = createAuthorityHarness();
+const migrationAuthority = createTodayTrendV2Authority({ ...migrationHarness, tabId: 'migration-owner', BroadcastChannelImpl: undefined });
+const migrationResult = await migrationAuthority.migrate(valid, { sourceMedium: 'localStorage' });
+assert.equal(migrationResult.migrated, true, '首次 v1→v2 迁移必须提交新 store');
+assert.equal(migrationResult.storeRevision, 1, '首次迁移必须建立 store revision 1');
+assert.deepEqual(migrationResult.store, valid, '首次迁移返回的只读影子必须保持 v1 用户可见语义');
+const verifiedMigrationBackup = await migrationAuthority.readMigrationBackup();
+assert.equal(verifiedMigrationBackup.state, 'verified', '首次迁移二次读取成功后必须将 migration backup 标记为 verified');
+assert.equal(verifiedMigrationBackup.sourceMedium, 'localStorage', 'migration backup 必须保留真实迁移源介质');
+const repeatedMigration = await migrationAuthority.migrate(valid);
+assert.deepEqual({ migrated: repeatedMigration.migrated, storeRevision: repeatedMigration.storeRevision }, { migrated: false, storeRevision: 1 },
+    '相同迁移源重复执行必须幂等且不得递增 revision');
+const conflictingMigrationSource = structuredClone(valid);
+conflictingMigrationSource.presets.preset.name = '冲突迁移源';
+await assert.rejects(() => migrationAuthority.migrate(conflictingMigrationSource), error => error?.code === 'TT_MIGRATION_SOURCE_CONFLICT',
+    '已有 v2 store 与新迁移源语义不同时必须拒绝覆盖');
+await migrationAuthority.acquire({ readV2: true, writeV2: true, serveV2: false });
+const postMigrationStore = structuredClone(valid);
+postMigrationStore.presets.preset.name = '迁移后的合法修改';
+const postMigrationReceipt = await migrationAuthority.save(postMigrationStore);
+await migrationAuthority.release({ readV2: true, serveV2: false });
+await assert.rejects(() => migrationAuthority.restoreBackup({
+    v2Store: postMigrationReceipt.v2Store, migrationBackup: verifiedMigrationBackup,
+}, { expectedStoreRevision: 0 }), error => error?.code === 'TT_STORE_REVISION_CONFLICT',
+    '备份恢复必须用 expectedStoreRevision 拒绝覆盖迁移后的新 revision');
+assert.equal((await migrationAuthority.status()).authority.storeRevision, 2,
+    '备份 revision fence 被拒绝后不得改变持久化 authority');
+const restoredPostMigration = await migrationAuthority.restoreBackup({
+    v2Store: postMigrationReceipt.v2Store, migrationBackup: verifiedMigrationBackup,
+}, { expectedStoreRevision: 2 });
+assert.deepEqual(restoredPostMigration.store, postMigrationStore,
+    '迁移后发生合法修改的 v2 store 必须能够连同原始 migration provenance 一起恢复');
+assert.deepEqual(await migrationAuthority.readMigrationBackup(), verifiedMigrationBackup,
+    '恢复当前 v2 store 时必须原样保留规范 migration provenance，不能重写为当前 store 镜像');
+const restoredWithoutProvenance = await migrationAuthority.restoreBackup({
+    v2Store: restoredPostMigration.v2Store, migrationBackup: null,
+}, { expectedStoreRevision: 3 });
+assert.equal(await migrationAuthority.readMigrationBackup(), null,
+    '恢复 migrationBackup=null 必须在同一 CAS 中清除旧 provenance');
+const nullProvenanceBridge = createTodayTrendStorage({
+    idbGet: async () => conflictingMigrationSource, storage: memoryStorage(), v2Authority: migrationAuthority,
+});
+assert.deepEqual(await nullProvenanceBridge.load(), postMigrationStore,
+    '清除 migration provenance 后兼容桥必须直接服务 v2 store，不得错误进入陈旧 v1 shadow 比较');
+assert.deepEqual(await nullProvenanceBridge.captureV2Backup(), {
+    v2Store: restoredWithoutProvenance.v2Store, migrationBackup: null, storeRevision: 4,
+}, '清除 provenance 后再次捕获备份必须保持 migrationBackup=null');
+migrationAuthority.close();
+
+const convergedMigrationHarness = createAuthorityHarness();
+let injectConcurrentMigration = true;
+const convergedMigrationAuthority = createTodayTrendV2Authority({
+    readEntry: convergedMigrationHarness.readEntry,
+    compareAndSwap: async request => {
+        if (injectConcurrentMigration) {
+            injectConcurrentMigration = false;
+            const concurrentStore = migrateTodayTrendStoreToV2(valid, { globalRevision: 1, scopeRevisionByStorageId: { chat: 1 } }).store;
+            convergedMigrationHarness.records.set(TODAY_TREND_V2_STORAGE_KEY, createTodayTrendV2Envelope(concurrentStore, 1));
+            convergedMigrationHarness.records.set(TODAY_TREND_V2_AUTHORITY_KEY, normalizeTodayTrendV2Authority({
+                schemaVersion: 1, epoch: 1, authorityRevision: 1, storeRevision: 1, scopeRevisionByStorageId: { chat: 1 },
+                ownerTabId: null, readV2: true, writeV2: false, serveV2: false,
+            }));
+            return { ok: false, reason: 'CAS_CONFLICT' };
+        }
+        return convergedMigrationHarness.compareAndSwap(request);
+    },
+    tabId: 'converged-migration', BroadcastChannelImpl: undefined,
+});
+const convergedMigration = await convergedMigrationAuthority.migrate(valid);
+assert.deepEqual({ migrated: convergedMigration.migrated, storeRevision: convergedMigration.storeRevision }, { migrated: false, storeRevision: 1 },
+    '并发迁移已提交相同语义结果时，失败方必须收敛到现有 v2 store');
+convergedMigrationAuthority.close();
+
+const verifyMissingHarness = createAuthorityHarness();
+let hideMigratedPrimary = true;
+const verifyMissingAuthority = createTodayTrendV2Authority({
+    readEntry: async key => hideMigratedPrimary && key === TODAY_TREND_V2_STORAGE_KEY
+        ? { ok: true, value: undefined } : verifyMissingHarness.readEntry(key),
+    compareAndSwap: verifyMissingHarness.compareAndSwap,
+    tabId: 'verify-missing', BroadcastChannelImpl: undefined,
+});
+await assert.rejects(() => verifyMissingAuthority.migrate(valid), error => error?.code === 'TT_MIGRATION_VERIFY_FAILED',
+    '迁移首次 CAS 成功后二次读取不到 primary 必须明确报告验证失败');
+assert.equal(verifyMissingHarness.records.get(TODAY_TREND_V1_MIGRATION_BACKUP_KEY).state, 'persisted',
+    '二次读取失败时必须保留 persisted backup 供后续恢复');
+hideMigratedPrimary = false;
+assert.equal((await verifyMissingAuthority.migrate(valid)).migrated, false,
+    '二次读取恢复后重复 migrate 必须幂等收敛现有 store');
+assert.equal((await verifyMissingAuthority.readMigrationBackup()).state, 'verified',
+    '二次读取恢复后重复 migrate 必须将 persisted backup 推进为 verified');
+verifyMissingAuthority.close();
+
+const verifyConflictHarness = createAuthorityHarness();
+let verifyConflictCasCalls = 0;
+const verifyConflictAuthority = createTodayTrendV2Authority({
+    readEntry: verifyConflictHarness.readEntry,
+    compareAndSwap: async request => {
+        verifyConflictCasCalls += 1;
+        if (verifyConflictCasCalls === 2) return { ok: false, reason: 'CAS_CONFLICT' };
+        return verifyConflictHarness.compareAndSwap(request);
+    },
+    tabId: 'verify-conflict', BroadcastChannelImpl: undefined,
+});
+await assert.rejects(() => verifyConflictAuthority.migrate(valid), error => error?.code === 'TT_MIGRATION_VERIFY_CONFLICT',
+    'verified backup 状态提交发生 CAS 冲突时必须保留独立错误码');
+assert.equal(verifyConflictHarness.records.get(TODAY_TREND_V1_MIGRATION_BACKUP_KEY).state, 'persisted',
+    'verified 状态 CAS 冲突后不得伪造 migration backup 已验证');
+assert.equal((await verifyConflictAuthority.migrate(valid)).migrated, false,
+    'verified 状态 CAS 冲突解除后重复 migrate 必须收敛现有 store');
+assert.equal((await verifyConflictAuthority.readMigrationBackup()).state, 'verified',
+    'verified 状态 CAS 冲突解除后重复 migrate 必须完成状态推进');
+verifyConflictAuthority.close();
+
 const authorityChannels = new Set();
 class AuthorityBroadcastChannel {
     constructor(name) {
@@ -1298,8 +1440,8 @@ assert.equal(fifoReceipt.storeRevision, 2, 'FIFO 中 save 必须先提交并返�
 assert.equal(fifoReleased, true, 'FIFO 中 release 必须基于 save 的新 token 成功释放');
 assert.equal(fifoHarness.records.get(TODAY_TREND_V2_AUTHORITY_KEY).ownerTabId, null,
     'save→release 交错完成后不得遗留 orphan owner');
-assert.deepEqual(fifoHarness.records.get(TODAY_TREND_V2_STORAGE_KEY).payload, normalizeTodayTrendStore(fifoStore),
-    'FIFO release 不得丢失排在前面的 save payload');
+assert.deepEqual(buildReadOnlyShadow(fifoHarness.records.get(TODAY_TREND_V2_STORAGE_KEY).payload), normalizeTodayTrendStore(fifoStore),
+    'FIFO release 不得丢失排在前面的 save payload 或改变用户可见语义');
 fifoAuthority.close();
 
 const releaseConflictHarness = createAuthorityHarness();
@@ -1350,7 +1492,7 @@ concurrentB.close();
 
 assert.throws(() => normalizeTodayTrendV2Authority({ schemaVersion: 2 }), error => error?.code === 'TT_V2_FUTURE_VERSION',
     '未来 authority schema 必须 fail-closed');
-assert.throws(() => normalizeTodayTrendV2Envelope({ schemaVersion: 2 }), error => error?.code === 'TT_V2_FUTURE_VERSION',
+assert.throws(() => normalizeTodayTrendV2Envelope({ schemaVersion: 3 }), error => error?.code === 'TT_V2_FUTURE_VERSION',
     '未来 v2 store schema 必须 fail-closed');
 const splitHarness = createAuthorityHarness();
 const splitPrimary = createTodayTrendV2Envelope(valid, 1);
@@ -1390,6 +1532,7 @@ const createTransactionalDb = initialEntries => {
                     return {
                         get(key) { guardKey = key; getRequest = {}; return getRequest; },
                         put(value, key) { writes.push({ key, value: structuredClone(value) }); },
+                        delete(key) { writes.push({ key, delete: true }); },
                     };
                 },
             };
@@ -1398,7 +1541,10 @@ const createTransactionalDb = initialEntries => {
                 getRequest.onsuccess?.();
                 if (aborted) transaction.onabort?.();
                 else {
-                    for (const entry of writes) records.set(entry.key, entry.value);
+                    for (const entry of writes) {
+                        if (entry.delete === true) records.delete(entry.key);
+                        else records.set(entry.key, entry.value);
+                    }
                     transaction.oncomplete?.();
                 }
                 resolve();
@@ -1425,6 +1571,19 @@ const [realCasA, realCasB] = await Promise.all([
 assert.deepEqual([realCasA.ok, realCasB.ok].sort(), [false, true], '真实 pmIDBCompareAndSwap 并发竞争必须只允许一个事务成功');
 assert.equal(realCasDb.records.has('payload-a') !== realCasDb.records.has('payload-b'), true,
     'CAS 冲突事务的全部 writes 必须原子丢弃，不能留下部分 payload');
+const deleteCasGuard = structuredClone(realCasDb.records.get('guard'));
+realCasDb.records.set('stale', { remove: true });
+assert.deepEqual(await pmIDBCompareAndSwap({
+    guardKey: 'guard', expectedGuard: deleteCasGuard,
+    writes: [{ key: 'stale', delete: true }, { key: 'replacement', value: { accepted: true } }],
+    openIDB: async () => realCasDb.db,
+}), { ok: true }, '真实 pmIDBCompareAndSwap 必须支持在同一事务中原子混合 delete 与 put');
+assert.equal(realCasDb.records.has('stale'), false, 'CAS delete 成功后旧 key 必须不存在');
+assert.deepEqual(realCasDb.records.get('replacement'), { accepted: true }, 'CAS delete 不得丢失同事务中的 put');
+await assert.rejects(() => pmIDBCompareAndSwap({
+    guardKey: 'guard', expectedGuard: deleteCasGuard,
+    writes: [{ key: 'invalid', value: 1, delete: true }], openIDB: async () => realCasDb.db,
+}), /恰好指定 value 或 delete=true/, 'CAS write 同时声明 value 与 delete 必须在事务前拒绝');
 const missingDbResult = await pmIDBCompareAndSwap({
     guardKey: 'guard', expectedGuard: realCasGuard, writes: [{ key: 'payload', value: 1 }], openIDB: async () => null,
 });

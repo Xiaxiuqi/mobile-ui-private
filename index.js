@@ -2719,6 +2719,7 @@ ${userPrompt}` : userPrompt;
   var TODAY_TREND_V2_STORAGE_KEY = "ST_SMS_TODAY_TREND_V2";
   var TODAY_TREND_V2_FALLBACK_KEY = "ST_SMS_TODAY_TREND_V2_LOCAL_FALLBACK";
   var TODAY_TREND_V2_AUTHORITY_KEY = "ST_SMS_TODAY_TREND_V2_AUTHORITY_V1";
+  var TODAY_TREND_V1_MIGRATION_BACKUP_KEY = "ST_SMS_TODAY_TREND_V1_MIGRATION_BACKUP";
   var TODAY_TREND_V2_JOURNAL_PREFIX = "ST_SMS_TODAY_TREND_V2_JOURNAL_V1:";
   var TODAY_TREND_INJECTION_KEY_PREFIX = "ST_SMS_TODAY_TREND_INJECTION_V1:";
   var CHARACTER_BEHAVIOR_KEY = "ST_SMS_CHARACTER_BEHAVIOR";
@@ -5752,8 +5753,10 @@ ${lines.join("\n")}
     if (typeof guardKey !== "string" || !guardKey) throw new TypeError("IDB CAS guard key \u5FC5\u987B\u662F\u975E\u7A7A\u5B57\u7B26\u4E32");
     if (!Array.isArray(writes) || !writes.length) throw new TypeError("IDB CAS writes \u5FC5\u987B\u662F\u975E\u7A7A\u6570\u7EC4");
     for (const entry2 of writes) {
-      if (!entry2 || typeof entry2.key !== "string" || !entry2.key || !Object.hasOwn(entry2, "value")) {
-        throw new TypeError("IDB CAS write \u5FC5\u987B\u5305\u542B\u975E\u7A7A key \u4E0E value");
+      const hasValue = entry2 && Object.hasOwn(entry2, "value");
+      const deletes = entry2?.delete === true;
+      if (!entry2 || typeof entry2.key !== "string" || !entry2.key || hasValue === deletes) {
+        throw new TypeError("IDB CAS write \u5FC5\u987B\u5305\u542B\u975E\u7A7A key\uFF0C\u5E76\u4E14\u6070\u597D\u6307\u5B9A value \u6216 delete=true");
       }
     }
     if (typeof openIDB !== "function") throw new TypeError("IDB CAS openIDB \u5FC5\u987B\u662F\u51FD\u6570");
@@ -5777,7 +5780,10 @@ ${lines.join("\n")}
             transaction.abort();
             return;
           }
-          for (const entry2 of writes) store.put(entry2.value, entry2.key);
+          for (const entry2 of writes) {
+            if (entry2.delete === true) store.delete(entry2.key);
+            else store.put(entry2.value, entry2.key);
+          }
         };
         request.onerror = () => {
           try {
@@ -7326,6 +7332,7 @@ ${lines.join("\n")}
     "ST_SMS_BG_GLOBAL",
     DESKTOP_BG_KEY,
     TODAY_TREND_STORAGE_KEY,
+    TODAY_TREND_V1_MIGRATION_BACKUP_KEY,
     TODAY_TREND_V2_STORAGE_KEY,
     TODAY_TREND_V2_AUTHORITY_KEY
   ]);
@@ -9676,11 +9683,278 @@ ${entry2.content}` : entry2.content;
   }
   var todayTrendJournal = createTodayTrendJournal();
 
+  // src/today-trend-v2-model.js
+  var TODAY_TREND_V2_STORE_VERSION = 2;
+  var GLOBAL_ENVELOPE_VERSION = 1;
+  var SCOPE_ENVELOPE_VERSION = 1;
+  var LEGACY_STAGE_KIND = "legacy-stage";
+  var clone4 = (value) => structuredClone(value);
+  var plainRecord9 = (value) => value && typeof value === "object" && !Array.isArray(value);
+  function failure2(code, message) {
+    const error = new Error(message);
+    error.code = code;
+    throw error;
+  }
+  function safeInteger2(value, field, minimum = 0) {
+    if (!Number.isSafeInteger(value) || value < minimum) failure2("TT_V2_SCHEMA_INVALID", `${field} \u5FC5\u987B\u662F\u5927\u4E8E\u7B49\u4E8E ${minimum} \u7684\u5B89\u5168\u6574\u6570`);
+    return value;
+  }
+  function exactKeys3(value, keys, field) {
+    if (!plainRecord9(value)) failure2("TT_V2_SCHEMA_INVALID", `${field} \u5FC5\u987B\u662F\u5BF9\u8C61`);
+    const actual = Object.keys(value).sort();
+    const expected = [...keys].sort();
+    if (actual.length !== expected.length || actual.some((key, index) => key !== expected[index])) {
+      failure2("TT_V2_SCHEMA_INVALID", `${field} \u5B57\u6BB5\u96C6\u5408\u65E0\u6548`);
+    }
+  }
+  function legacyStageId(eventId, index) {
+    return `legacy:${eventId}:${String(index + 1).padStart(4, "0")}`;
+  }
+  function migrateLegacyStage(eventId, text8, index) {
+    return {
+      id: legacyStageId(eventId, index),
+      kind: LEGACY_STAGE_KIND,
+      text: text8,
+      legacyIndex: index,
+      sourceStageStart: index + 1,
+      sourceStageEnd: index + 1,
+      revision: 1
+    };
+  }
+  function normalizeLegacyStage(value, eventId, index) {
+    exactKeys3(value, ["id", "kind", "text", "legacyIndex", "sourceStageStart", "sourceStageEnd", "revision"], "legacy-stage");
+    if (value.id !== legacyStageId(eventId, index) || value.kind !== LEGACY_STAGE_KIND || value.legacyIndex !== index || value.sourceStageStart !== index + 1 || value.sourceStageEnd !== index + 1 || value.revision !== 1 || typeof value.text !== "string" || !value.text) failure2("TT_V2_SCHEMA_INVALID", "legacy-stage \u5185\u5BB9\u65E0\u6548");
+    return { ...value };
+  }
+  function migrateEvent(event, archivedSequence = null) {
+    const stages = event.stages.map((text8, index) => migrateLegacyStage(event.id, text8, index));
+    return {
+      ...clone4(event),
+      stages,
+      capacityCompatibilityPending: stages.length === 40,
+      ...event.lifecycle === "archived" ? { archivedAtAssistantCount: null, archivedSequence } : {}
+    };
+  }
+  function projectEventToV1(event) {
+    return {
+      id: event.id,
+      type: event.type,
+      lifecycle: event.lifecycle,
+      title: event.title,
+      stageLabel: event.stageLabel,
+      origin: event.origin,
+      participants: clone4(event.participants),
+      stages: event.stages.map((stage) => stage.text),
+      latestStage: event.latestStage,
+      outcome: event.outcome,
+      finalResult: event.finalResult,
+      relatedEventIds: clone4(event.relatedEventIds),
+      createdAt: event.createdAt,
+      updatedAt: event.updatedAt
+    };
+  }
+  function migrateDynamics(dynamics) {
+    return {
+      active: dynamics.active.map((event) => migrateEvent(event)),
+      archived: dynamics.archived.map((event, index) => migrateEvent(event, index + 1))
+    };
+  }
+  function projectDynamicsToV1(dynamics) {
+    return {
+      active: dynamics.active.map(projectEventToV1),
+      archived: dynamics.archived.map(projectEventToV1)
+    };
+  }
+  function extractArchivedFixedCore(event) {
+    if (event?.lifecycle !== "archived") failure2("TT_V2_SCHEMA_INVALID", "fixed core \u53EA\u80FD\u4ECE archived event \u63D0\u53D6");
+    return clone4({
+      id: event.id,
+      type: event.type,
+      lifecycle: event.lifecycle,
+      title: event.title,
+      stageLabel: event.stageLabel,
+      origin: event.origin,
+      participants: event.participants,
+      stages: event.stages,
+      latestStage: event.latestStage,
+      outcome: event.outcome,
+      finalResult: event.finalResult,
+      relatedEventIds: event.relatedEventIds,
+      archivedAtAssistantCount: event.archivedAtAssistantCount,
+      archivedSequence: event.archivedSequence,
+      createdAt: event.createdAt,
+      updatedAt: event.updatedAt
+    });
+  }
+  function createScopePayload(scope) {
+    const dynamics = migrateDynamics(scope.dynamics);
+    const generationSnapshots = scope.generationSnapshots.map((snapshot) => ({
+      ...clone4(snapshot),
+      dynamics: migrateDynamics(snapshot.dynamics)
+    }));
+    const fixedCoreBaselineByEvent = {};
+    for (const event of dynamics.archived) fixedCoreBaselineByEvent[event.id] = extractArchivedFixedCore(event);
+    return {
+      storageId: scope.storageId,
+      characterId: scope.characterId,
+      characterName: scope.characterName,
+      presetId: scope.presetId,
+      operation: clone4(scope.operation),
+      injection: clone4(scope.injection),
+      world: clone4(scope.world),
+      reputation: clone4(scope.reputation),
+      factions: clone4(scope.factions),
+      dynamicsSettings: clone4(scope.dynamicsSettings),
+      dynamics,
+      generationSnapshots,
+      historyRetentionSettings: { archivedDetailLatestEventCount: 2, archivedDetailRetentionFloors: 20, revision: 1 },
+      historyRetentionState: { highWaterAssistantCount: null, nextArchivedSequence: dynamics.archived.length + 1, detailPoolRevision: 0, retentionPolicyRevision: 1 },
+      stageDetailsByEvent: {},
+      archivedRemovableDataByEvent: {},
+      removableEntityStateById: {},
+      removableEntityTombstonesById: {},
+      fixedCoreBaselineByEvent,
+      commitJournal: null
+    };
+  }
+  function projectScopePayloadToV1(scope) {
+    return {
+      storageId: scope.storageId,
+      characterId: scope.characterId,
+      characterName: scope.characterName,
+      presetId: scope.presetId,
+      operation: clone4(scope.operation),
+      injection: clone4(scope.injection),
+      world: clone4(scope.world),
+      reputation: clone4(scope.reputation),
+      factions: clone4(scope.factions),
+      dynamicsSettings: clone4(scope.dynamicsSettings),
+      dynamics: projectDynamicsToV1(scope.dynamics),
+      generationSnapshots: scope.generationSnapshots.map((snapshot) => ({ ...clone4(snapshot), dynamics: projectDynamicsToV1(snapshot.dynamics) }))
+    };
+  }
+  function normalizeEventProjection(event, lifecycle, archivedSequence) {
+    if (!plainRecord9(event) || event.lifecycle !== lifecycle || !Array.isArray(event.stages) || event.stages.length > 40) {
+      failure2("TT_V2_SCHEMA_INVALID", "v2 event projection \u65E0\u6548");
+    }
+    const normalized = clone4(event);
+    normalized.stages = event.stages.map((stage, index) => normalizeLegacyStage(stage, event.id, index));
+    if (event.capacityCompatibilityPending !== (event.stages.length === 40)) failure2("TT_V2_SCHEMA_INVALID", "capacityCompatibilityPending \u4E0E stages \u6570\u91CF\u4E0D\u4E00\u81F4");
+    if (lifecycle === "active") {
+      if (Object.hasOwn(event, "archivedSequence") || Object.hasOwn(event, "archivedAtAssistantCount")) failure2("TT_V2_SCHEMA_INVALID", "active event \u4E0D\u5F97\u643A\u5E26\u5F52\u6863\u5B57\u6BB5");
+    } else if (event.archivedSequence !== archivedSequence || event.archivedAtAssistantCount !== null) {
+      failure2("TT_V2_SCHEMA_INVALID", "\u5F52\u6863 sequence \u6216\u697C\u5C42\u65E0\u6548");
+    }
+    return normalized;
+  }
+  function normalizeScopeEnvelope(value, presets) {
+    exactKeys3(value, ["schemaVersion", "revision", "payload"], "scope envelope");
+    if (value.schemaVersion !== SCOPE_ENVELOPE_VERSION) failure2("TT_V2_SCHEMA_INVALID", "scope envelope \u7248\u672C\u65E0\u6548");
+    safeInteger2(value.revision, "scope envelope revision");
+    const payload = clone4(value.payload);
+    if (!plainRecord9(payload) || !plainRecord9(payload.dynamics) || !Array.isArray(payload.generationSnapshots)) failure2("TT_V2_SCHEMA_INVALID", "scope payload \u65E0\u6548");
+    payload.dynamics = {
+      active: payload.dynamics.active.map((event) => normalizeEventProjection(event, "active", null)),
+      archived: payload.dynamics.archived.map((event, index) => normalizeEventProjection(event, "archived", index + 1))
+    };
+    payload.generationSnapshots = payload.generationSnapshots.map((snapshot) => ({
+      ...clone4(snapshot),
+      dynamics: {
+        active: snapshot.dynamics.active.map((event) => normalizeEventProjection(event, "active", null)),
+        archived: snapshot.dynamics.archived.map((event, index) => normalizeEventProjection(event, "archived", index + 1))
+      }
+    }));
+    const v1Store = normalizeTodayTrendStore({ version: 1, presets, scopes: { [payload.storageId]: projectScopePayloadToV1(payload) } });
+    const canonical2 = createScopePayload(v1Store.scopes[payload.storageId]);
+    if (JSON.stringify(payload) !== JSON.stringify(canonical2)) failure2("TT_V2_SCHEMA_INVALID", "scope payload \u4E0D\u662F\u89C4\u8303 v2 \u8FC1\u79FB\u7ED3\u6784");
+    return { schemaVersion: SCOPE_ENVELOPE_VERSION, revision: value.revision, payload: canonical2 };
+  }
+  function migrateTodayTrendStoreToV2(value, { globalRevision = 1, scopeRevisionByStorageId = {} } = {}) {
+    if (value?.version === TODAY_TREND_V2_STORE_VERSION && Object.hasOwn(value, "globalEnvelope")) {
+      return { store: normalizeTodayTrendV2Store(value), migrated: false };
+    }
+    const source = normalizeTodayTrendStore(value);
+    const scopes = {};
+    for (const [storageId, scope] of Object.entries(source.scopes)) {
+      scopes[storageId] = {
+        schemaVersion: SCOPE_ENVELOPE_VERSION,
+        revision: safeInteger2(scopeRevisionByStorageId[storageId] ?? 1, `scope revision ${storageId}`),
+        payload: createScopePayload(scope)
+      };
+    }
+    return {
+      migrated: true,
+      store: normalizeTodayTrendV2Store({
+        version: TODAY_TREND_V2_STORE_VERSION,
+        globalEnvelope: {
+          schemaVersion: GLOBAL_ENVELOPE_VERSION,
+          revision: safeInteger2(globalRevision, "global revision"),
+          payload: { presets: clone4(source.presets), scopes }
+        }
+      })
+    };
+  }
+  function normalizeTodayTrendV2Store(value) {
+    if (!plainRecord9(value)) failure2("TT_V2_SCHEMA_INVALID", "v2 store \u5FC5\u987B\u662F\u5BF9\u8C61");
+    if (value.version > TODAY_TREND_V2_STORE_VERSION) failure2("TT_V2_FUTURE_VERSION", `v2 store \u7248\u672C ${value.version} \u9AD8\u4E8E\u5F53\u524D\u652F\u6301\u7248\u672C ${TODAY_TREND_V2_STORE_VERSION}`);
+    exactKeys3(value, ["version", "globalEnvelope"], "v2 store");
+    if (value.version !== TODAY_TREND_V2_STORE_VERSION) failure2("TT_V2_SCHEMA_INVALID", "v2 store \u7248\u672C\u65E0\u6548");
+    const envelope = value.globalEnvelope;
+    exactKeys3(envelope, ["schemaVersion", "revision", "payload"], "global envelope");
+    if (envelope.schemaVersion > GLOBAL_ENVELOPE_VERSION) failure2("TT_V2_FUTURE_VERSION", "global envelope \u7248\u672C\u9AD8\u4E8E\u5F53\u524D\u652F\u6301\u7248\u672C");
+    if (envelope.schemaVersion !== GLOBAL_ENVELOPE_VERSION) failure2("TT_V2_SCHEMA_INVALID", "global envelope \u7248\u672C\u65E0\u6548");
+    safeInteger2(envelope.revision, "global envelope revision");
+    exactKeys3(envelope.payload, ["presets", "scopes"], "global envelope payload");
+    if (!plainRecord9(envelope.payload.presets) || !plainRecord9(envelope.payload.scopes)) failure2("TT_V2_SCHEMA_INVALID", "global envelope \u96C6\u5408\u65E0\u6548");
+    const presets = clone4(envelope.payload.presets);
+    const scopes = {};
+    for (const [storageId, scopeEnvelope] of Object.entries(envelope.payload.scopes)) {
+      const normalized = normalizeScopeEnvelope(scopeEnvelope, presets);
+      if (normalized.payload.storageId !== storageId) failure2("TT_V2_SCHEMA_INVALID", "scope envelope key \u4E0E storageId \u4E0D\u4E00\u81F4");
+      scopes[storageId] = normalized;
+    }
+    return {
+      version: TODAY_TREND_V2_STORE_VERSION,
+      globalEnvelope: {
+        schemaVersion: GLOBAL_ENVELOPE_VERSION,
+        revision: envelope.revision,
+        payload: { presets, scopes }
+      }
+    };
+  }
+  function rebaseTodayTrendV2Store(value, globalRevision) {
+    const store = normalizeTodayTrendV2Store(value);
+    const revision = safeInteger2(globalRevision, "global revision");
+    const scopes = {};
+    for (const [storageId, envelope] of Object.entries(store.globalEnvelope.payload.scopes)) {
+      scopes[storageId] = { ...envelope, revision };
+    }
+    return normalizeTodayTrendV2Store({
+      ...store,
+      globalEnvelope: { ...store.globalEnvelope, revision, payload: { ...store.globalEnvelope.payload, scopes } }
+    });
+  }
+  function buildReadOnlyShadow(value) {
+    const store = normalizeTodayTrendV2Store(value);
+    const scopes = {};
+    for (const [storageId, envelope] of Object.entries(store.globalEnvelope.payload.scopes)) {
+      scopes[storageId] = projectScopePayloadToV1(envelope.payload);
+    }
+    return normalizeTodayTrendStore({ version: 1, presets: clone4(store.globalEnvelope.payload.presets), scopes });
+  }
+  function diffReadOnlyShadow(v1Value, v2Value) {
+    const expected = JSON.stringify(normalizeTodayTrendStore(v1Value));
+    const actual = JSON.stringify(buildReadOnlyShadow(v2Value));
+    if (expected === actual) return { equal: true, byteDifference: 0, expectedBytes: expected.length, actualBytes: actual.length };
+    return { equal: false, byteDifference: Math.abs(expected.length - actual.length) || 1, expectedBytes: expected.length, actualBytes: actual.length };
+  }
+
   // src/today-trend-v2-authority.js
   var AUTHORITY_VERSION = 1;
-  var ENVELOPE_VERSION = 1;
+  var ENVELOPE_VERSION = 2;
+  var MIGRATION_BACKUP_VERSION = 1;
   var CHANNEL_NAME = "pm-today-trend-v2-authority";
-  var clone4 = (value) => structuredClone(value);
+  var clone5 = (value) => structuredClone(value);
   var structurallyEqual2 = (left, right) => {
     if (Object.is(left, right)) return true;
     if (Array.isArray(left) || Array.isArray(right)) {
@@ -9691,33 +9965,33 @@ ${entry2.content}` : entry2.content;
     const rightKeys = Object.keys(right).sort();
     return leftKeys.length === rightKeys.length && leftKeys.every((key, index) => key === rightKeys[index] && structurallyEqual2(left[key], right[key]));
   };
-  function failure2(code, message, cause) {
+  function failure3(code, message, cause) {
     const error = new Error(message, cause === void 0 ? void 0 : { cause });
     error.code = code;
     return error;
   }
   function nonNegativeInteger(value, field) {
-    if (!Number.isSafeInteger(value) || value < 0) throw failure2("TT_V2_SCHEMA_INVALID", `${field} \u5FC5\u987B\u662F\u975E\u8D1F\u5B89\u5168\u6574\u6570`);
+    if (!Number.isSafeInteger(value) || value < 0) throw failure3("TT_V2_SCHEMA_INVALID", `${field} \u5FC5\u987B\u662F\u975E\u8D1F\u5B89\u5168\u6574\u6570`);
     return value;
   }
   function normalizeScopeRevisions(value) {
-    if (!value || typeof value !== "object" || Array.isArray(value)) throw failure2("TT_V2_SCHEMA_INVALID", "scopeRevisionByStorageId \u5FC5\u987B\u662F\u5BF9\u8C61");
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw failure3("TT_V2_SCHEMA_INVALID", "scopeRevisionByStorageId \u5FC5\u987B\u662F\u5BF9\u8C61");
     const result = /* @__PURE__ */ Object.create(null);
     for (const [storageId, revision] of Object.entries(value)) {
       if (!storageId || storageId === "__proto__" || storageId === "constructor" || storageId === "prototype") {
-        throw failure2("TT_V2_SCHEMA_INVALID", "scope revision key \u65E0\u6548");
+        throw failure3("TT_V2_SCHEMA_INVALID", "scope revision key \u65E0\u6548");
       }
       result[storageId] = nonNegativeInteger(revision, `scopeRevisionByStorageId.${storageId}`);
     }
     return result;
   }
   function normalizeTodayTrendV2Authority(value) {
-    if (!value || typeof value !== "object" || Array.isArray(value)) throw failure2("TT_V2_SCHEMA_INVALID", "v2 authority \u5FC5\u987B\u662F\u5BF9\u8C61");
-    if (value.schemaVersion > AUTHORITY_VERSION) throw failure2("TT_V2_FUTURE_VERSION", `v2 authority \u7248\u672C ${value.schemaVersion} \u9AD8\u4E8E\u5F53\u524D\u652F\u6301\u7248\u672C ${AUTHORITY_VERSION}`);
-    if (value.schemaVersion !== AUTHORITY_VERSION) throw failure2("TT_V2_SCHEMA_INVALID", "v2 authority \u7248\u672C\u65E0\u6548");
-    if (value.ownerTabId !== null && (typeof value.ownerTabId !== "string" || !value.ownerTabId)) throw failure2("TT_V2_SCHEMA_INVALID", "ownerTabId \u5FC5\u987B\u662F\u975E\u7A7A\u5B57\u7B26\u4E32\u6216 null");
-    for (const key of ["readV2", "writeV2", "serveV2"]) if (typeof value[key] !== "boolean") throw failure2("TT_V2_SCHEMA_INVALID", `${key} \u5FC5\u987B\u662F\u5E03\u5C14\u503C`);
-    if (value.writeV2 && !value.ownerTabId) throw failure2("TT_V2_SCHEMA_INVALID", "writeV2 \u542F\u7528\u65F6\u5FC5\u987B\u5B58\u5728 ownerTabId");
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw failure3("TT_V2_SCHEMA_INVALID", "v2 authority \u5FC5\u987B\u662F\u5BF9\u8C61");
+    if (value.schemaVersion > AUTHORITY_VERSION) throw failure3("TT_V2_FUTURE_VERSION", `v2 authority \u7248\u672C ${value.schemaVersion} \u9AD8\u4E8E\u5F53\u524D\u652F\u6301\u7248\u672C ${AUTHORITY_VERSION}`);
+    if (value.schemaVersion !== AUTHORITY_VERSION) throw failure3("TT_V2_SCHEMA_INVALID", "v2 authority \u7248\u672C\u65E0\u6548");
+    if (value.ownerTabId !== null && (typeof value.ownerTabId !== "string" || !value.ownerTabId)) throw failure3("TT_V2_SCHEMA_INVALID", "ownerTabId \u5FC5\u987B\u662F\u975E\u7A7A\u5B57\u7B26\u4E32\u6216 null");
+    for (const key of ["readV2", "writeV2", "serveV2"]) if (typeof value[key] !== "boolean") throw failure3("TT_V2_SCHEMA_INVALID", `${key} \u5FC5\u987B\u662F\u5E03\u5C14\u503C`);
+    if (value.writeV2 && !value.ownerTabId) throw failure3("TT_V2_SCHEMA_INVALID", "writeV2 \u542F\u7528\u65F6\u5FC5\u987B\u5B58\u5728 ownerTabId");
     return {
       schemaVersion: AUTHORITY_VERSION,
       epoch: nonNegativeInteger(value.epoch, "epoch"),
@@ -9730,14 +10004,48 @@ ${entry2.content}` : entry2.content;
       serveV2: value.serveV2
     };
   }
-  function createTodayTrendV2Envelope(payload, revision) {
-    return { schemaVersion: ENVELOPE_VERSION, revision: nonNegativeInteger(revision, "revision"), payload: normalizeTodayTrendStore(payload) };
+  function createTodayTrendV2Envelope(payload, revision, scopeRevisionByStorageId = {}) {
+    const v2Store = payload?.version === 2 ? normalizeTodayTrendV2Store(payload) : migrateTodayTrendStoreToV2(normalizeTodayTrendStore(payload), { globalRevision: revision, scopeRevisionByStorageId }).store;
+    return { schemaVersion: ENVELOPE_VERSION, revision: nonNegativeInteger(revision, "revision"), payload: v2Store };
   }
   function normalizeTodayTrendV2Envelope(value) {
-    if (!value || typeof value !== "object" || Array.isArray(value)) throw failure2("TT_V2_SCHEMA_INVALID", "v2 store envelope \u5FC5\u987B\u662F\u5BF9\u8C61");
-    if (value.schemaVersion > ENVELOPE_VERSION) throw failure2("TT_V2_FUTURE_VERSION", `v2 store \u7248\u672C ${value.schemaVersion} \u9AD8\u4E8E\u5F53\u524D\u652F\u6301\u7248\u672C ${ENVELOPE_VERSION}`);
-    if (value.schemaVersion !== ENVELOPE_VERSION) throw failure2("TT_V2_SCHEMA_INVALID", "v2 store \u7248\u672C\u65E0\u6548");
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw failure3("TT_V2_SCHEMA_INVALID", "v2 store envelope \u5FC5\u987B\u662F\u5BF9\u8C61");
+    if (value.schemaVersion > ENVELOPE_VERSION) throw failure3("TT_V2_FUTURE_VERSION", `v2 store \u7248\u672C ${value.schemaVersion} \u9AD8\u4E8E\u5F53\u524D\u652F\u6301\u7248\u672C ${ENVELOPE_VERSION}`);
+    if (value.schemaVersion === 1) return createTodayTrendV2Envelope(normalizeTodayTrendStore(value.payload), value.revision);
+    if (value.schemaVersion !== ENVELOPE_VERSION) throw failure3("TT_V2_SCHEMA_INVALID", "v2 store \u7248\u672C\u65E0\u6548");
     return createTodayTrendV2Envelope(value.payload, value.revision);
+  }
+  function normalizeTodayTrendMigrationBackup(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw failure3("TT_V2_SCHEMA_INVALID", "migration backup \u5FC5\u987B\u662F\u5BF9\u8C61");
+    if (value.schemaVersion > MIGRATION_BACKUP_VERSION) throw failure3("TT_V2_FUTURE_VERSION", "migration backup \u7248\u672C\u9AD8\u4E8E\u5F53\u524D\u652F\u6301\u7248\u672C");
+    if (value.schemaVersion !== MIGRATION_BACKUP_VERSION || !["persisted", "verified"].includes(value.state)) {
+      throw failure3("TT_V2_SCHEMA_INVALID", "migration backup \u7248\u672C\u6216\u72B6\u6001\u65E0\u6548");
+    }
+    if (!["idb", "localStorage"].includes(value.sourceMedium)) throw failure3("TT_V2_SCHEMA_INVALID", "migration backup sourceMedium \u65E0\u6548");
+    const sourcePayload = normalizeTodayTrendStore(value.sourcePayload);
+    const storeRevision = nonNegativeInteger(value.storeRevision, "migration backup storeRevision");
+    if (storeRevision < 1) throw failure3("TT_V2_SCHEMA_INVALID", "migration backup storeRevision \u5FC5\u987B\u5927\u4E8E 0");
+    const migratedStore = normalizeTodayTrendV2Store(value.migratedStore);
+    const comparison = diffReadOnlyShadow(sourcePayload, migratedStore);
+    if (!comparison.equal) throw failure3("TT_V2_SCHEMA_INVALID", "migration backup \u4E0E migratedStore \u7528\u6237\u53EF\u89C1\u8BED\u4E49\u4E0D\u4E00\u81F4");
+    return {
+      schemaVersion: MIGRATION_BACKUP_VERSION,
+      state: value.state,
+      sourceMedium: value.sourceMedium,
+      sourcePayload,
+      migratedStore,
+      storeRevision
+    };
+  }
+  function createMigrationBackup(sourcePayload, migratedStore, sourceMedium, storeRevision, state = "persisted") {
+    return normalizeTodayTrendMigrationBackup({
+      schemaVersion: MIGRATION_BACKUP_VERSION,
+      state,
+      sourceMedium,
+      sourcePayload,
+      migratedStore,
+      storeRevision
+    });
   }
   function readFallback(storage) {
     try {
@@ -9745,7 +10053,7 @@ ${entry2.content}` : entry2.content;
       return raw ? normalizeTodayTrendV2Envelope(JSON.parse(raw)) : null;
     } catch (error) {
       if (error?.code) throw error;
-      throw failure2("TT_V2_FALLBACK_INVALID", "v2 fallback \u6570\u636E\u4E0D\u53EF\u8BFB", error);
+      throw failure3("TT_V2_FALLBACK_INVALID", "v2 fallback \u6570\u636E\u4E0D\u53EF\u8BFB", error);
     }
   }
   function defaultTabId() {
@@ -9827,44 +10135,169 @@ ${entry2.content}` : entry2.content;
       const state = await readAuthority();
       return { ...state, owned: !!token && !token.lost && state.authority?.ownerTabId === tabId };
     };
+    const readMigrationBackup = async () => {
+      const entry2 = await readEntry(TODAY_TREND_V1_MIGRATION_BACKUP_KEY);
+      if (!entry2?.ok) throw failure3("TT_V2_IDB_UNAVAILABLE", "\u65E0\u6CD5\u8BFB\u53D6 migration backup");
+      return entry2.value === void 0 ? null : normalizeTodayTrendMigrationBackup(entry2.value);
+    };
     const load = async () => {
       const state = await readAuthority();
-      if (!state.available) throw failure2("TT_V2_IDB_UNAVAILABLE", "\u65E0\u6CD5\u786E\u8BA4 v2 authority \u72B6\u6001");
-      if (!state.authority?.readV2 && state.authority?.storeRevision > 0) throw failure2("TT_V2_READ_FROZEN", "v2 store \u5DF2\u5B58\u5728\u4F46\u8BFB\u53D6\u5F00\u5173\u88AB\u5173\u95ED");
+      if (!state.available) throw failure3("TT_V2_IDB_UNAVAILABLE", "\u65E0\u6CD5\u786E\u8BA4 v2 authority \u72B6\u6001");
+      if (!state.authority?.readV2 && state.authority?.storeRevision > 0) throw failure3("TT_V2_READ_FROZEN", "v2 store \u5DF2\u5B58\u5728\u4F46\u8BFB\u53D6\u5F00\u5173\u88AB\u5173\u95ED");
       if (!state.authority?.readV2) return { active: false, store: null, authority: state.authority };
       const primaryEntry = await readEntry(TODAY_TREND_V2_STORAGE_KEY);
       const primary = primaryEntry?.ok && primaryEntry.value !== void 0 ? normalizeTodayTrendV2Envelope(primaryEntry.value) : null;
       const fallback = readFallback(storage);
-      if (!primary && !fallback) throw failure2("TT_V2_STORE_MISSING", "v2 authority \u5DF2\u542F\u7528\u8BFB\u53D6\u4F46 store \u4E0D\u5B58\u5728");
+      if (!primary && !fallback) throw failure3("TT_V2_STORE_MISSING", "v2 authority \u5DF2\u542F\u7528\u8BFB\u53D6\u4F46 store \u4E0D\u5B58\u5728");
       if (primary && fallback && primary.revision === fallback.revision && !structurallyEqual2(primary, fallback)) {
-        throw failure2("TT_STORAGE_SPLIT_BRAIN", "v2 \u4E3B\u5B58\u50A8\u4E0E fallback \u5728\u76F8\u540C revision \u5185\u5BB9\u4E0D\u540C");
+        throw failure3("TT_STORAGE_SPLIT_BRAIN", "v2 \u4E3B\u5B58\u50A8\u4E0E fallback \u5728\u76F8\u540C revision \u5185\u5BB9\u4E0D\u540C");
       }
       const envelope = !primary ? fallback : !fallback || primary.revision >= fallback.revision ? primary : fallback;
-      if (envelope.revision !== state.authority.storeRevision) throw failure2("TT_V2_REVISION_MISMATCH", "v2 store revision \u4E0E authority \u4E0D\u4E00\u81F4");
-      return { active: true, store: clone4(envelope.payload), authority: state.authority };
+      if (envelope.revision !== state.authority.storeRevision) throw failure3("TT_V2_REVISION_MISMATCH", "v2 store revision \u4E0E authority \u4E0D\u4E00\u81F4");
+      const v2Store = clone5(envelope.payload);
+      return { active: true, store: buildReadOnlyShadow(v2Store), v2Store, authority: state.authority };
+    };
+    const migrateInternal = async (sourcePayload, { sourceMedium = "idb" } = {}) => {
+      if (closed) throw failure3("TT_AUTHORITY_CLOSED", "v2 authority owner \u5DF2\u5173\u95ED");
+      const source = normalizeTodayTrendStore(sourcePayload);
+      const state = await readAuthority();
+      if (!state.available) throw failure3("TT_V2_IDB_UNAVAILABLE", "v2 authority \u5B58\u50A8\u4E0D\u53EF\u7528");
+      if (state.authority?.storeRevision > 0) {
+        const existing = await load();
+        const comparison = diffReadOnlyShadow(source, existing.v2Store);
+        if (!comparison.equal) throw failure3("TT_MIGRATION_SOURCE_CONFLICT", "\u73B0\u6709 v2 shadow \u4E0E\u8FC1\u79FB\u6E90\u8BED\u4E49\u4E0D\u4E00\u81F4");
+        const migrationBackup = await readMigrationBackup();
+        if (migrationBackup?.state === "persisted") {
+          if (!diffReadOnlyShadow(source, migrationBackup.migratedStore).equal) {
+            throw failure3("TT_MIGRATION_SOURCE_CONFLICT", "persisted migration backup \u4E0E\u5F53\u524D\u8FC1\u79FB\u6E90\u8BED\u4E49\u4E0D\u4E00\u81F4");
+          }
+          const verifiedBackup2 = createMigrationBackup(
+            migrationBackup.sourcePayload,
+            migrationBackup.migratedStore,
+            migrationBackup.sourceMedium,
+            migrationBackup.storeRevision,
+            "verified"
+          );
+          const verified2 = await compareAndSwap({
+            guardKey: TODAY_TREND_V2_AUTHORITY_KEY,
+            expectedGuard: state.authority,
+            writes: [{ key: TODAY_TREND_V1_MIGRATION_BACKUP_KEY, value: verifiedBackup2 }]
+          });
+          if (!verified2?.ok) throw failure3(verified2?.reason === "CAS_CONFLICT" ? "TT_MIGRATION_VERIFY_CONFLICT" : "TT_V2_IDB_UNAVAILABLE", "migration backup \u91CD\u8BD5\u9A8C\u8BC1\u72B6\u6001\u63D0\u4EA4\u5931\u8D25");
+        }
+        return { migrated: false, store: existing.store, v2Store: existing.v2Store, storeRevision: state.authority.storeRevision };
+      }
+      if (state.authority?.ownerTabId) throw failure3("TT_AUTHORITY_BUSY", "\u5176\u4ED6\u6807\u7B7E\u5F53\u524D\u6301\u6709 v2 authority");
+      const previous = state.authority;
+      const base = previous || initialAuthority();
+      const storeRevision = 1;
+      const scopeRevisionByStorageId = Object.fromEntries(Object.keys(source.scopes).map((storageId) => [storageId, 1]));
+      const migratedStore = migrateTodayTrendStoreToV2(source, { globalRevision: storeRevision, scopeRevisionByStorageId }).store;
+      const next = normalizeTodayTrendV2Authority({
+        ...base,
+        epoch: base.epoch + 1,
+        authorityRevision: base.authorityRevision + 1,
+        storeRevision,
+        scopeRevisionByStorageId,
+        ownerTabId: null,
+        readV2: true,
+        writeV2: false,
+        serveV2: false
+      });
+      const persistedBackup = createMigrationBackup(source, migratedStore, sourceMedium, storeRevision);
+      const result = await compareAndSwap({
+        guardKey: TODAY_TREND_V2_AUTHORITY_KEY,
+        expectedGuard: previous === null ? void 0 : previous,
+        writes: [
+          { key: TODAY_TREND_V2_STORAGE_KEY, value: createTodayTrendV2Envelope(migratedStore, storeRevision) },
+          { key: TODAY_TREND_V1_MIGRATION_BACKUP_KEY, value: persistedBackup },
+          { key: TODAY_TREND_V2_AUTHORITY_KEY, value: next }
+        ]
+      });
+      if (!result?.ok) {
+        if (result?.reason !== "CAS_CONFLICT") throw failure3("TT_V2_IDB_UNAVAILABLE", "v2 migration \u6301\u4E45\u5316\u5931\u8D25");
+        const existing = await load();
+        if (!diffReadOnlyShadow(source, existing.v2Store).equal) throw failure3("TT_MIGRATION_SOURCE_CONFLICT", "\u5E76\u53D1\u8FC1\u79FB\u7ED3\u679C\u4E0E\u5F53\u524D\u6E90\u4E0D\u4E00\u81F4");
+        return { migrated: false, store: existing.store, v2Store: existing.v2Store, storeRevision: existing.authority.storeRevision };
+      }
+      const primaryEntry = await readEntry(TODAY_TREND_V2_STORAGE_KEY);
+      if (!primaryEntry?.ok || primaryEntry.value === void 0) throw failure3("TT_MIGRATION_VERIFY_FAILED", "v2 migration \u4E8C\u6B21\u8BFB\u53D6\u5931\u8D25");
+      const verifiedEnvelope = normalizeTodayTrendV2Envelope(primaryEntry.value);
+      if (verifiedEnvelope.revision !== storeRevision || !diffReadOnlyShadow(source, verifiedEnvelope.payload).equal) {
+        throw failure3("TT_MIGRATION_VERIFY_FAILED", "v2 migration \u4E8C\u6B21\u8BFB\u53D6\u5185\u5BB9\u4E0D\u4E00\u81F4");
+      }
+      const verifiedBackup = createMigrationBackup(source, verifiedEnvelope.payload, sourceMedium, storeRevision, "verified");
+      const verified = await compareAndSwap({
+        guardKey: TODAY_TREND_V2_AUTHORITY_KEY,
+        expectedGuard: next,
+        writes: [{ key: TODAY_TREND_V1_MIGRATION_BACKUP_KEY, value: verifiedBackup }]
+      });
+      if (!verified?.ok) throw failure3(verified?.reason === "CAS_CONFLICT" ? "TT_MIGRATION_VERIFY_CONFLICT" : "TT_V2_IDB_UNAVAILABLE", "migration backup \u9A8C\u8BC1\u72B6\u6001\u63D0\u4EA4\u5931\u8D25");
+      return { migrated: true, store: buildReadOnlyShadow(verifiedEnvelope.payload), v2Store: clone5(verifiedEnvelope.payload), storeRevision };
+    };
+    const restoreBackupInternal = async ({ v2Store, migrationBackup = null }, { expectedStoreRevision = null } = {}) => {
+      if (closed) throw failure3("TT_AUTHORITY_CLOSED", "v2 authority owner \u5DF2\u5173\u95ED");
+      const state = await readAuthority();
+      if (!state.available) throw failure3("TT_V2_IDB_UNAVAILABLE", "v2 authority \u5B58\u50A8\u4E0D\u53EF\u7528");
+      const previous = state.authority || initialAuthority();
+      if (expectedStoreRevision !== null && expectedStoreRevision !== previous.storeRevision) {
+        throw failure3("TT_STORE_REVISION_CONFLICT", "v2 store \u5DF2\u5728\u5907\u4EFD\u4E8B\u52A1\u540E\u53D1\u751F\u53D8\u5316\uFF0C\u62D2\u7EDD\u8986\u76D6");
+      }
+      if (state.authority?.ownerTabId) throw failure3("TT_AUTHORITY_BUSY", "\u6062\u590D v2 \u5907\u4EFD\u524D\u5FC5\u987B\u91CA\u653E\u5F53\u524D writer");
+      const nextRevision = previous.storeRevision + 1;
+      const restoredStore = rebaseTodayTrendV2Store(v2Store, nextRevision);
+      const scopeRevisionByStorageId = Object.fromEntries(
+        Object.keys(restoredStore.globalEnvelope.payload.scopes).map((storageId) => [storageId, nextRevision])
+      );
+      const next = normalizeTodayTrendV2Authority({
+        ...previous,
+        epoch: previous.epoch + 1,
+        authorityRevision: previous.authorityRevision + 1,
+        storeRevision: nextRevision,
+        scopeRevisionByStorageId,
+        ownerTabId: null,
+        readV2: true,
+        writeV2: false,
+        serveV2: previous.serveV2
+      });
+      const writes = [
+        { key: TODAY_TREND_V2_STORAGE_KEY, value: createTodayTrendV2Envelope(restoredStore, nextRevision) },
+        { key: TODAY_TREND_V2_AUTHORITY_KEY, value: next }
+      ];
+      if (migrationBackup !== null) {
+        const backup = normalizeTodayTrendMigrationBackup(migrationBackup);
+        writes.push({ key: TODAY_TREND_V1_MIGRATION_BACKUP_KEY, value: backup });
+      } else writes.push({ key: TODAY_TREND_V1_MIGRATION_BACKUP_KEY, delete: true });
+      const result = await compareAndSwap({
+        guardKey: TODAY_TREND_V2_AUTHORITY_KEY,
+        expectedGuard: state.authority === null ? void 0 : state.authority,
+        writes
+      });
+      if (!result?.ok) throw failure3(result?.reason === "CAS_CONFLICT" ? "TT_STORE_REVISION_CONFLICT" : "TT_V2_IDB_UNAVAILABLE", "v2 \u5907\u4EFD CAS \u6062\u590D\u5931\u8D25");
+      return { store: buildReadOnlyShadow(restoredStore), v2Store: restoredStore, storeRevision: nextRevision };
     };
     const acquireInternal = async ({ readV2 = false, writeV2 = false, serveV2 = false, initialStore } = {}) => {
-      if (closed) throw failure2("TT_AUTHORITY_CLOSED", "v2 authority owner \u5DF2\u5173\u95ED");
+      if (closed) throw failure3("TT_AUTHORITY_CLOSED", "v2 authority owner \u5DF2\u5173\u95ED");
       if (typeof readV2 !== "boolean" || typeof writeV2 !== "boolean" || typeof serveV2 !== "boolean") throw new TypeError("v2 \u5F00\u5173\u5FC5\u987B\u662F\u5E03\u5C14\u503C");
-      if ((writeV2 || serveV2) && !readV2) throw failure2("TT_V2_FLAGS_INVALID", "writeV2/serveV2 \u542F\u7528\u65F6 readV2 \u5FC5\u987B\u542F\u7528");
+      if ((writeV2 || serveV2) && !readV2) throw failure3("TT_V2_FLAGS_INVALID", "writeV2/serveV2 \u542F\u7528\u65F6 readV2 \u5FC5\u987B\u542F\u7528");
       const state = await readAuthority();
-      if (!state.available) throw failure2("TT_V2_IDB_UNAVAILABLE", "v2 authority \u5B58\u50A8\u4E0D\u53EF\u7528");
+      if (!state.available) throw failure3("TT_V2_IDB_UNAVAILABLE", "v2 authority \u5B58\u50A8\u4E0D\u53EF\u7528");
       const previous = state.authority;
       if (previous?.ownerTabId) {
         if (previous.ownerTabId !== tabId || !token || token.lost) {
-          throw failure2("TT_AUTHORITY_BUSY", "\u5176\u4ED6 authority owner \u5C1A\u672A\u663E\u5F0F\u91CA\u653E\u5199\u5165\u6743");
+          throw failure3("TT_AUTHORITY_BUSY", "\u5176\u4ED6 authority owner \u5C1A\u672A\u663E\u5F0F\u91CA\u653E\u5199\u5165\u6743");
         }
         if (previous.readV2 !== readV2 || previous.writeV2 !== writeV2 || previous.serveV2 !== serveV2) {
-          throw failure2("TT_AUTHORITY_BUSY", "\u5F53\u524D authority owner \u5FC5\u987B\u5148\u663E\u5F0F\u91CA\u653E\u518D\u53D8\u66F4\u5F00\u5173");
+          throw failure3("TT_AUTHORITY_BUSY", "\u5F53\u524D authority owner \u5FC5\u987B\u5148\u663E\u5F0F\u91CA\u653E\u518D\u53D8\u66F4\u5F00\u5173");
         }
         token.authority = previous;
         ensureChannel();
-        return clone4(previous);
+        return clone5(previous);
       }
       const base = previous || initialAuthority();
       const activating = readV2 && base.storeRevision === 0;
       if (activating && initialStore === void 0) {
-        throw failure2("TT_V2_INITIAL_STORE_REQUIRED", "\u9996\u6B21\u542F\u7528 v2 \u8BFB\u53D6\u5FC5\u987B\u63D0\u4F9B\u521D\u59CB store");
+        throw failure3("TT_V2_INITIAL_STORE_REQUIRED", "\u9996\u6B21\u542F\u7528 v2 \u8BFB\u53D6\u5FC5\u987B\u63D0\u4F9B\u521D\u59CB store");
       }
       const storeRevision = activating ? 1 : base.storeRevision;
       const next = normalizeTodayTrendV2Authority({
@@ -9878,38 +10311,41 @@ ${entry2.content}` : entry2.content;
         serveV2
       });
       const writes = [];
-      if (activating) writes.push({ key: TODAY_TREND_V2_STORAGE_KEY, value: createTodayTrendV2Envelope(initialStore, storeRevision) });
+      if (activating) writes.push({
+        key: TODAY_TREND_V2_STORAGE_KEY,
+        value: createTodayTrendV2Envelope(initialStore, storeRevision, next.scopeRevisionByStorageId)
+      });
       writes.push({ key: TODAY_TREND_V2_AUTHORITY_KEY, value: next });
       const result = await compareAndSwap({
         guardKey: TODAY_TREND_V2_AUTHORITY_KEY,
         expectedGuard: previous === null ? void 0 : previous,
         writes
       });
-      if (!result?.ok) throw failure2(result?.reason === "CAS_CONFLICT" ? "TT_AUTHORITY_CONFLICT" : "TT_V2_IDB_UNAVAILABLE", "v2 authority \u83B7\u53D6\u5931\u8D25");
+      if (!result?.ok) throw failure3(result?.reason === "CAS_CONFLICT" ? "TT_AUTHORITY_CONFLICT" : "TT_V2_IDB_UNAVAILABLE", "v2 authority \u83B7\u53D6\u5931\u8D25");
       token = { authority: next, lost: false };
       ensureChannel();
       broadcast(next);
-      return clone4(next);
+      return clone5(next);
     };
     const changedScopes = async (value, declaredScopeIds) => {
       if (declaredScopeIds !== void 0 && !Array.isArray(declaredScopeIds)) throw new TypeError("changedScopeIds \u5FC5\u987B\u662F\u5B57\u7B26\u4E32\u6570\u7EC4");
       const declared = declaredScopeIds === void 0 ? null : [...new Set(declaredScopeIds)];
       if (declared?.some((storageId) => typeof storageId !== "string" || !storageId)) throw new TypeError("changedScopeIds \u5FC5\u987B\u53EA\u5305\u542B\u975E\u7A7A\u5B57\u7B26\u4E32");
       const entry2 = await readEntry(TODAY_TREND_V2_STORAGE_KEY);
-      if (!entry2?.ok || entry2.value === void 0) throw failure2("TT_V2_IDB_UNAVAILABLE", "\u65E0\u6CD5\u8BFB\u53D6\u5F53\u524D v2 store \u4EE5\u8BA1\u7B97 scope revision");
-      const current = normalizeTodayTrendV2Envelope(entry2.value).payload;
+      if (!entry2?.ok || entry2.value === void 0) throw failure3("TT_V2_IDB_UNAVAILABLE", "\u65E0\u6CD5\u8BFB\u53D6\u5F53\u524D v2 store \u4EE5\u8BA1\u7B97 scope revision");
+      const current = buildReadOnlyShadow(normalizeTodayTrendV2Envelope(entry2.value).payload);
       const candidate = normalizeTodayTrendStore(value);
       const ids = /* @__PURE__ */ new Set([...Object.keys(current.scopes), ...Object.keys(candidate.scopes)]);
       const actual = [...ids].filter((storageId) => !structurallyEqual2(current.scopes[storageId], candidate.scopes[storageId])).sort();
       if (declared && !structurallyEqual2([...declared].sort(), actual)) {
-        throw failure2("TT_SCOPE_REVISION_MISMATCH", "\u58F0\u660E\u7684 scope \u53D8\u66F4\u8303\u56F4\u4E0E\u5B9E\u9645 candidate \u4E0D\u4E00\u81F4");
+        throw failure3("TT_SCOPE_REVISION_MISMATCH", "\u58F0\u660E\u7684 scope \u53D8\u66F4\u8303\u56F4\u4E0E\u5B9E\u9645 candidate \u4E0D\u4E00\u81F4");
       }
       return actual;
     };
     const saveInternal = async (value, { scopeId = null, changedScopeIds: changedScopeIds2, expectedStoreRevision = null, journalWrite = null } = {}) => {
-      if (closed) throw failure2("TT_AUTHORITY_CLOSED", "v2 authority owner \u5DF2\u5173\u95ED");
+      if (closed) throw failure3("TT_AUTHORITY_CLOSED", "v2 authority owner \u5DF2\u5173\u95ED");
       if (!token || token.lost || token.authority.ownerTabId !== tabId || !token.authority.writeV2) {
-        throw failure2("TT_AUTHORITY_LOST", "\u5F53\u524D\u6807\u7B7E\u4E0D\u5177\u5907 v2 \u5199\u5165\u6743\u5A01");
+        throw failure3("TT_AUTHORITY_LOST", "\u5F53\u524D\u6807\u7B7E\u4E0D\u5177\u5907 v2 \u5199\u5165\u6743\u5A01");
       }
       if (scopeId !== null && (typeof scopeId !== "string" || !scopeId)) throw new TypeError("scopeId \u5FC5\u987B\u662F\u975E\u7A7A\u5B57\u7B26\u4E32\u6216 null");
       if (journalWrite !== null && (!journalWrite || typeof journalWrite.key !== "string" || !journalWrite.key.startsWith(TODAY_TREND_V2_JOURNAL_PREFIX) || !Object.hasOwn(journalWrite, "value"))) {
@@ -9917,7 +10353,7 @@ ${entry2.content}` : entry2.content;
       }
       const previous = token.authority;
       if (expectedStoreRevision !== null && expectedStoreRevision !== previous.storeRevision) {
-        throw failure2("TT_STORE_REVISION_CONFLICT", "v2 store \u5DF2\u5728\u5F53\u524D\u63D0\u4EA4\u540E\u53D1\u751F\u53D8\u5316\uFF0C\u62D2\u7EDD\u8986\u76D6");
+        throw failure3("TT_STORE_REVISION_CONFLICT", "v2 store \u5DF2\u5728\u5F53\u524D\u63D0\u4EA4\u540E\u53D1\u751F\u53D8\u5316\uFF0C\u62D2\u7EDD\u8986\u76D6");
       }
       const affectedScopeIds = await changedScopes(value, changedScopeIds2 === void 0 && scopeId !== null ? [scopeId] : changedScopeIds2);
       const scopeRevisions = { ...previous.scopeRevisionByStorageId };
@@ -9928,12 +10364,12 @@ ${entry2.content}` : entry2.content;
         storeRevision: previous.storeRevision + 1,
         scopeRevisionByStorageId: scopeRevisions
       });
-      const envelope = createTodayTrendV2Envelope(value, next.storeRevision);
+      const envelope = createTodayTrendV2Envelope(value, next.storeRevision, next.scopeRevisionByStorageId);
       const writes = [
         { key: TODAY_TREND_V2_STORAGE_KEY, value: envelope },
         { key: TODAY_TREND_V2_AUTHORITY_KEY, value: next }
       ];
-      if (journalWrite) writes.push(clone4(journalWrite));
+      if (journalWrite) writes.push(clone5(journalWrite));
       const result = await compareAndSwap({
         guardKey: TODAY_TREND_V2_AUTHORITY_KEY,
         expectedGuard: previous,
@@ -9941,7 +10377,7 @@ ${entry2.content}` : entry2.content;
       });
       if (!result?.ok) {
         invalidateToken();
-        throw failure2(result?.reason === "CAS_CONFLICT" ? "TT_AUTHORITY_LOST" : "TT_V2_IDB_UNAVAILABLE", "v2 store CAS \u4FDD\u5B58\u5931\u8D25");
+        throw failure3(result?.reason === "CAS_CONFLICT" ? "TT_AUTHORITY_LOST" : "TT_V2_IDB_UNAVAILABLE", "v2 store CAS \u4FDD\u5B58\u5931\u8D25");
       }
       token.authority = next;
       try {
@@ -9950,14 +10386,15 @@ ${entry2.content}` : entry2.content;
       }
       broadcast(next);
       return {
-        store: clone4(envelope.payload),
+        store: buildReadOnlyShadow(envelope.payload),
+        v2Store: clone5(envelope.payload),
         storeRevision: next.storeRevision,
         authorityRevision: next.authorityRevision,
-        scopeRevisionByStorageId: clone4(next.scopeRevisionByStorageId)
+        scopeRevisionByStorageId: clone5(next.scopeRevisionByStorageId)
       };
     };
     const releaseInternal = async ({ readV2, serveV2 } = {}) => {
-      if (closed) throw failure2("TT_AUTHORITY_CLOSED", "v2 authority owner \u5DF2\u5173\u95ED");
+      if (closed) throw failure3("TT_AUTHORITY_CLOSED", "v2 authority owner \u5DF2\u5173\u95ED");
       if (!token) {
         closeChannel();
         return false;
@@ -9966,7 +10403,7 @@ ${entry2.content}` : entry2.content;
       const nextReadV2 = readV2 === void 0 ? previous.storeRevision > 0 : readV2;
       const nextServeV2 = serveV2 === void 0 ? false : serveV2;
       if (typeof nextReadV2 !== "boolean" || typeof nextServeV2 !== "boolean") throw new TypeError("release \u5F00\u5173\u5FC5\u987B\u662F\u5E03\u5C14\u503C");
-      if (nextServeV2 && !nextReadV2) throw failure2("TT_V2_FLAGS_INVALID", "serveV2 \u542F\u7528\u65F6 readV2 \u5FC5\u987B\u542F\u7528");
+      if (nextServeV2 && !nextReadV2) throw failure3("TT_V2_FLAGS_INVALID", "serveV2 \u542F\u7528\u65F6 readV2 \u5FC5\u987B\u542F\u7528");
       const next = normalizeTodayTrendV2Authority({
         ...previous,
         epoch: previous.epoch + 1,
@@ -9993,33 +10430,35 @@ ${entry2.content}` : entry2.content;
         if (current.available && current.authority?.ownerTabId === tabId) {
           token = { authority: current.authority, lost: false };
           ensureChannel();
-          throw failure2("TT_AUTHORITY_CONFLICT", "v2 authority \u91CA\u653E\u53D1\u751F\u5E76\u53D1\u51B2\u7A81\uFF0C\u8BF7\u91CD\u8BD5");
+          throw failure3("TT_AUTHORITY_CONFLICT", "v2 authority \u91CA\u653E\u53D1\u751F\u5E76\u53D1\u51B2\u7A81\uFF0C\u8BF7\u91CD\u8BD5");
         }
         invalidateToken();
         token = null;
         closeChannel();
-        throw failure2("TT_AUTHORITY_LOST", "v2 authority \u91CA\u653E\u65F6\u5DF2\u5931\u6743");
+        throw failure3("TT_AUTHORITY_LOST", "v2 authority \u91CA\u653E\u65F6\u5DF2\u5931\u6743");
       }
-      throw failure2("TT_V2_IDB_UNAVAILABLE", "v2 authority \u91CA\u653E\u5931\u8D25");
+      throw failure3("TT_V2_IDB_UNAVAILABLE", "v2 authority \u91CA\u653E\u5931\u8D25");
     };
     const acquire = (options2) => enqueueMutation(() => acquireInternal(options2));
     const save = (value, options2) => enqueueMutation(() => saveInternal(value, options2));
+    const migrate = (value, options2) => enqueueMutation(() => migrateInternal(value, options2));
+    const restoreBackup = (value, options2) => enqueueMutation(() => restoreBackupInternal(value, options2));
     const release = (options2) => enqueueMutation(() => releaseInternal(options2));
     const close = () => {
       if (pendingMutations > 0 || token && !token.lost) {
-        throw failure2("TT_AUTHORITY_BUSY", "\u5173\u95ED authority owner \u524D\u5FC5\u987B\u7B49\u5F85 mutation \u5B8C\u6210\u5E76\u663E\u5F0F release");
+        throw failure3("TT_AUTHORITY_BUSY", "\u5173\u95ED authority owner \u524D\u5FC5\u987B\u7B49\u5F85 mutation \u5B8C\u6210\u5E76\u663E\u5F0F release");
       }
       closed = true;
       invalidateToken();
       token = null;
       closeChannel();
     };
-    return { status, load, acquire, save, release, close };
+    return { status, load, readMigrationBackup, migrate, restoreBackup, acquire, save, release, close };
   }
 
   // src/today-trend-storage.js
   var TODAY_TREND_STORAGE_KEYS = Object.freeze({ primary: TODAY_TREND_STORAGE_KEY, fallback: TODAY_TREND_FALLBACK_KEY });
-  var clone5 = (value) => structuredClone(value);
+  var clone6 = (value) => structuredClone(value);
   function readFallback2(storage) {
     try {
       const raw = storage?.getItem(TODAY_TREND_FALLBACK_KEY);
@@ -10039,24 +10478,46 @@ ${entry2.content}` : entry2.content;
     v2Authority = createTodayTrendV2Authority({ storage }),
     journal = null
   } = {}) {
-    const load = async () => {
-      const v2 = await v2Authority.load();
-      if (v2.active) return normalizeTodayTrendStore(v2.store);
+    const readV1Source = async () => {
       try {
         const primary = await idbGet(TODAY_TREND_STORAGE_KEY);
-        if (primary !== null && primary !== void 0) return normalizeLoaded(primary);
+        if (primary !== null && primary !== void 0) return { store: normalizeLoaded(primary), sourceMedium: "idb" };
       } catch (error) {
         console.warn("[phone-mode] \u4ECA\u65E5\u98CE\u5411\u4E3B\u5B58\u50A8\u8BFB\u53D6\u5931\u8D25", error);
       }
       const fallback = readFallback2(storage);
       if (fallback !== null) {
         try {
-          return normalizeLoaded(fallback);
+          return { store: normalizeLoaded(fallback), sourceMedium: "localStorage" };
         } catch (error) {
           console.warn("[phone-mode] \u4ECA\u65E5\u98CE\u5411\u540E\u5907\u6570\u636E\u65E0\u6548", error);
         }
       }
-      return createEmptyTodayTrendStore();
+      return { store: createEmptyTodayTrendStore(), sourceMedium: "idb" };
+    };
+    const load = async () => {
+      const v2 = await v2Authority.load();
+      if (v2.active) {
+        const migrationBackup = typeof v2Authority.readMigrationBackup === "function" ? await v2Authority.readMigrationBackup() : null;
+        if (v2.authority?.serveV2 || v2.authority?.writeV2 || migrationBackup === null) {
+          return normalizeTodayTrendStore(v2.store);
+        }
+      }
+      const source = await readV1Source();
+      if (v2.active) {
+        if (JSON.stringify(normalizeTodayTrendStore(v2.store)) !== JSON.stringify(source.store)) {
+          const error = new Error("v2 \u53EA\u8BFB\u5F71\u5B50\u4E0E v1 \u670D\u52A1\u6570\u636E\u4E0D\u4E00\u81F4");
+          error.code = "TT_SHADOW_MISMATCH";
+          throw error;
+        }
+        return source.store;
+      }
+      return source.store;
+    };
+    const migrateToV2 = async () => {
+      if (typeof v2Authority.migrate !== "function") throw new TypeError("v2 authority \u4E0D\u652F\u6301\u8FC1\u79FB");
+      const source = await readV1Source();
+      return v2Authority.migrate(source.store, { sourceMedium: source.sourceMedium });
     };
     const save = async (value, options2 = {}) => {
       if (journal) {
@@ -10129,7 +10590,7 @@ ${entry2.content}` : entry2.content;
         error.code = "TT_SAGA_REQUIRES_V2";
         throw error;
       }
-      const snapshot = clone5(normalized);
+      const snapshot = clone6(normalized);
       if (await idbSet(TODAY_TREND_STORAGE_KEY, snapshot)) {
         try {
           storage?.removeItem(TODAY_TREND_FALLBACK_KEY);
@@ -10147,16 +10608,30 @@ ${entry2.content}` : entry2.content;
       }
     };
     const status = () => v2Authority.status();
-    return { load, save, status, v2Authority, journal };
+    const readMigrationBackup = () => v2Authority.readMigrationBackup?.() ?? null;
+    const captureV2Backup = async () => {
+      const state = await v2Authority.status();
+      if (!state.available) throw Object.assign(new Error("\u65E0\u6CD5\u786E\u8BA4 v2 authority \u72B6\u6001"), { code: "TT_V2_AUTHORITY_UNAVAILABLE" });
+      if (!state.authority?.readV2 || state.authority.storeRevision === 0) return null;
+      const loaded = await v2Authority.load();
+      return { v2Store: loaded.v2Store, migrationBackup: await readMigrationBackup(), storeRevision: state.authority.storeRevision };
+    };
+    const restoreV2Backup = (value, options2) => {
+      if (typeof v2Authority.restoreBackup !== "function") throw new TypeError("v2 authority \u4E0D\u652F\u6301\u5907\u4EFD\u6062\u590D");
+      return v2Authority.restoreBackup(value, options2);
+    };
+    return { load, save, status, migrateToV2, readMigrationBackup, captureV2Backup, restoreV2Backup, v2Authority, journal };
   }
   var defaultStorage = createTodayTrendStorage({ journal: todayTrendJournal });
   var loadTodayTrendStore = () => defaultStorage.load();
   var saveTodayTrendStore = (value, options2) => defaultStorage.save(value, options2);
   var getTodayTrendStorageStatus = () => defaultStorage.status();
+  var captureTodayTrendV2Backup = () => defaultStorage.captureV2Backup();
+  var restoreTodayTrendV2Backup = (value, options2) => defaultStorage.restoreV2Backup(value, options2);
   var todayTrendV2Authority = defaultStorage.v2Authority;
 
   // src/branch-scope-inheritance.js
-  var clone6 = (value) => structuredClone(value);
+  var clone7 = (value) => structuredClone(value);
   var own = (value, key) => !!value && typeof value === "object" && Object.hasOwn(value, key);
   var validText = (value) => typeof value === "string" && value.trim() ? value.trim() : "";
   var BRANCH_INTERACTIVE_STORE_KEY = "ST_INTERACTIVE_SCENES_V1";
@@ -10206,10 +10681,10 @@ ${entry2.content}` : entry2.content;
     return hasScopeData(scopePresence(targetId, stores, false));
   }
   function copyEntry(target, source, sourceId, targetId) {
-    if (own(source, sourceId)) target[targetId] = clone6(source[sourceId]);
+    if (own(source, sourceId)) target[targetId] = clone7(source[sourceId]);
   }
   function remapInteractiveScope(sourceScope, targetId) {
-    const scope = clone6(sourceScope);
+    const scope = clone7(sourceScope);
     const actorIdMap = /* @__PURE__ */ new Map();
     const actors = {};
     for (const [sourceActorId, actor] of Object.entries(scope.actors || {})) {
@@ -10231,12 +10706,12 @@ ${entry2.content}` : entry2.content;
     return scope;
   }
   function createCandidates(sourceId, targetId, stores) {
-    const next = clone6(stores);
+    const next = clone7(stores);
     for (const key of ["histories", "groupMeta", "pokeConfig", "characterBehavior", "bidirectional"]) {
       copyEntry(next[key], stores[key], sourceId, targetId);
     }
     for (const key of scopeBackgroundKeys(sourceId, stores.backgrounds)) {
-      next.backgrounds[`${targetId}${key.slice(sourceId.length)}`] = clone6(stores.backgrounds[key]);
+      next.backgrounds[`${targetId}${key.slice(sourceId.length)}`] = clone7(stores.backgrounds[key]);
     }
     if (own(stores.interactive.scopes, sourceId)) {
       next.interactive.scopes[targetId] = remapInteractiveScope(stores.interactive.scopes[sourceId], targetId);
@@ -10263,17 +10738,17 @@ ${entry2.content}` : entry2.content;
     return next;
   }
   function replaceEntry(target, source, key) {
-    if (own(source, key)) target[key] = clone6(source[key]);
+    if (own(source, key)) target[key] = clone7(source[key]);
     else delete target[key];
   }
   function mergeBranchScope(current, desired, targetId) {
-    const next = clone6(normalizeStores(current));
+    const next = clone7(normalizeStores(current));
     const source = normalizeStores(desired);
     for (const key of ["histories", "groupMeta", "pokeConfig", "characterBehavior", "bidirectional"]) {
       replaceEntry(next[key], source[key], targetId);
     }
     for (const key of scopeBackgroundKeys(targetId, next.backgrounds)) delete next.backgrounds[key];
-    for (const key of scopeBackgroundKeys(targetId, source.backgrounds)) next.backgrounds[key] = clone6(source.backgrounds[key]);
+    for (const key of scopeBackgroundKeys(targetId, source.backgrounds)) next.backgrounds[key] = clone7(source.backgrounds[key]);
     for (const key of ["interactive", "phoneUi", "calendar", "occasions", "cycles", "recipes", "outfits"]) {
       replaceEntry(next[key].scopes, source[key].scopes, targetId);
     }
@@ -10305,7 +10780,7 @@ ${entry2.content}` : entry2.content;
     return JSON.stringify(value) === JSON.stringify(other);
   }
   function replaceScope2(store, desired, targetId) {
-    const next = clone6(store || {});
+    const next = clone7(store || {});
     replaceEntry(next, desired || {}, targetId);
     return next;
   }
@@ -10415,7 +10890,7 @@ ${entry2.content}` : entry2.content;
     if (restoring && targetChanged) {
       throw new Error("\u5206\u652F\u7EE7\u627F\u8865\u507F\u53D6\u6D88\uFF1A\u76EE\u6807 scope \u5DF2\u5728\u4E8B\u52A1\u540E\u88AB\u66F4\u65B0 (\u793E\u533A\u9884\u7B97\u914D\u7F6E)");
     }
-    const merged = clone6(current);
+    const merged = clone7(current);
     replaceEntry(merged.communitySceneIdsByStorage, desired.communitySceneIdsByStorage, targetId);
     replaceEntry(merged.communitySelectionsByStorage, desired.communitySelectionsByStorage, targetId);
     try {
@@ -10484,7 +10959,7 @@ ${entry2.content}` : entry2.content;
     if (restoring && own(current.scopes, targetId) && !same(current.scopes[targetId], expected.scopes[targetId])) {
       throw new Error(`\u5206\u652F\u7EE7\u627F\u8865\u507F\u53D6\u6D88\uFF1A\u76EE\u6807 scope \u5DF2\u5728\u4E8B\u52A1\u540E\u88AB\u66F4\u65B0 (${label})`);
     }
-    const merged = clone6(current);
+    const merged = clone7(current);
     replaceEntry(merged.scopes, desired.scopes, targetId);
     return normalize(merged);
   }
@@ -10532,7 +11007,7 @@ ${entry2.content}` : entry2.content;
         if (restoring && own(current.scopes, targetId) && !same(current.scopes[targetId], expected.scopes[targetId])) {
           throw new Error("\u5206\u652F\u7EE7\u627F\u8865\u507F\u53D6\u6D88\uFF1A\u76EE\u6807 scope \u5DF2\u5728\u4E8B\u52A1\u540E\u88AB\u66F4\u65B0 (\u4E92\u52A8\u793E\u533A\u6570\u636E)");
         }
-        const merged = clone6(current);
+        const merged = clone7(current);
         replaceEntry(merged.scopes, desired.scopes, targetId);
         await saveInteractiveScenes(normalizeInteractiveStore(merged), { coordinated: true });
         return merged;
@@ -10557,9 +11032,9 @@ ${entry2.content}` : entry2.content;
         if (restoring && currentKeys.length && !currentMatchesExpected) {
           throw new Error("\u5206\u652F\u7EE7\u627F\u8865\u507F\u53D6\u6D88\uFF1A\u76EE\u6807 scope \u5DF2\u5728\u4E8B\u52A1\u540E\u88AB\u66F4\u65B0 (\u4F1A\u8BDD\u80CC\u666F)");
         }
-        const merged = clone6(current);
+        const merged = clone7(current);
         for (const key of currentKeys) delete merged[key];
-        for (const key of desiredKeys) merged[key] = clone6(desired[key]);
+        for (const key of desiredKeys) merged[key] = clone7(desired[key]);
         return saveBgLocal({ data: merged, coordinated: true });
       });
     } finally {
@@ -10599,7 +11074,7 @@ ${entry2.content}` : entry2.content;
         if (restoring && own(current.scopes, targetId) && !same(current.scopes[targetId], expected.scopes[targetId])) {
           throw new Error("\u5206\u652F\u7EE7\u627F\u8865\u507F\u53D6\u6D88\uFF1A\u76EE\u6807 scope \u5DF2\u5728\u4E8B\u52A1\u540E\u88AB\u66F4\u65B0 (\u4ECA\u65E5\u98CE\u5411)");
         }
-        const merged = clone6(current);
+        const merged = clone7(current);
         replaceEntry(merged.scopes, desired.scopes, targetId);
         const normalized = normalizeTodayTrendStore(merged);
         await saveTodayTrendStore(normalized, { scopeId: targetId });
@@ -10686,7 +11161,7 @@ ${entry2.content}` : entry2.content;
   }
   async function persistProductionStores(next, { branch } = {}) {
     const targetId = branch?.targetId;
-    const previous = clone6(await loadProductionStores());
+    const previous = clone7(await loadProductionStores());
     const apply = async (desired, expected) => {
       if (targetId) {
         globalThis.window.__pmHistories = await commitDirectoryScope("histories", desired.histories, expected.histories, targetId);
@@ -12507,26 +12982,26 @@ ${dataBlock("known_actor_names_data", roster, 1600)}`;
           setStore(snapshot);
           throw error;
         }
-        let failure3 = null;
+        let failure4 = null;
         try {
           await saveStore2(normalizeInteractiveStore(getStore()));
           await syncStore?.();
           if (isValid && !isValid()) throw cancelled2();
           return result;
         } catch (error) {
-          failure3 = error;
+          failure4 = error;
         }
         setStore(snapshot);
         try {
           await saveStore2(snapshot);
           await syncStore?.();
         } catch (compensationError) {
-          const combined = new Error(`${failure3.message}\uFF1B\u8865\u507F\u6301\u4E45\u5316\u6216\u540C\u6B65\u4E5F\u5931\u8D25\uFF1A${compensationError.message}`);
-          combined.cause = failure3;
+          const combined = new Error(`${failure4.message}\uFF1B\u8865\u507F\u6301\u4E45\u5316\u6216\u540C\u6B65\u4E5F\u5931\u8D25\uFF1A${compensationError.message}`);
+          combined.cause = failure4;
           combined.rollbackError = compensationError;
           throw combined;
         }
-        throw failure3;
+        throw failure4;
       });
       queue = operation;
       return operation;
@@ -15171,7 +15646,7 @@ ${antiFluff}`;
 
   // src/auto-poke-config.js
   var DEFAULT_AUTO_POKE = Object.freeze({ enabled: false, probability: 30, counter: 0 });
-  var clone7 = (value) => JSON.parse(JSON.stringify(value));
+  var clone8 = (value) => JSON.parse(JSON.stringify(value));
   var clampProbability = (raw) => {
     const num = Number(raw);
     if (!Number.isFinite(num)) return DEFAULT_AUTO_POKE.probability;
@@ -15200,7 +15675,7 @@ ${antiFluff}`;
     const storageConfig = window.__pmPokeConfig?.[storageId];
     const hadStorage = Boolean(storageConfig);
     const hadTarget = Boolean(storageConfig && Object.prototype.hasOwnProperty.call(storageConfig, targetKey));
-    const snapshot = hadTarget ? clone7(storageConfig[targetKey]) : null;
+    const snapshot = hadTarget ? clone8(storageConfig[targetKey]) : null;
     if (!window.__pmPokeConfig) window.__pmPokeConfig = {};
     if (!window.__pmPokeConfig[storageId]) window.__pmPokeConfig[storageId] = {};
     const previous = window.__pmPokeConfig[storageId][targetKey] || {};
@@ -16133,7 +16608,7 @@ ${antiFluff}`;
   }
 
   // src/phone-context-injection.js
-  var clone8 = (value) => JSON.parse(JSON.stringify(value));
+  var clone9 = (value) => JSON.parse(JSON.stringify(value));
   function injectionFailure2(result, phase) {
     const failedWrites = Number.isInteger(result?.failedWrites) && result.failedWrites > 0 ? result.failedWrites : 0;
     const failedKeys = Array.isArray(result?.failedKeys) ? result.failedKeys : [];
@@ -16167,8 +16642,8 @@ ${antiFluff}`;
         const result = await applyInjection();
         const compensationError = injectionFailure2(result, "\u8865\u507F");
         if (compensationError) throw compensationError;
-      } catch (failure3) {
-        rollbackError = failure3;
+      } catch (failure4) {
+        rollbackError = failure4;
       }
       if (!rollbackError) throw error;
       const combined = new Error(`${error.message || "\u4E0A\u4E0B\u6587\u6CE8\u5165\u8BBE\u7F6E\u4FDD\u5B58\u5931\u8D25"}\uFF1B\u539F\u914D\u7F6E\u56DE\u6EDA\u4E5F\u5931\u8D25\uFF0C\u8BF7\u52FF\u5237\u65B0\u5E76\u7ACB\u5373\u5BFC\u51FA\u5907\u4EFD\uFF1A${rollbackError.message}`);
@@ -16244,7 +16719,7 @@ ${antiFluff}`;
     };
     const toggleTargetInjection = async (target) => {
       if (!target) return false;
-      const snapshot = clone8(window.__pmBidirectional);
+      const snapshot = clone9(window.__pmBidirectional);
       const selected = new Set(window.__pmBidirectional[target.storageId] || []);
       if (selected.has(target.targetKey)) selected.delete(target.targetKey);
       else selected.add(target.targetKey);
@@ -16331,7 +16806,7 @@ ${antiFluff}`;
       if (injectionSettingsBusy) return false;
       injectionSettingsBusy = true;
       setInjectionSettingsBusy(true, "save");
-      const snapshot = clone8(window.__pmInjectionConfig);
+      const snapshot = clone9(window.__pmInjectionConfig);
       window.__pmInjectionConfig = normalizeInjectionConfig({
         ...snapshot,
         phone: {
@@ -16379,7 +16854,7 @@ ${antiFluff}`;
   }
 
   // src/phone-directory.js
-  var clone9 = (value) => JSON.parse(JSON.stringify(value));
+  var clone10 = (value) => JSON.parse(JSON.stringify(value));
   function injectionFailure3(result, phase, subject = "\u7FA4\u804A\u8BBE\u7F6E") {
     const failedWrites = Number.isInteger(result?.failedWrites) && result.failedWrites > 0 ? result.failedWrites : 0;
     const failedKeys = Array.isArray(result?.failedKeys) ? result.failedKeys : [];
@@ -16394,7 +16869,7 @@ ${antiFluff}`;
     return {
       activeStorageId: state.activeStorageId,
       currentPersona: state.currentPersona,
-      conversationHistory: clone9(state.conversationHistory),
+      conversationHistory: clone10(state.conversationHistory),
       isGroupChat: state.isGroupChat,
       currentGroupKey: state.currentGroupKey,
       groupMembers: state.groupMembers.slice(),
@@ -17051,11 +17526,11 @@ ${antiFluff}`;
         let snapshots = null;
         try {
           snapshots = {
-            groupMeta: clone9(window.__pmGroupMeta),
-            histories: clone9(window.__pmHistories),
-            bidirectional: clone9(window.__pmBidirectional),
-            poke: clone9(window.__pmPokeConfig),
-            backgrounds: clone9(window.__pmBgLocal)
+            groupMeta: clone10(window.__pmGroupMeta),
+            histories: clone10(window.__pmHistories),
+            bidirectional: clone10(window.__pmBidirectional),
+            poke: clone10(window.__pmPokeConfig),
+            backgrounds: clone10(window.__pmBgLocal)
           };
           if (window.__pmGroupMeta[id2]) delete window.__pmGroupMeta[id2][key];
           if (window.__pmHistories[id2]) delete window.__pmHistories[id2][key];
@@ -17115,10 +17590,10 @@ ${antiFluff}`;
         let snapshots = null;
         try {
           snapshots = {
-            histories: clone9(window.__pmHistories),
-            bidirectional: clone9(window.__pmBidirectional),
-            poke: clone9(window.__pmPokeConfig),
-            backgrounds: clone9(window.__pmBgLocal)
+            histories: clone10(window.__pmHistories),
+            bidirectional: clone10(window.__pmBidirectional),
+            poke: clone10(window.__pmPokeConfig),
+            backgrounds: clone10(window.__pmBgLocal)
           };
           if (window.__pmHistories[id2]) delete window.__pmHistories[id2][name];
           const arr = window.__pmBidirectional[id2] || [], idx = arr.indexOf(name);
@@ -17488,9 +17963,9 @@ ${kept.join("\n")}`;
 
   // src/permissions.js
   var UNKNOWN_STORAGE_ID = "sms_unknown__default";
-  var plainRecord9 = (value) => value && typeof value === "object" && !Array.isArray(value) && (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null);
+  var plainRecord10 = (value) => value && typeof value === "object" && !Array.isArray(value) && (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null);
   function ownData(object, key) {
-    if (!plainRecord9(object)) return { found: false, invalid: true, value: void 0 };
+    if (!plainRecord10(object)) return { found: false, invalid: true, value: void 0 };
     const descriptor = Object.getOwnPropertyDescriptor(object, key);
     if (!descriptor) return { found: false, invalid: false, value: void 0 };
     if (!Object.hasOwn(descriptor, "value")) return { found: false, invalid: true, value: void 0 };
@@ -17514,7 +17989,7 @@ ${kept.join("\n")}`;
     return entry2.invalid ? { valid: false, value: void 0 } : { valid: true, value: entry2.value };
   }
   function snapshotGroup(group) {
-    if (!plainRecord9(group)) return { valid: false, value: null };
+    if (!plainRecord10(group)) return { valid: false, value: null };
     const name = optionalData(group, "name");
     const membersEntry = ownData(group, "members");
     if (!name.valid || membersEntry.invalid || !membersEntry.found) {
@@ -17535,7 +18010,7 @@ ${kept.join("\n")}`;
   function getGroupMembers({ currentStorageId, currentConversationKey, groupsByStorage } = {}) {
     if (!isValidContextStorageId(currentStorageId) || typeof currentConversationKey !== "string" || !currentConversationKey.startsWith("__group_")) return [];
     const groupsEntry = ownData(groupsByStorage, currentStorageId);
-    if (groupsEntry.invalid || !groupsEntry.found || !plainRecord9(groupsEntry.value)) return [];
+    if (groupsEntry.invalid || !groupsEntry.found || !plainRecord10(groupsEntry.value)) return [];
     const groupEntry = ownData(groupsEntry.value, currentConversationKey);
     if (groupEntry.invalid || !groupEntry.found) return [];
     const group = snapshotGroup(groupEntry.value);
@@ -17555,7 +18030,7 @@ ${kept.join("\n")}`;
     if (!sceneEntry.found) {
       return { valid: true, value: Object.freeze({ mode: "all", postIds: Object.freeze([]) }) };
     }
-    if (!plainRecord9(sceneEntry.value)) return { valid: false, value: null };
+    if (!plainRecord10(sceneEntry.value)) return { valid: false, value: null };
     const modeEntry = ownData(sceneEntry.value, "mode");
     const postIdsEntry = ownData(sceneEntry.value, "postIds");
     if (modeEntry.invalid || !modeEntry.found || postIdsEntry.invalid) return { valid: false, value: null };
@@ -17579,7 +18054,7 @@ ${kept.join("\n")}`;
   }
   function snapshotQuote(value) {
     if (value === void 0) return { valid: true, value: void 0 };
-    if (!plainRecord9(value)) return { valid: false, value: void 0 };
+    if (!plainRecord10(value)) return { valid: false, value: void 0 };
     const messageId = optionalData(value, "messageId");
     const bubbleId = optionalData(value, "bubbleId");
     const sender = optionalData(value, "sender");
@@ -17606,7 +18081,7 @@ ${kept.join("\n")}`;
     const snapshot = [];
     for (let index = 0; index < history.value.length; index += 1) {
       const message = history.value[index];
-      if (!plainRecord9(message)) return { valid: false, value: [] };
+      if (!plainRecord10(message)) return { valid: false, value: [] };
       const role = optionalData(message, "role");
       const content = optionalData(message, "content");
       const directorNote = optionalData(message, "directorNote");
@@ -17645,13 +18120,13 @@ ${kept.join("\n")}`;
       const historiesEntry = ownData(historiesByStorage, currentStorageId);
       const groupsEntry = ownData(groupsByStorage, currentStorageId);
       if (historiesEntry.invalid) return { allowed: false, reason: "invalid-history-store", sources: [] };
-      if (!historiesEntry.found || !plainRecord9(historiesEntry.value)) {
+      if (!historiesEntry.found || !plainRecord10(historiesEntry.value)) {
         return { allowed: false, reason: "invalid-history-bucket", sources: [] };
       }
-      if (groupsEntry.invalid || groupsEntry.found && !plainRecord9(groupsEntry.value)) {
+      if (groupsEntry.invalid || groupsEntry.found && !plainRecord10(groupsEntry.value)) {
         return { allowed: false, reason: "invalid-group-bucket", sources: [] };
       }
-      const groups = groupsEntry.found && plainRecord9(groupsEntry.value) ? groupsEntry.value : {};
+      const groups = groupsEntry.found && plainRecord10(groupsEntry.value) ? groupsEntry.value : {};
       const sources = [];
       const seen = /* @__PURE__ */ new Set();
       for (let index = 0; index < selected.value.length; index += 1) {
@@ -17704,18 +18179,18 @@ ${kept.join("\n")}`;
       if (!sceneIds.valid) return { allowed: false, reason: "invalid-selection", sources: [] };
       const versionEntry = ownData(store, "version");
       const scopesEntry = ownData(store, "scopes");
-      if (versionEntry.invalid || scopesEntry.invalid || !versionEntry.found || versionEntry.value !== INTERACTIVE_STORE_VERSION || !scopesEntry.found || !plainRecord9(scopesEntry.value)) {
+      if (versionEntry.invalid || scopesEntry.invalid || !versionEntry.found || versionEntry.value !== INTERACTIVE_STORE_VERSION || !scopesEntry.found || !plainRecord10(scopesEntry.value)) {
         return { allowed: false, reason: "invalid-store-version", sources: [] };
       }
       const scopeEntry = ownData(scopesEntry.value, currentStorageId);
       if (scopeEntry.invalid) return { allowed: false, reason: "invalid-scope", sources: [] };
-      if (!scopeEntry.found || !plainRecord9(scopeEntry.value)) return { allowed: true, reason: "missing-scope", sources: [] };
+      if (!scopeEntry.found || !plainRecord10(scopeEntry.value)) return { allowed: true, reason: "missing-scope", sources: [] };
       const scenesEntry = ownData(scopeEntry.value, "scenes");
       const actorsEntry = ownData(scopeEntry.value, "actors");
-      if (scenesEntry.invalid || !scenesEntry.found || !plainRecord9(scenesEntry.value)) {
+      if (scenesEntry.invalid || !scenesEntry.found || !plainRecord10(scenesEntry.value)) {
         return { allowed: false, reason: "invalid-scenes", sources: [] };
       }
-      if (actorsEntry.invalid || !actorsEntry.found || !plainRecord9(actorsEntry.value)) {
+      if (actorsEntry.invalid || !actorsEntry.found || !plainRecord10(actorsEntry.value)) {
         return { allowed: false, reason: "invalid-actors", sources: [] };
       }
       const sources = [];
@@ -17748,7 +18223,7 @@ ${kept.join("\n")}`;
         const actors = {};
         for (const actorId of actorIds) {
           const actorEntry = ownData(actorsEntry.value, actorId);
-          if (actorEntry.invalid || !actorEntry.found || !plainRecord9(actorEntry.value)) {
+          if (actorEntry.invalid || !actorEntry.found || !plainRecord10(actorEntry.value)) {
             return { allowed: false, reason: "invalid-actor", sources: [] };
           }
           const displayNameEntry = ownData(actorEntry.value, "displayName");
@@ -20237,7 +20712,7 @@ ${lines}`;
   }
 
   // src/settings-api-controller.js
-  function createApiRequestController({ runtime, normalizeApiUrls: normalizeApiUrls2, fetchWithCorsProxy: fetchWithCorsProxy2, extractAiResponseContent: extractAiResponseContent2, normalizeIndependentApiTemperature: normalizeIndependentApiTemperature2, defaultTemperature, apiDraftMode, clone: clone14, saveProfiles: saveProfiles2, addOrUpdateProfile: addOrUpdateProfile2, addNote, showApi, showModelPicker: showModelPicker2, escapeAttr: escapeAttr2, escapeHtml: escapeHtml2 }) {
+  function createApiRequestController({ runtime, normalizeApiUrls: normalizeApiUrls2, fetchWithCorsProxy: fetchWithCorsProxy2, extractAiResponseContent: extractAiResponseContent2, normalizeIndependentApiTemperature: normalizeIndependentApiTemperature2, defaultTemperature, apiDraftMode, clone: clone15, saveProfiles: saveProfiles2, addOrUpdateProfile: addOrUpdateProfile2, addNote, showApi, showModelPicker: showModelPicker2, escapeAttr: escapeAttr2, escapeHtml: escapeHtml2 }) {
     const setStatus = (message, color) => {
       const status = document.getElementById("pm-api-status");
       if (status) {
@@ -20281,7 +20756,7 @@ ${lines}`;
       }
     };
     const deleteProfile = (idx) => {
-      const previous = clone14(window.__pmProfiles);
+      const previous = clone15(window.__pmProfiles);
       window.__pmProfiles.splice(idx, 1);
       if (!saveProfiles2()) {
         window.__pmProfiles = previous;
@@ -20316,7 +20791,7 @@ ${lines}`;
         return false;
       }
       const temperature = useIndependent ? parsedTemperature : normalizeIndependentApiTemperature2(temperatureText);
-      const previous = clone14(window.__pmConfig), candidate = { apiUrl, apiKey, model, temperature, useIndependent };
+      const previous = clone15(window.__pmConfig), candidate = { apiUrl, apiKey, model, temperature, useIndependent };
       window.__pmConfig = candidate;
       try {
         localStorage.setItem("ST_SMS_CONFIG", JSON.stringify(candidate));
@@ -20427,7 +20902,7 @@ ${lines}`;
   }
 
   // src/settings-appearance-controller.js
-  function createAppearanceController({ THEME_PRESETS: THEME_PRESETS2, applyTheme, clone: clone14, saveTheme: saveTheme2, renderLookSettings: renderLookSettings2, renderSettingsModal: renderSettingsModal2, makeOverlay, escapeAttr: escapeAttr2, safeJS: safeJS2, getCurrentPersona, getStorageId: getStorageId2, backgroundSettings }) {
+  function createAppearanceController({ THEME_PRESETS: THEME_PRESETS2, applyTheme, clone: clone15, saveTheme: saveTheme2, renderLookSettings: renderLookSettings2, renderSettingsModal: renderSettingsModal2, makeOverlay, escapeAttr: escapeAttr2, safeJS: safeJS2, getCurrentPersona, getStorageId: getStorageId2, backgroundSettings }) {
     const syncControls = () => {
       const theme = window.__pmTheme;
       document.querySelectorAll(".pm-theme-chip").forEach((element) => {
@@ -20454,7 +20929,7 @@ ${lines}`;
       if (customAccent) customAccent.value = accent;
     };
     const mutateTheme = (mutate) => {
-      const previous = clone14(window.__pmTheme);
+      const previous = clone15(window.__pmTheme);
       mutate();
       if (saveTheme2()) {
         applyTheme();
@@ -20567,7 +21042,7 @@ ${lines}`;
     const exportData = async () => {
       const snapshot = await capture();
       const data = {
-        schemaVersion: 15,
+        schemaVersion: 16,
         histories: snapshot.histories,
         config: snapshot.config,
         theme: legacyBackupTheme2(snapshot.theme),
@@ -20596,6 +21071,7 @@ ${lines}`;
         calendarRecipes: snapshot.calendarRecipes,
         calendarOutfits: snapshot.calendarOutfits,
         todayTrend: snapshot.todayTrend,
+        todayTrendV2: snapshot.todayTrendV2,
         branchLineage: snapshot.branchLineage
       };
       const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: "application/json" }));
@@ -20688,8 +21164,8 @@ ${error.message}`);
           reloadCalendarStore?.();
           reloadTodayTrendStore?.();
           await requireInjectionSuccess(() => applyBidirectionalInjection(), "\u6062\u590D\u539F\u6570\u636E\u540E\u7684\u6CE8\u5165\u5237\u65B0\u5931\u8D25");
-        } catch (failure3) {
-          rollbackError = failure3;
+        } catch (failure4) {
+          rollbackError = failure4;
         }
         if (rollbackError) alert(`\u6E05\u7406\u5931\u8D25\uFF0C\u539F\u6570\u636E\u56DE\u6EDA\u4E5F\u5931\u8D25\u3002\u8BF7\u52FF\u5237\u65B0\uFF0C\u5E76\u7ACB\u5373\u5BFC\u51FA\u5F53\u524D\u5185\u5B58\u5907\u4EFD\u3002
 ${error.message}\uFF1B${rollbackError.message}`);
@@ -20725,7 +21201,7 @@ ${error.message}`);
     getCurrentPersona,
     getStorageId: getStorageId2,
     loadBgSettings: loadBgSettings2,
-    clone: clone14,
+    clone: clone15,
     openCropper: openCropper2,
     saveBgGlobal: saveBgGlobal2,
     saveBgLocal: saveBgLocal2,
@@ -20739,12 +21215,12 @@ ${error.message}`);
       const operation = backgroundMutation.catch(() => {
       }).then(async () => {
         const persisted = await runBackgroundTransaction({
-          capture: () => isDesktop ? window.__pmDesktopBg || "" : isGlobal ? window.__pmBgGlobal || "" : clone14(window.__pmBgLocal || {}),
+          capture: () => isDesktop ? window.__pmDesktopBg || "" : isGlobal ? window.__pmBgGlobal || "" : clone15(window.__pmBgLocal || {}),
           mutate,
           restore: (snapshot) => {
             if (isDesktop) window.__pmDesktopBg = snapshot;
             else if (isGlobal) window.__pmBgGlobal = snapshot;
-            else window.__pmBgLocal = clone14(snapshot);
+            else window.__pmBgLocal = clone15(snapshot);
           },
           persist: isDesktop ? saveDesktopBg2 : isGlobal ? saveBgGlobal2 : saveBgLocal2
         });
@@ -21756,7 +22232,7 @@ ${error.message}`);
   }
 
   // src/settings-backup.js
-  var clone10 = (value) => JSON.parse(JSON.stringify(value));
+  var clone11 = (value) => JSON.parse(JSON.stringify(value));
   function structurallyEqual4(left, right) {
     if (Object.is(left, right)) return true;
     if (Array.isArray(left) || Array.isArray(right)) {
@@ -21865,17 +22341,17 @@ ${error.message}`);
       const interactiveScenes = normalizeInteractiveStore(await loadInteractiveScenes());
       const branchLineage = await loadBranchLineage();
       return {
-        histories: clone10(window.__pmHistories || {}),
-        config: clone10(window.__pmConfig || {}),
-        theme: clone10(window.__pmTheme || {}),
-        profiles: clone10(window.__pmProfiles || []),
-        groupMeta: clone10(window.__pmGroupMeta || {}),
-        pokeConfig: clone10(window.__pmPokeConfig || {}),
-        bidirectional: clone10(window.__pmBidirectional || {}),
+        histories: clone11(window.__pmHistories || {}),
+        config: clone11(window.__pmConfig || {}),
+        theme: clone11(window.__pmTheme || {}),
+        profiles: clone11(window.__pmProfiles || []),
+        groupMeta: clone11(window.__pmGroupMeta || {}),
+        pokeConfig: clone11(window.__pmPokeConfig || {}),
+        bidirectional: clone11(window.__pmBidirectional || {}),
         injectionConfig: normalizeInjectionConfig(window.__pmInjectionConfig),
         budgetConfig: normalizeBudgetConfig(window.__pmBudgetConfig),
         emojis: cloneEmojiLibrary(window.__pmEmojis),
-        characterBehavior: clone10(window.__pmCharacterBehavior || {}),
+        characterBehavior: clone11(window.__pmCharacterBehavior || {}),
         wordyLimit: !!window.__pmWordyLimit,
         galBubbleEnabled: window.__pmGalBubbleEnabled === true,
         worldBookConfig: normalizeWorldBookConfig(window.__pmWorldBookConfig),
@@ -21893,34 +22369,35 @@ ${error.message}`);
         calendarRecipes: loadCalendarRecipes(),
         calendarOutfits: loadCalendarOutfits(),
         todayTrend: normalizeTodayTrendStore(await loadTodayTrendStore()),
-        branchLineage: clone10(branchLineage)
+        todayTrendV2: await (deps.captureTodayTrendV2Backup || captureTodayTrendV2Backup)(),
+        branchLineage: clone11(branchLineage)
       };
     };
     const apply = async (state) => {
       const interactiveScenes = normalizeInteractiveStore(state.interactiveScenes);
       const phoneUiState = normalizePhoneUiState(state.phoneUiState, interactiveScenes);
       const ambientStatus = normalizeAmbientStatus(state.ambientStatus ?? { enabled: state.theme?.ambientStatusEnabled });
-      window.__pmHistories = clone10(state.histories || {});
-      window.__pmConfig = clone10(state.config || {});
-      window.__pmTheme = clone10(state.theme || {});
+      window.__pmHistories = clone11(state.histories || {});
+      window.__pmConfig = clone11(state.config || {});
+      window.__pmTheme = clone11(state.theme || {});
       window.__pmTheme.ambientStatusEnabled = ambientStatus.enabled;
-      window.__pmProfiles = clone10(state.profiles || []);
-      window.__pmGroupMeta = clone10(state.groupMeta || {});
-      window.__pmPokeConfig = clone10(state.pokeConfig || {});
-      window.__pmBidirectional = clone10(state.bidirectional || {});
+      window.__pmProfiles = clone11(state.profiles || []);
+      window.__pmGroupMeta = clone11(state.groupMeta || {});
+      window.__pmPokeConfig = clone11(state.pokeConfig || {});
+      window.__pmBidirectional = clone11(state.bidirectional || {});
       window.__pmInjectionConfig = normalizeInjectionConfig(state.injectionConfig);
       window.__pmBudgetConfig = normalizeBudgetConfig(state.budgetConfig);
       window.__pmEmojis = cloneEmojiLibrary(state.emojis);
-      window.__pmCharacterBehavior = clone10(state.characterBehavior || {});
+      window.__pmCharacterBehavior = clone11(state.characterBehavior || {});
       window.__pmWordyLimit = !!state.wordyLimit;
       window.__pmGalBubbleEnabled = state.galBubbleEnabled === true;
       window.__pmDesktopBg = typeof state.desktopBg === "string" ? state.desktopBg : "";
       window.__pmWorldBookConfig = normalizeWorldBookConfig(state.worldBookConfig);
       window.__pmBgGlobal = typeof state.bgGlobal === "string" ? state.bgGlobal : "";
-      window.__pmBgLocal = clone10(state.bgLocal || {});
+      window.__pmBgLocal = clone11(state.bgLocal || {});
       window.__pmPhoneUiState = phoneUiState;
       window.__pmTodayTrend = normalizeTodayTrendStore(state.todayTrend);
-      window.__pmBranchLineage = clone10(state.branchLineage || {});
+      window.__pmBranchLineage = clone11(state.branchLineage || {});
       return {
         ...state,
         interactiveScenes,
@@ -21934,7 +22411,8 @@ ${error.message}`);
         calendarRecipes: normalizeRecipeStore(state.calendarRecipes),
         calendarOutfits: normalizeOutfitStore(state.calendarOutfits),
         todayTrend: normalizeTodayTrendStore(state.todayTrend),
-        branchLineage: clone10(state.branchLineage || {})
+        todayTrendV2: clone11(state.todayTrendV2 ?? null),
+        branchLineage: clone11(state.branchLineage || {})
       };
     };
     const persist = async (state, phase = "apply", applied = null) => {
@@ -21963,11 +22441,16 @@ ${error.message}`);
       }
       let todayTrendReceipt;
       try {
-        todayTrendReceipt = await (deps.saveTodayTrendStore || saveTodayTrendStore)(state.todayTrend, {
-          allowAuthorityAcquire: true,
-          returnReceipt: true,
-          expectedStoreRevision: phase === "rollback" && Number.isSafeInteger(applied?.todayTrendReceipt?.storeRevision) ? applied.todayTrendReceipt.storeRevision : null
-        });
+        const expectedStoreRevision = phase === "rollback" && Number.isSafeInteger(applied?.todayTrendReceipt?.storeRevision) ? applied.todayTrendReceipt.storeRevision : null;
+        if (state.todayTrendV2) {
+          todayTrendReceipt = await (deps.restoreTodayTrendV2Backup || restoreTodayTrendV2Backup)(state.todayTrendV2, { expectedStoreRevision });
+        } else {
+          todayTrendReceipt = await (deps.saveTodayTrendStore || saveTodayTrendStore)(state.todayTrend, {
+            allowAuthorityAcquire: true,
+            returnReceipt: true,
+            expectedStoreRevision
+          });
+        }
       } catch (error) {
         if (error?.committedReceipt) {
           error.partialApplied = { ...error.partialApplied || {}, todayTrendReceipt: error.committedReceipt };
@@ -22001,14 +22484,14 @@ ${error.message}`);
   }
 
   // src/settings-backup-validate.js
-  var clone11 = (value) => JSON.parse(JSON.stringify(value));
+  var clone12 = (value) => JSON.parse(JSON.stringify(value));
   var objectValue = (value, field) => {
     if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`\u5907\u4EFD\u5B57\u6BB5 ${field} \u5FC5\u987B\u662F\u5BF9\u8C61`);
-    return clone11(value);
+    return clone12(value);
   };
   var arrayValue = (value, field) => {
     if (!Array.isArray(value)) throw new Error(`\u5907\u4EFD\u5B57\u6BB5 ${field} \u5FC5\u987B\u662F\u6570\u7EC4`);
-    return clone11(value);
+    return clone12(value);
   };
   var legacyBackupTheme = (value) => {
     const theme = objectValue(value || {}, "theme");
@@ -22255,12 +22738,24 @@ ${error.message}`);
     }
     return normalized;
   };
+  var assertTodayTrendV2Backup = (value) => {
+    if (value === null) return null;
+    const backup = objectValue(value, "todayTrendV2");
+    const normalized = {
+      v2Store: normalizeTodayTrendV2Store(backup.v2Store),
+      migrationBackup: backup.migrationBackup === null ? null : normalizeTodayTrendMigrationBackup(backup.migrationBackup),
+      storeRevision: backup.storeRevision
+    };
+    const v2StoreRevision = normalized.v2Store.globalEnvelope.revision;
+    if (!Number.isSafeInteger(normalized.storeRevision) || normalized.storeRevision < 1 || normalized.storeRevision !== v2StoreRevision || JSON.stringify(backup) !== JSON.stringify(normalized)) throw new Error("\u5907\u4EFD\u5B57\u6BB5 todayTrendV2 \u5185\u5BB9\u65E0\u6548\u6216\u4E0D\u662F\u89C4\u8303\u683C\u5F0F");
+    return normalized;
+  };
   function parseBackupData(data, current) {
     if (!data || typeof data !== "object" || Array.isArray(data)) throw new Error("\u5907\u4EFD\u6839\u8282\u70B9\u5FC5\u987B\u662F\u5BF9\u8C61");
     const version = data.schemaVersion === void 0 ? 1 : data.schemaVersion;
     if (!Number.isInteger(version) || version < 1) throw new Error("\u5907\u4EFD\u7248\u672C\u65E0\u6548");
-    if (version > 15) throw new Error(`\u5907\u4EFD\u7248\u672C ${version} \u9AD8\u4E8E\u5F53\u524D\u652F\u6301\u7248\u672C 15`);
-    const result = clone11(current);
+    if (version > 16) throw new Error(`\u5907\u4EFD\u7248\u672C ${version} \u9AD8\u4E8E\u5F53\u524D\u652F\u6301\u7248\u672C 16`);
+    const result = clone12(current);
     if (Object.hasOwn(data, "histories")) result.histories = objectValue(data.histories, "histories");
     if (Object.hasOwn(data, "config")) result.config = objectValue(data.config, "config");
     if (Object.hasOwn(data, "theme")) {
@@ -22324,11 +22819,15 @@ ${error.message}`);
     } else {
       result.todayTrend = createEmptyTodayTrendStore();
     }
+    if (version >= 16) {
+      if (!Object.hasOwn(data, "todayTrendV2")) throw new Error("\u5907\u4EFD\u7248\u672C 16 \u7F3A\u5C11 todayTrendV2");
+      result.todayTrendV2 = assertTodayTrendV2Backup(data.todayTrendV2);
+    } else result.todayTrendV2 = null;
     return result;
   }
 
   // src/settings-ui.js
-  var clone12 = (value) => JSON.parse(JSON.stringify(value));
+  var clone13 = (value) => JSON.parse(JSON.stringify(value));
   function installSettingsUi(deps) {
     const { makeOverlay, applyTheme, applyBackground, addNote, getCurrentPersona, getStorageId: getStorageId2, runtime, closePhone, applyBidirectionalInjection, clearBidirectionalInjection } = deps;
     const { capture: captureBackupState, apply: applyBackupState, complete: completeBackupState, persist: persistBackupState } = createBackupStateHandlers(deps);
@@ -22354,7 +22853,7 @@ ${error.message}`);
       normalizeIndependentApiTemperature,
       defaultTemperature: DEFAULT_INDEPENDENT_API_TEMPERATURE,
       apiDraftMode,
-      clone: clone12,
+      clone: clone13,
       saveProfiles,
       addOrUpdateProfile,
       addNote,
@@ -22377,7 +22876,7 @@ ${error.message}`);
       getCurrentPersona,
       getStorageId: getStorageId2,
       loadBgSettings,
-      clone: clone12,
+      clone: clone13,
       openCropper,
       saveBgGlobal,
       saveBgLocal,
@@ -22435,7 +22934,8 @@ ${error.message}`);
         phoneUiState: normalizePhoneUiState(null),
         ambientStatus: normalizeAmbientStatus(),
         ...createEmptyCalendarBackupFields(),
-        todayTrend: createEmptyTodayTrendStore()
+        todayTrend: createEmptyTodayTrendStore(),
+        todayTrendV2: null
       }),
       afterApplyEmpty: () => {
         window.__pmBudgetConfig = normalizeBudgetConfig();
@@ -22444,7 +22944,7 @@ ${error.message}`);
     const appearanceSettings = createAppearanceController({
       THEME_PRESETS,
       applyTheme,
-      clone: clone12,
+      clone: clone13,
       saveTheme,
       renderLookSettings,
       renderSettingsModal,
@@ -22519,7 +23019,7 @@ ${error.message}`);
   }
 
   // src/today-trend-commit.js
-  var clone13 = (value) => structuredClone(value);
+  var clone14 = (value) => structuredClone(value);
   var changedScopeIds = (previous, candidate) => [.../* @__PURE__ */ new Set([
     ...Object.keys(previous.scopes || {}),
     ...Object.keys(candidate.scopes || {})
@@ -22741,7 +23241,7 @@ ${error.message}`);
         journal?.assertWritable(null);
         if (expectedGeneration !== generation || !active(task)) return false;
         const previous = normalizeTodayTrendStore(await load());
-        const candidate = normalizeTodayTrendStore(await mutate(clone13(previous)));
+        const candidate = normalizeTodayTrendStore(await mutate(clone14(previous)));
         if (expectedGeneration !== generation || !active(task)) return false;
         if (journal && refreshEnabled) {
           const sagaResult = await sagaCommit({ previous, candidate, task, expectedGeneration, scopeId });
@@ -22779,7 +23279,7 @@ ${error.message}`);
     };
     const commitScope = (storageId, mutate, task = null, options2 = {}) => commitStore(async (store) => {
       if (typeof storageId !== "string" || !storageId) throw new TypeError("\u4ECA\u65E5\u98CE\u5411\u89D2\u8272\u8D44\u6599 ID \u5FC5\u987B\u662F\u975E\u7A7A\u5B57\u7B26\u4E32");
-      const scope = await mutate(clone13(store.scopes[storageId]));
+      const scope = await mutate(clone14(store.scopes[storageId]));
       if (scope === null) delete store.scopes[storageId];
       else store.scopes[storageId] = scope;
       return store;

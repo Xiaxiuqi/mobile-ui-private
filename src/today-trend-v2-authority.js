@@ -1,11 +1,16 @@
 import {
-    TODAY_TREND_V2_AUTHORITY_KEY, TODAY_TREND_V2_FALLBACK_KEY, TODAY_TREND_V2_JOURNAL_PREFIX, TODAY_TREND_V2_STORAGE_KEY,
+    TODAY_TREND_V1_MIGRATION_BACKUP_KEY, TODAY_TREND_V2_AUTHORITY_KEY, TODAY_TREND_V2_FALLBACK_KEY,
+    TODAY_TREND_V2_JOURNAL_PREFIX, TODAY_TREND_V2_STORAGE_KEY,
 } from './constants.js';
 import { normalizeTodayTrendStore } from './today-trend-model.js';
+import {
+    buildReadOnlyShadow, diffReadOnlyShadow, migrateTodayTrendStoreToV2, normalizeTodayTrendV2Store, rebaseTodayTrendV2Store,
+} from './today-trend-v2-model.js';
 import { pmIDBCompareAndSwap, pmIDBReadEntry } from './pm-idb.js';
 
 const AUTHORITY_VERSION = 1;
-const ENVELOPE_VERSION = 1;
+const ENVELOPE_VERSION = 2;
+const MIGRATION_BACKUP_VERSION = 1;
 const CHANNEL_NAME = 'pm-today-trend-v2-authority';
 const clone = value => structuredClone(value);
 const structurallyEqual = (left, right) => {
@@ -64,15 +69,44 @@ export function normalizeTodayTrendV2Authority(value) {
     };
 }
 
-export function createTodayTrendV2Envelope(payload, revision) {
-    return { schemaVersion: ENVELOPE_VERSION, revision: nonNegativeInteger(revision, 'revision'), payload: normalizeTodayTrendStore(payload) };
+export function createTodayTrendV2Envelope(payload, revision, scopeRevisionByStorageId = {}) {
+    const v2Store = payload?.version === 2
+        ? normalizeTodayTrendV2Store(payload)
+        : migrateTodayTrendStoreToV2(normalizeTodayTrendStore(payload), { globalRevision: revision, scopeRevisionByStorageId }).store;
+    return { schemaVersion: ENVELOPE_VERSION, revision: nonNegativeInteger(revision, 'revision'), payload: v2Store };
 }
 
 export function normalizeTodayTrendV2Envelope(value) {
     if (!value || typeof value !== 'object' || Array.isArray(value)) throw failure('TT_V2_SCHEMA_INVALID', 'v2 store envelope 必须是对象');
     if (value.schemaVersion > ENVELOPE_VERSION) throw failure('TT_V2_FUTURE_VERSION', `v2 store 版本 ${value.schemaVersion} 高于当前支持版本 ${ENVELOPE_VERSION}`);
+    if (value.schemaVersion === 1) return createTodayTrendV2Envelope(normalizeTodayTrendStore(value.payload), value.revision);
     if (value.schemaVersion !== ENVELOPE_VERSION) throw failure('TT_V2_SCHEMA_INVALID', 'v2 store 版本无效');
     return createTodayTrendV2Envelope(value.payload, value.revision);
+}
+
+export function normalizeTodayTrendMigrationBackup(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) throw failure('TT_V2_SCHEMA_INVALID', 'migration backup 必须是对象');
+    if (value.schemaVersion > MIGRATION_BACKUP_VERSION) throw failure('TT_V2_FUTURE_VERSION', 'migration backup 版本高于当前支持版本');
+    if (value.schemaVersion !== MIGRATION_BACKUP_VERSION || !['persisted', 'verified'].includes(value.state)) {
+        throw failure('TT_V2_SCHEMA_INVALID', 'migration backup 版本或状态无效');
+    }
+    if (!['idb', 'localStorage'].includes(value.sourceMedium)) throw failure('TT_V2_SCHEMA_INVALID', 'migration backup sourceMedium 无效');
+    const sourcePayload = normalizeTodayTrendStore(value.sourcePayload);
+    const storeRevision = nonNegativeInteger(value.storeRevision, 'migration backup storeRevision');
+    if (storeRevision < 1) throw failure('TT_V2_SCHEMA_INVALID', 'migration backup storeRevision 必须大于 0');
+    const migratedStore = normalizeTodayTrendV2Store(value.migratedStore);
+    const comparison = diffReadOnlyShadow(sourcePayload, migratedStore);
+    if (!comparison.equal) throw failure('TT_V2_SCHEMA_INVALID', 'migration backup 与 migratedStore 用户可见语义不一致');
+    return {
+        schemaVersion: MIGRATION_BACKUP_VERSION, state: value.state, sourceMedium: value.sourceMedium,
+        sourcePayload, migratedStore, storeRevision,
+    };
+}
+
+function createMigrationBackup(sourcePayload, migratedStore, sourceMedium, storeRevision, state = 'persisted') {
+    return normalizeTodayTrendMigrationBackup({
+        schemaVersion: MIGRATION_BACKUP_VERSION, state, sourceMedium, sourcePayload, migratedStore, storeRevision,
+    });
 }
 
 function readFallback(storage) {
@@ -153,6 +187,11 @@ export function createTodayTrendV2Authority({
         const state = await readAuthority();
         return { ...state, owned: !!token && !token.lost && state.authority?.ownerTabId === tabId };
     };
+    const readMigrationBackup = async () => {
+        const entry = await readEntry(TODAY_TREND_V1_MIGRATION_BACKUP_KEY);
+        if (!entry?.ok) throw failure('TT_V2_IDB_UNAVAILABLE', '无法读取 migration backup');
+        return entry.value === undefined ? null : normalizeTodayTrendMigrationBackup(entry.value);
+    };
     const load = async () => {
         const state = await readAuthority();
         if (!state.available) throw failure('TT_V2_IDB_UNAVAILABLE', '无法确认 v2 authority 状态');
@@ -167,7 +206,108 @@ export function createTodayTrendV2Authority({
         }
         const envelope = !primary ? fallback : !fallback || primary.revision >= fallback.revision ? primary : fallback;
         if (envelope.revision !== state.authority.storeRevision) throw failure('TT_V2_REVISION_MISMATCH', 'v2 store revision 与 authority 不一致');
-        return { active: true, store: clone(envelope.payload), authority: state.authority };
+        const v2Store = clone(envelope.payload);
+        return { active: true, store: buildReadOnlyShadow(v2Store), v2Store, authority: state.authority };
+    };
+    const migrateInternal = async (sourcePayload, { sourceMedium = 'idb' } = {}) => {
+        if (closed) throw failure('TT_AUTHORITY_CLOSED', 'v2 authority owner 已关闭');
+        const source = normalizeTodayTrendStore(sourcePayload);
+        const state = await readAuthority();
+        if (!state.available) throw failure('TT_V2_IDB_UNAVAILABLE', 'v2 authority 存储不可用');
+        if (state.authority?.storeRevision > 0) {
+            const existing = await load();
+            const comparison = diffReadOnlyShadow(source, existing.v2Store);
+            if (!comparison.equal) throw failure('TT_MIGRATION_SOURCE_CONFLICT', '现有 v2 shadow 与迁移源语义不一致');
+            const migrationBackup = await readMigrationBackup();
+            if (migrationBackup?.state === 'persisted') {
+                if (!diffReadOnlyShadow(source, migrationBackup.migratedStore).equal) {
+                    throw failure('TT_MIGRATION_SOURCE_CONFLICT', 'persisted migration backup 与当前迁移源语义不一致');
+                }
+                const verifiedBackup = createMigrationBackup(
+                    migrationBackup.sourcePayload, migrationBackup.migratedStore, migrationBackup.sourceMedium,
+                    migrationBackup.storeRevision, 'verified',
+                );
+                const verified = await compareAndSwap({
+                    guardKey: TODAY_TREND_V2_AUTHORITY_KEY, expectedGuard: state.authority,
+                    writes: [{ key: TODAY_TREND_V1_MIGRATION_BACKUP_KEY, value: verifiedBackup }],
+                });
+                if (!verified?.ok) throw failure(verified?.reason === 'CAS_CONFLICT'
+                    ? 'TT_MIGRATION_VERIFY_CONFLICT' : 'TT_V2_IDB_UNAVAILABLE', 'migration backup 重试验证状态提交失败');
+            }
+            return { migrated: false, store: existing.store, v2Store: existing.v2Store, storeRevision: state.authority.storeRevision };
+        }
+        if (state.authority?.ownerTabId) throw failure('TT_AUTHORITY_BUSY', '其他标签当前持有 v2 authority');
+        const previous = state.authority;
+        const base = previous || initialAuthority();
+        const storeRevision = 1;
+        const scopeRevisionByStorageId = Object.fromEntries(Object.keys(source.scopes).map(storageId => [storageId, 1]));
+        const migratedStore = migrateTodayTrendStoreToV2(source, { globalRevision: storeRevision, scopeRevisionByStorageId }).store;
+        const next = normalizeTodayTrendV2Authority({
+            ...base, epoch: base.epoch + 1, authorityRevision: base.authorityRevision + 1, storeRevision,
+            scopeRevisionByStorageId, ownerTabId: null, readV2: true, writeV2: false, serveV2: false,
+        });
+        const persistedBackup = createMigrationBackup(source, migratedStore, sourceMedium, storeRevision);
+        const result = await compareAndSwap({
+            guardKey: TODAY_TREND_V2_AUTHORITY_KEY,
+            expectedGuard: previous === null ? undefined : previous,
+            writes: [
+                { key: TODAY_TREND_V2_STORAGE_KEY, value: createTodayTrendV2Envelope(migratedStore, storeRevision) },
+                { key: TODAY_TREND_V1_MIGRATION_BACKUP_KEY, value: persistedBackup },
+                { key: TODAY_TREND_V2_AUTHORITY_KEY, value: next },
+            ],
+        });
+        if (!result?.ok) {
+            if (result?.reason !== 'CAS_CONFLICT') throw failure('TT_V2_IDB_UNAVAILABLE', 'v2 migration 持久化失败');
+            const existing = await load();
+            if (!diffReadOnlyShadow(source, existing.v2Store).equal) throw failure('TT_MIGRATION_SOURCE_CONFLICT', '并发迁移结果与当前源不一致');
+            return { migrated: false, store: existing.store, v2Store: existing.v2Store, storeRevision: existing.authority.storeRevision };
+        }
+        const primaryEntry = await readEntry(TODAY_TREND_V2_STORAGE_KEY);
+        if (!primaryEntry?.ok || primaryEntry.value === undefined) throw failure('TT_MIGRATION_VERIFY_FAILED', 'v2 migration 二次读取失败');
+        const verifiedEnvelope = normalizeTodayTrendV2Envelope(primaryEntry.value);
+        if (verifiedEnvelope.revision !== storeRevision || !diffReadOnlyShadow(source, verifiedEnvelope.payload).equal) {
+            throw failure('TT_MIGRATION_VERIFY_FAILED', 'v2 migration 二次读取内容不一致');
+        }
+        const verifiedBackup = createMigrationBackup(source, verifiedEnvelope.payload, sourceMedium, storeRevision, 'verified');
+        const verified = await compareAndSwap({
+            guardKey: TODAY_TREND_V2_AUTHORITY_KEY, expectedGuard: next,
+            writes: [{ key: TODAY_TREND_V1_MIGRATION_BACKUP_KEY, value: verifiedBackup }],
+        });
+        if (!verified?.ok) throw failure(verified?.reason === 'CAS_CONFLICT' ? 'TT_MIGRATION_VERIFY_CONFLICT' : 'TT_V2_IDB_UNAVAILABLE', 'migration backup 验证状态提交失败');
+        return { migrated: true, store: buildReadOnlyShadow(verifiedEnvelope.payload), v2Store: clone(verifiedEnvelope.payload), storeRevision };
+    };
+    const restoreBackupInternal = async ({ v2Store, migrationBackup = null }, { expectedStoreRevision = null } = {}) => {
+        if (closed) throw failure('TT_AUTHORITY_CLOSED', 'v2 authority owner 已关闭');
+        const state = await readAuthority();
+        if (!state.available) throw failure('TT_V2_IDB_UNAVAILABLE', 'v2 authority 存储不可用');
+        const previous = state.authority || initialAuthority();
+        if (expectedStoreRevision !== null && expectedStoreRevision !== previous.storeRevision) {
+            throw failure('TT_STORE_REVISION_CONFLICT', 'v2 store 已在备份事务后发生变化，拒绝覆盖');
+        }
+        if (state.authority?.ownerTabId) throw failure('TT_AUTHORITY_BUSY', '恢复 v2 备份前必须释放当前 writer');
+        const nextRevision = previous.storeRevision + 1;
+        const restoredStore = rebaseTodayTrendV2Store(v2Store, nextRevision);
+        const scopeRevisionByStorageId = Object.fromEntries(
+            Object.keys(restoredStore.globalEnvelope.payload.scopes).map(storageId => [storageId, nextRevision]),
+        );
+        const next = normalizeTodayTrendV2Authority({
+            ...previous, epoch: previous.epoch + 1, authorityRevision: previous.authorityRevision + 1,
+            storeRevision: nextRevision, scopeRevisionByStorageId, ownerTabId: null,
+            readV2: true, writeV2: false, serveV2: previous.serveV2,
+        });
+        const writes = [
+            { key: TODAY_TREND_V2_STORAGE_KEY, value: createTodayTrendV2Envelope(restoredStore, nextRevision) },
+            { key: TODAY_TREND_V2_AUTHORITY_KEY, value: next },
+        ];
+        if (migrationBackup !== null) {
+            const backup = normalizeTodayTrendMigrationBackup(migrationBackup);
+            writes.push({ key: TODAY_TREND_V1_MIGRATION_BACKUP_KEY, value: backup });
+        } else writes.push({ key: TODAY_TREND_V1_MIGRATION_BACKUP_KEY, delete: true });
+        const result = await compareAndSwap({
+            guardKey: TODAY_TREND_V2_AUTHORITY_KEY, expectedGuard: state.authority === null ? undefined : state.authority, writes,
+        });
+        if (!result?.ok) throw failure(result?.reason === 'CAS_CONFLICT' ? 'TT_STORE_REVISION_CONFLICT' : 'TT_V2_IDB_UNAVAILABLE', 'v2 备份 CAS 恢复失败');
+        return { store: buildReadOnlyShadow(restoredStore), v2Store: restoredStore, storeRevision: nextRevision };
     };
     const acquireInternal = async ({ readV2 = false, writeV2 = false, serveV2 = false, initialStore } = {}) => {
         if (closed) throw failure('TT_AUTHORITY_CLOSED', 'v2 authority owner 已关闭');
@@ -198,7 +338,10 @@ export function createTodayTrendV2Authority({
             storeRevision, ownerTabId: tabId, readV2, writeV2, serveV2,
         });
         const writes = [];
-        if (activating) writes.push({ key: TODAY_TREND_V2_STORAGE_KEY, value: createTodayTrendV2Envelope(initialStore, storeRevision) });
+        if (activating) writes.push({
+            key: TODAY_TREND_V2_STORAGE_KEY,
+            value: createTodayTrendV2Envelope(initialStore, storeRevision, next.scopeRevisionByStorageId),
+        });
         writes.push({ key: TODAY_TREND_V2_AUTHORITY_KEY, value: next });
         const result = await compareAndSwap({
             guardKey: TODAY_TREND_V2_AUTHORITY_KEY, expectedGuard: previous === null ? undefined : previous,
@@ -216,7 +359,7 @@ export function createTodayTrendV2Authority({
         if (declared?.some(storageId => typeof storageId !== 'string' || !storageId)) throw new TypeError('changedScopeIds 必须只包含非空字符串');
         const entry = await readEntry(TODAY_TREND_V2_STORAGE_KEY);
         if (!entry?.ok || entry.value === undefined) throw failure('TT_V2_IDB_UNAVAILABLE', '无法读取当前 v2 store 以计算 scope revision');
-        const current = normalizeTodayTrendV2Envelope(entry.value).payload;
+        const current = buildReadOnlyShadow(normalizeTodayTrendV2Envelope(entry.value).payload);
         const candidate = normalizeTodayTrendStore(value);
         const ids = new Set([...Object.keys(current.scopes), ...Object.keys(candidate.scopes)]);
         const actual = [...ids].filter(storageId => !structurallyEqual(current.scopes[storageId], candidate.scopes[storageId])).sort();
@@ -246,7 +389,7 @@ export function createTodayTrendV2Authority({
             ...previous, authorityRevision: previous.authorityRevision + 1, storeRevision: previous.storeRevision + 1,
             scopeRevisionByStorageId: scopeRevisions,
         });
-        const envelope = createTodayTrendV2Envelope(value, next.storeRevision);
+        const envelope = createTodayTrendV2Envelope(value, next.storeRevision, next.scopeRevisionByStorageId);
         const writes = [
             { key: TODAY_TREND_V2_STORAGE_KEY, value: envelope },
             { key: TODAY_TREND_V2_AUTHORITY_KEY, value: next },
@@ -267,7 +410,8 @@ export function createTodayTrendV2Authority({
         }
         broadcast(next);
         return {
-            store: clone(envelope.payload),
+            store: buildReadOnlyShadow(envelope.payload),
+            v2Store: clone(envelope.payload),
             storeRevision: next.storeRevision,
             authorityRevision: next.authorityRevision,
             scopeRevisionByStorageId: clone(next.scopeRevisionByStorageId),
@@ -312,6 +456,8 @@ export function createTodayTrendV2Authority({
     };
     const acquire = options => enqueueMutation(() => acquireInternal(options));
     const save = (value, options) => enqueueMutation(() => saveInternal(value, options));
+    const migrate = (value, options) => enqueueMutation(() => migrateInternal(value, options));
+    const restoreBackup = (value, options) => enqueueMutation(() => restoreBackupInternal(value, options));
     const release = options => enqueueMutation(() => releaseInternal(options));
     const close = () => {
         if (pendingMutations > 0 || (token && !token.lost)) {
@@ -322,5 +468,5 @@ export function createTodayTrendV2Authority({
         token = null;
         closeChannel();
     };
-    return { status, load, acquire, save, release, close };
+    return { status, load, readMigrationBackup, migrate, restoreBackup, acquire, save, release, close };
 }
