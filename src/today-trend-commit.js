@@ -11,6 +11,12 @@ function injectionFailure(result) {
     return failedWrites || failedKeys ? new Error(`今日风向注入刷新失败：${failedWrites + failedKeys} 项写入或清理失败`) : null;
 }
 
+function savedStore(result, fallback) {
+    return result && typeof result === 'object' && Object.hasOwn(result, 'store')
+        ? normalizeTodayTrendStore(result.store)
+        : normalizeTodayTrendStore(result ?? fallback);
+}
+
 export function createTodayTrendCommitter({
     runtime = {}, load = loadTodayTrendStore, save = saveTodayTrendStore, refreshInjection,
 } = {}) {
@@ -18,7 +24,7 @@ export function createTodayTrendCommitter({
     const active = task => !task || task.active?.() !== false;
     const invalidateCommits = () => { generation += 1; };
 
-    const commitStore = (mutate, task = null, { refresh = true } = {}) => {
+    const commitStore = (mutate, task = null, { refresh = true, scopeId = null } = {}) => {
         if (typeof mutate !== 'function') throw new TypeError('今日风向提交变更必须是函数');
         const expectedGeneration = generation;
         return enqueueDirectoryOperation('todayTrend', async () => {
@@ -26,16 +32,20 @@ export function createTodayTrendCommitter({
             const previous = normalizeTodayTrendStore(await load());
             const candidate = normalizeTodayTrendStore(await mutate(clone(previous)));
             if (expectedGeneration !== generation || !active(task)) return false;
-            await save(candidate);
-            runtime.store = candidate;
+            const saved = await save(candidate, { scopeId, returnReceipt: true });
+            const committedCandidate = savedStore(saved, candidate);
+            runtime.store = committedCandidate;
             if (!refresh) return candidate;
             let refreshError = null;
             try { refreshError = injectionFailure(await refreshInjection?.(candidate)); }
             catch (error) { refreshError = error; }
             if (!refreshError && expectedGeneration === generation && active(task)) return candidate;
             try {
-                await save(previous);
-                runtime.store = previous;
+                const rollbackOptions = { scopeId, returnReceipt: true };
+                if (Number.isSafeInteger(saved?.storeRevision)) rollbackOptions.expectedStoreRevision = saved.storeRevision;
+                const rolledBack = await save(previous, rollbackOptions);
+                const restored = savedStore(rolledBack, previous);
+                runtime.store = restored;
                 const rollbackError = injectionFailure(await refreshInjection?.(previous));
                 if (rollbackError) throw rollbackError;
             } catch (rollbackError) {
@@ -50,13 +60,13 @@ export function createTodayTrendCommitter({
         });
     };
 
-    const commitScope = (storageId, mutate, task = null, options) => commitStore(async store => {
+    const commitScope = (storageId, mutate, task = null, options = {}) => commitStore(async store => {
         if (typeof storageId !== 'string' || !storageId) throw new TypeError('今日风向角色资料 ID 必须是非空字符串');
         const scope = await mutate(clone(store.scopes[storageId]));
         if (scope === null) delete store.scopes[storageId];
         else store.scopes[storageId] = scope;
         return store;
-    }, task, options);
+    }, task, { ...options, scopeId: storageId });
 
     return { commitStore, commitScope, invalidateCommits };
 }

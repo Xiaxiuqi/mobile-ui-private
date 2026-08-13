@@ -494,7 +494,7 @@ async function commitTodayTrendScope({ desired, expected, targetId }) {
             const merged = clone(current);
             replaceEntry(merged.scopes, desired.scopes, targetId);
             const normalized = normalizeTodayTrendStore(merged);
-            await saveTodayTrendStore(normalized);
+            await saveTodayTrendStore(normalized, { scopeId: targetId });
             return normalized;
         });
     } finally {

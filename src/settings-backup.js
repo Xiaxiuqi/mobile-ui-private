@@ -110,6 +110,7 @@ export async function runBackupTransaction({
         await afterPersist('apply', nextState);
         await complete(nextState, applied);
     } catch (error) {
+        if (error?.partialApplied) applied = { ...(applied || {}), ...error.partialApplied };
         let rollbackState;
         try {
             await beforeApply('rollback');
@@ -206,15 +207,34 @@ export function createBackupStateHandlers(deps = {}) {
             || !saveCalendarCycles(state.calendarCycles) || !saveCalendarRecipes(state.calendarRecipes) || !saveCalendarOutfits(state.calendarOutfits)) {
             throw new Error('日历与菜谱数据保存失败：浏览器存储不可用');
         }
-        await saveTodayTrendStore(state.todayTrend);
+        let todayTrendReceipt;
+        try {
+            todayTrendReceipt = await (deps.saveTodayTrendStore || saveTodayTrendStore)(state.todayTrend, {
+                allowAuthorityAcquire: true,
+                returnReceipt: true,
+                expectedStoreRevision: phase === 'rollback' && Number.isSafeInteger(applied?.todayTrendReceipt?.storeRevision)
+                    ? applied.todayTrendReceipt.storeRevision : null,
+            });
+        } catch (error) {
+            if (error?.committedReceipt) {
+                error.partialApplied = { ...(error.partialApplied || {}), todayTrendReceipt: error.committedReceipt };
+            }
+            throw error;
+        }
         if (phase === 'rollback') {
             if (applied?.branchLineageInserted) await rollbackBranchLineageBackup(applied.branchLineageInserted);
             else await saveBranchLineage(state.branchLineage || {});
         } else {
-            const branchLineageInserted = await saveBranchLineageForBackup(state.branchLineage || {});
+            let branchLineageInserted;
+            try {
+                branchLineageInserted = await saveBranchLineageForBackup(state.branchLineage || {});
+            } catch (error) {
+                error.partialApplied = { ...(error.partialApplied || {}), todayTrendReceipt };
+                throw error;
+            }
             deps.invalidateInteractiveStore?.(); deps.reloadCalendarStore?.();
             deps.reloadTodayTrendStore?.();
-            return { branchLineageInserted };
+            return { branchLineageInserted, todayTrendReceipt };
         }
         deps.invalidateInteractiveStore?.(); deps.reloadCalendarStore?.();
         deps.reloadTodayTrendStore?.();

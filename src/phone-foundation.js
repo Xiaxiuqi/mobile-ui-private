@@ -182,7 +182,9 @@ export function installPhoneFoundation(state, deps) {
             if (!resizing || (event?.pointerId !== undefined && event.pointerId !== pointerId)) return;
             resizing = false;
             el.classList.remove('is-resizing');
-            try { handle.releasePointerCapture?.(pointerId); } catch (error) {}
+            try { handle.releasePointerCapture?.(pointerId); } catch (error) {
+                // 捕获可能已由 pointercancel 或 lostpointercapture 释放；清理流程仍需继续。
+            }
             pointerId = null;
             const nextScale = normalizePhoneScale(window.__pmTheme.phoneScale);
             window.__pmTheme.phoneScale = nextScale;

@@ -15,7 +15,7 @@ const CSS_MODULE_FILES = [
   'styles/today-trend.css',
   'styles/overrides.css',
 ];
-const [srcEntries, bundle, cssEntry, manifestText, packageText, lockText, readme, baselineText, cssTokensText, lifecycleResourcesText, governanceRegistryText, ...cssModules] = await Promise.all([
+const [srcEntries, bundle, cssEntry, manifestText, packageText, lockText, readme, projectText, baselineText, cssTokensText, lifecycleResourcesText, governanceRegistryText, ...cssModules] = await Promise.all([
   readdir(srcRoot, { recursive: true }),
   readFile(path.join(root, 'index.js'), 'utf8'),
   readFile(path.join(root, 'style.css'), 'utf8'),
@@ -23,6 +23,7 @@ const [srcEntries, bundle, cssEntry, manifestText, packageText, lockText, readme
   readFile(path.join(root, 'package.json'), 'utf8'),
   readFile(path.join(root, 'package-lock.json'), 'utf8'),
   readFile(path.join(root, 'README.md'), 'utf8'),
+  readFile(path.join(root, 'docs', 'PROJECT.md'), 'utf8'),
   readFile(path.join(root, 'docs', 'BASELINE.md'), 'utf8'),
   readFile(path.join(root, 'docs', 'CSS-TOKENS.md'), 'utf8'),
   readFile(path.join(root, 'docs', 'LIFECYCLE-RESOURCES.md'), 'utf8'),
@@ -76,6 +77,25 @@ const rebuiltBundleText = rebuiltBundle.outputFiles[0]?.text || '';
 if (bundle !== rebuiltBundleText) failures.push('index.js: bundle does not exactly match an in-memory esbuild rebuild');
 const BUNDLE_BASELINE_BYTES = 1240219;
 const BUNDLE_MAX_BYTES = 1488263;
+const PHASE_0_OBSERVED_BUNDLE_BYTES = 1377215;
+const bundleBytes = Buffer.byteLength(bundle, 'utf8');
+const observedBundleMatch = baselineText.match(/阶段 0[^\n]*实测 `index\.js` 为 `(\d+)` bytes/);
+if (!observedBundleMatch) failures.push('docs/BASELINE.md: missing the phase 0 observed bundle size');
+else if (Number(observedBundleMatch[1]) !== PHASE_0_OBSERVED_BUNDLE_BYTES) failures.push(`docs/BASELINE.md: phase 0 observed bundle size must remain ${PHASE_0_OBSERVED_BUNDLE_BYTES}`);
+if (!/^# Today Trend v2 生产治理项目$/m.test(projectText)) failures.push('docs/PROJECT.md: missing the Today Trend v2 engineering constraints document');
+const authorityCode = sourceModuleByName.get('today-trend-v2-authority.js')?.code || '';
+const storageCode = sourceModuleByName.get('today-trend-storage.js')?.code || '';
+const idbCode = sourceModuleByName.get('pm-idb.js')?.code || '';
+for (const expected of ['readV2: false', 'writeV2: false', 'serveV2: false', 'storeRevision', 'scopeRevisionByStorageId', 'BroadcastChannelImpl', 'closeChannel']) {
+  if (!authorityCode.includes(expected)) failures.push(`today-trend-v2-authority.js: phase 1 authority contract missing ${expected}`);
+}
+for (const expected of ['TODAY_TREND_V2_STORAGE_KEY', 'TODAY_TREND_V2_FALLBACK_KEY', 'TODAY_TREND_V2_AUTHORITY_KEY']) {
+  if (!sourceModuleByName.get('constants.js')?.code.includes(expected)) failures.push(`constants.js: phase 1 independent key missing ${expected}`);
+}
+if (!/db\.transaction\(PM_IDB_STORE,\s*['"]readwrite['"]\)/.test(idbCode) || !idbCode.includes('pmIDBCompareAndSwap')) {
+  failures.push('pm-idb.js: phase 1 CAS must use a single IndexedDB readwrite transaction');
+}
+if (!storageCode.includes('v2Authority.status()') || !storageCode.includes('TT_V1_WRITE_FROZEN')) failures.push('today-trend-storage.js: v1 compatibility bridge must freeze writes after v2 authority activation');
 if (Buffer.byteLength(bundle, 'utf8') > BUNDLE_MAX_BYTES) {
   failures.push(
     `index.js: ${Buffer.byteLength(bundle, 'utf8')} bytes exceeds the ${BUNDLE_MAX_BYTES}-byte baseline limit (${BUNDLE_BASELINE_BYTES} * 120%)`,
@@ -2418,7 +2438,7 @@ for (const expected of [
   'quoteHighlightTimer', 'state.generationTask', 'runtime.automaticTasks', 'runtime.historyLoadPromise',
   '## 缓存边界', 'runtime.pendingMessages', 'PENDING_MESSAGE_LIMIT = 50',
   'SAVE_LIMIT = 60', 'runtime.trackedExtensionPromptKeys',
-  '真正关闭阶段 A 前仍须在 SillyTavern 验证',
+  '阶段 0 的真实宿主重复回归已由助手基于当前已测试版本明确豁免',
 ]) requireText('docs/LIFECYCLE-RESOURCES.md', lifecycleResourcesText, expected);
 requireText('behavior-config.js', sourceModuleByName.get('behavior-config.js')?.code || '', 'normalizeCharacterBehaviorStore');
 for (const expected of [

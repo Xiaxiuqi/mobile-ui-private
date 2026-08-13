@@ -22,14 +22,23 @@
 
 ## 构建体积基线
 
-- 基线 bundle：`index.js` 为 `1240219` bytes；静态合同允许的上限为 `1488263` bytes（基线的 120%，向下取整）。
+- 历史合同基线：`index.js` 为 `1240219` bytes；静态合同允许的上限为 `1488263` bytes（历史基线的 120%，向下取整）。
+- Today Trend v2 阶段 0 于 2026-08-12 使用当前 `npm run build` 实测 `index.js` 为 `1377215` bytes，低于静态合同上限；该数值是实施前观测点，不自动替换历史合同基线，也不授权抬高上限。
+- 阶段 1 已实现默认关闭的 `readV2`、`writeV2`、`serveV2`、独立 v2 store/authority key 与单事务 CAS；authority 不存在时兼容 v1，authority 状态不可确认时读写均 fail-closed。
 - 此上限只用于阻止无审查的体积跃升，不替代真实宿主中的首开、首渲染和交互性能测量。调整上限必须同时说明增长来源、宿主回归结果和新的基线值。
+
+当前检查基线：`check:syntax`、`check:today-trend`、`check:contracts`、`check:budget`、`check:interactive` 通过；`check:calendar` 在阶段 0 修改前已因“当日日程重新生成按钮 SVG/aria 契约”失败，属于既有基线阻塞，不得归因给 Today Trend v2，也不得在本阶段顺手修复。
 
 ## 持久化契约
 
 - IndexedDB 数据库：`PhoneModeDB`
 - IndexedDB store：`kv`
 - 历史主键：`ST_SMS_DATA_V2`
+- Today Trend v2 主键：`ST_SMS_TODAY_TREND_V2`；authority key：`ST_SMS_TODAY_TREND_V2_AUTHORITY_V1`；二者不得与 v1 key 混用。
+- v2 authority 与 store 的 guard compare / writes 必须在同一个 `readwrite` 事务内完成；冲突事务不得留下部分写入。
+- authority 存在 active owner 时，其他标签不得通过 `acquire` 接管；必须由当前 owner 显式 `release` 后再竞争获取，阶段 1 不提供 lease、超时或 takeover。
+- authority 不可读取时不得回退读取或写入 v1；否则无法证明 v1 与潜在 v2 数据的新旧关系。恢复前提是重新获得 `PhoneModeDB/kv` 的可靠读取能力。
+- `pmOpenIDB` 的首次并发调用共享同一个 pending open；`versionchange` 只关闭事件所属连接，并且只有该连接仍是当前缓存时才清空缓存。
 - 原存储键与迁移标记不得在纯模块化阶段更名
 
 ## CSS 契约

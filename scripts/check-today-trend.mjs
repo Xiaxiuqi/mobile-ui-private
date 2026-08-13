@@ -14,7 +14,12 @@ import {
     todayTrendStatusLabel,
 } from '../src/today-trend-model.js';
 import { createTodayTrendStorage } from '../src/today-trend-storage.js';
+import {
+    createTodayTrendV2Authority, createTodayTrendV2Envelope, normalizeTodayTrendV2Authority, normalizeTodayTrendV2Envelope,
+} from '../src/today-trend-v2-authority.js';
 import { createTodayTrendCommitter } from '../src/today-trend-commit.js';
+import { TODAY_TREND_V2_AUTHORITY_KEY, TODAY_TREND_V2_FALLBACK_KEY, TODAY_TREND_V2_STORAGE_KEY } from '../src/constants.js';
+import { pmIDBCompareAndSwap } from '../src/pm-idb.js';
 import { gatherTodayTrendContext } from '../src/today-trend-context.js';
 import {
     buildTodayTrendGenerationEnvelope,
@@ -39,6 +44,13 @@ import { renderTodayTrendSettingsView } from '../src/today-trend-settings-view.j
 import { createTodayTrendActionDispatcher } from '../src/today-trend-actions.js';
 import { TODAY_TREND_RELATION_ICON_PATHS } from '../src/icons.js';
 import { trendActionMenu, trendInlineActions, trendRuleEditor } from '../src/today-trend-ui.js';
+import {
+    createFaultSchedule,
+    createSeededRandom,
+    createTodayTrendV1Fixture,
+    normalizeDeterministicSeed,
+    runDeterministicSequence,
+} from './today-trend-test-foundation.mjs';
 
 const originalTavernHelper = globalThis.TavernHelper;
 try {
@@ -58,7 +70,7 @@ const createTodayTrendScheduler = options => createTodayTrendSchedulerBase({ com
 
 assert.equal(TODAY_TREND_VERSION, 1);
 for (const contract of [
-    installTodayTrend, normalizeTodayTrendStore, createTodayTrendStorage, createTodayTrendCommitter,
+    installTodayTrend, normalizeTodayTrendStore, createTodayTrendStorage, createTodayTrendV2Authority, createTodayTrendCommitter,
     gatherTodayTrendContext, buildTodayTrendInitializationEnvelope, buildTodayTrendGenerationEnvelope,
     createTodayTrendGenerationController, createTodayTrendScheduler, renderTodayTrendInjection,
     renderTodayTrendApp, renderTodayTrendWorldView, renderTodayTrendReputationView,
@@ -307,36 +319,7 @@ assert.deepEqual(TODAY_TREND_EVENT_OUTCOMES, ['resolved', 'failed', 'terminated'
 assert.deepEqual(TODAY_TREND_OPERATION_MODES, ['manual', 'auto']);
 assert.deepEqual(TODAY_TREND_STATUS_LABELS, { hostile: '敌对', dislike: '厌恶', neutral: '中立', like: '喜欢', trust: '信任' });
 
-const fixture = () => ({
-    version: 1,
-    presets: {
-        preset: {
-            id: 'preset', name: '综艺世界', version: 1, revision: 1, createdAt: 1, updatedAt: 2,
-            source: { worldBookNames: ['厨房'], includeExistingChat: true, userRequirements: '保持节目规则' },
-            moduleRules: { world: '世界', reputation: '风评', faction: '势力', dynamics: '动态' },
-            moduleSchemas: { worldItems: '项目', reputationCircles: '圈层', factionGuidance: '指引' },
-            dynamicsRules: { general: '总规则', incident: '突发', rumor: '流言', underground: '地下' },
-        },
-    },
-    scopes: {
-        chat: {
-            storageId: 'chat', characterId: 'character', characterName: '小明', presetId: 'preset',
-            operation: { enabled: true, mode: 'auto', intervalFloors: 3, lastSuccessfulAssistantCount: 7, lastSuccessfulRunAt: 9 },
-            injection: { enabled: false, minimalUi: false },
-            world: { items: [{ id: 'world', name: '节目风向', summary: '晚餐服务临近' }] },
-            dynamicsSettings: createDefaultTodayTrendDynamicsSettings(),
-            reputation: { circles: [{ id: 'judge', name: '主厨评审', scope: '节目评审', status: 'neutral', evaluation: '仍在观察' }] },
-            factions: [
-                { id: 'red', name: '红队', summary: '参赛队伍', parentId: null, relatedFactionIds: [], details: [{ label: '队长', value: '阿红' }], relation: { status: 'like', evaluation: '认可配合能力' } },
-                { id: 'station', name: '节目组', summary: '制作单位', parentId: 'red', relatedFactionIds: [], details: [], relation: { status: 'neutral', evaluation: '正在观察' } },
-            ],
-            dynamics: {
-                active: [{ id: 'service', type: 'normal', lifecycle: 'active', title: '晚餐服务', stageLabel: '准备中', origin: '开餐临近', participants: ['小明', '红队'], stages: ['分配岗位', '检查食材'], latestStage: '检查食材', outcome: null, finalResult: null, relatedEventIds: [], createdAt: 1, updatedAt: 2 }],
-                archived: [{ id: 'rumor', type: 'rumor', lifecycle: 'archived', title: '换队传闻', stageLabel: '已证实', origin: '后台流言', participants: ['小明'], stages: ['开始流传'], latestStage: '开始流传', outcome: 'confirmed', finalResult: '传闻属实', relatedEventIds: ['service'], createdAt: 1, updatedAt: 3 }],
-            },
-        },
-    },
-});
+const fixture = () => createTodayTrendV1Fixture(createDefaultTodayTrendDynamicsSettings);
 const assertCode = (mutate, code) => assert.throws(() => normalizeTodayTrendStore(mutate()), error => error?.code === code);
 const valid = normalizeTodayTrendStore(fixture());
 assert.deepEqual(valid.scopes.chat.generationSnapshots.map(item => item.assistantCount), [0, 7], '旧 scope 缺少快照历史时必须同时生成初始化基线与当前 checkpoint 兼容快照');
@@ -1068,12 +1051,17 @@ const memoryStorage = () => {
         removeItem: key => values.delete(key),
     };
 };
+const inactiveV2Authority = () => ({
+    load: async () => ({ active: false, store: null, authority: null }),
+    status: async () => ({ available: true, authority: null, owned: false }),
+});
 const primaryStorage = memoryStorage();
 let primarySnapshot = null;
 const persistentStorage = createTodayTrendStorage({
     idbGet: async () => primarySnapshot,
     idbSet: async (_key, value) => { primarySnapshot = structuredClone(value); return true; },
     storage: primaryStorage,
+    v2Authority: inactiveV2Authority(),
 });
 await persistentStorage.save(valid);
 assert.deepEqual(await persistentStorage.load(), valid, 'IDB 主存储必须可往返规范数据');
@@ -1083,9 +1071,454 @@ const fallbackPersistence = createTodayTrendStorage({
     idbGet: async () => { throw new Error('IDB unavailable'); },
     idbSet: async () => false,
     storage: fallbackStorage,
+    v2Authority: inactiveV2Authority(),
 });
 await fallbackPersistence.save(valid);
 assert.deepEqual(await fallbackPersistence.load(), valid, 'IDB 不可用时必须从 localStorage 后备数据恢复');
+
+let forbiddenV1Reads = 0;
+let forbiddenV1Writes = 0;
+const unavailableBridge = createTodayTrendStorage({
+    idbGet: async () => { forbiddenV1Reads += 1; return valid; },
+    idbSet: async () => { forbiddenV1Writes += 1; return true; },
+    storage: memoryStorage(),
+    v2Authority: {
+        load: async () => { const error = new Error('authority unavailable'); error.code = 'TT_V2_IDB_UNAVAILABLE'; throw error; },
+        status: async () => ({ available: false, authority: null, owned: false }),
+    },
+});
+await assert.rejects(() => unavailableBridge.load(), error => error?.code === 'TT_V2_IDB_UNAVAILABLE',
+    'authority 不可确认时读取必须 fail-closed，不能返回无法证明新旧程度的 v1 数据');
+assert.equal(forbiddenV1Reads, 0, 'authority 不可确认时不得继续读取 v1 IDB 或 fallback');
+await assert.rejects(() => unavailableBridge.save(valid), error => error?.code === 'TT_V2_AUTHORITY_UNAVAILABLE',
+    '兼容桥无法确认 authority 时必须拒绝写入，不能降级到 v1');
+assert.equal(forbiddenV1Writes, 0, 'authority 不可确认时不得触发任何 v1 IDB 写入');
+
+let busyAcquireCalls = 0;
+let busySaveCalls = 0;
+const busyAuthorityBridge = createTodayTrendStorage({
+    storage: memoryStorage(),
+    v2Authority: {
+        load: async () => ({ active: true, store: valid, authority: null }),
+        status: async () => ({ available: true, owned: false, authority: {
+            ownerTabId: 'other-tab', readV2: true, writeV2: true, serveV2: false, storeRevision: 3,
+        } }),
+        acquire: async () => { busyAcquireCalls += 1; },
+        save: async () => { busySaveCalls += 1; },
+    },
+});
+await assert.rejects(() => busyAuthorityBridge.save(valid, { allowAuthorityAcquire: true }), error => error?.code === 'TT_AUTHORITY_BUSY',
+    '备份临时 authority 不得抢夺其他标签的 active writer');
+assert.deepEqual([busyAcquireCalls, busySaveCalls], [0, 0], 'active writer 存在时不得尝试 acquire 或 save');
+
+const primarySaveError = new Error('primary save failed');
+primarySaveError.code = 'TT_PRIMARY_SAVE_FAILED';
+const releaseFailure = new Error('release failed');
+const dualFailureBridge = createTodayTrendStorage({
+    storage: memoryStorage(),
+    v2Authority: {
+        load: async () => ({ active: true, store: valid, authority: null }),
+        status: async () => ({ available: true, owned: false, authority: {
+            ownerTabId: null, readV2: true, writeV2: false, serveV2: true, storeRevision: 3,
+        } }),
+        acquire: async () => {}, save: async () => { throw primarySaveError; }, release: async () => { throw releaseFailure; },
+    },
+});
+await assert.rejects(() => dualFailureBridge.save(valid, { allowAuthorityAcquire: true }), error => {
+    assert.equal(error, primarySaveError, '保存与释放同时失败时必须保留保存错误为主错误');
+    assert.equal(error.releaseError, releaseFailure, '释放错误必须作为附加诊断保留');
+    return true;
+});
+const releaseOnlyFailureBridge = createTodayTrendStorage({
+    storage: memoryStorage(),
+    v2Authority: {
+        load: async () => ({ active: true, store: valid, authority: null }),
+        status: async () => ({ available: true, owned: false, authority: {
+            ownerTabId: null, readV2: true, writeV2: false, serveV2: false, storeRevision: 3,
+        } }),
+        acquire: async () => {}, save: async value => ({ store: value, storeRevision: 4 }), release: async () => { throw releaseFailure; },
+    },
+});
+await assert.rejects(() => releaseOnlyFailureBridge.save(valid, { allowAuthorityAcquire: true }), error => {
+    assert.equal(error?.code, 'TT_AUTHORITY_RELEASE_FAILED', '保存成功但临时 authority 释放失败时必须返回独立错误码');
+    assert.equal(error.cause, releaseFailure, 'release-only failure 必须保留释放错误作为 cause');
+    assert.equal(error.committedReceipt?.storeRevision, 4,
+        'release-only failure 必须携带已提交 receipt，供上层执行 revision-fenced 补偿');
+    return true;
+});
+const releaseFalseBridge = createTodayTrendStorage({
+    storage: memoryStorage(),
+    v2Authority: {
+        load: async () => ({ active: true, store: valid, authority: null }),
+        status: async () => ({ available: true, owned: false, authority: {
+            ownerTabId: null, readV2: true, writeV2: false, serveV2: false, storeRevision: 3,
+        } }),
+        acquire: async () => {}, save: async value => ({ store: value, storeRevision: 4 }), release: async () => false,
+    },
+});
+await assert.rejects(() => releaseFalseBridge.save(valid, { allowAuthorityAcquire: true }), error => {
+    assert.equal(error?.code, 'TT_AUTHORITY_RELEASE_FAILED', 'release 返回 false 不得被 bridge 当作释放成功');
+    assert.equal(error.cause?.code, 'TT_AUTHORITY_RELEASE_FAILED', 'release false 必须保留明确的底层释放错误码');
+    assert.equal(error.committedReceipt?.storeRevision, 4,
+        'release false 发生在 save 已提交后时仍必须携带 committed receipt');
+    return true;
+});
+
+const createAuthorityHarness = () => {
+    const records = new Map();
+    const cloneValue = value => value === undefined ? undefined : structuredClone(value);
+    const same = (left, right) => JSON.stringify(left) === JSON.stringify(right);
+    const readEntry = async key => ({ ok: true, value: cloneValue(records.get(key)) });
+    const compareAndSwap = async ({ guardKey, expectedGuard, writes }) => {
+        if (!same(records.get(guardKey), expectedGuard)) return { ok: false, reason: 'CAS_CONFLICT' };
+        for (const entry of writes) records.set(entry.key, cloneValue(entry.value));
+        return { ok: true };
+    };
+    return { records, readEntry, compareAndSwap };
+};
+const authorityChannels = new Set();
+class AuthorityBroadcastChannel {
+    constructor(name) {
+        this.name = name;
+        this.listeners = new Set();
+        this.closed = false;
+        authorityChannels.add(this);
+    }
+    addEventListener(type, listener) {
+        if (type === 'message') this.listeners.add(listener);
+    }
+    postMessage(data) {
+        for (const channel of authorityChannels) {
+            if (channel !== this && channel.name === this.name && !channel.closed) {
+                for (const listener of channel.listeners) listener({ data: structuredClone(data) });
+            }
+        }
+    }
+    close() {
+        this.closed = true;
+        this.listeners.clear();
+        authorityChannels.delete(this);
+    }
+}
+const authorityHarness = createAuthorityHarness();
+const authorityStorage = memoryStorage();
+const authorityA = createTodayTrendV2Authority({
+    ...authorityHarness, storage: authorityStorage, tabId: 'tab-a', BroadcastChannelImpl: AuthorityBroadcastChannel,
+});
+const authorityB = createTodayTrendV2Authority({
+    ...authorityHarness, storage: authorityStorage, tabId: 'tab-b', BroadcastChannelImpl: AuthorityBroadcastChannel,
+});
+assert.equal(authorityChannels.size, 0, 'v2 authority 默认关闭时不得创建 BroadcastChannel');
+await assert.rejects(() => authorityA.acquire({ readV2: true, writeV2: true }), error => error?.code === 'TT_V2_INITIAL_STORE_REQUIRED',
+    '首次启用 v2 读取时缺少初始 store 必须 fail-closed');
+const initialV2Authority = await authorityA.acquire({ readV2: true, writeV2: true, serveV2: false, initialStore: valid });
+assert.deepEqual({ readV2: initialV2Authority.readV2, writeV2: initialV2Authority.writeV2, serveV2: initialV2Authority.serveV2 },
+    { readV2: true, writeV2: true, serveV2: false }, 'authority acquire 必须保存三层开关且 serveV2 可独立关闭');
+const repeatedV2Authority = await authorityA.acquire({ readV2: true, writeV2: true, serveV2: false });
+assert.equal(repeatedV2Authority.epoch, initialV2Authority.epoch,
+    '当前 owner 使用相同开关重复 acquire 必须幂等，不得无意义递增 epoch');
+await assert.rejects(() => authorityA.acquire({ readV2: true, writeV2: true, serveV2: true }), error => error?.code === 'TT_AUTHORITY_BUSY',
+    '当前 owner 变更开关前必须显式 release，不能通过重复 acquire 改写 authority');
+assert.equal(authorityChannels.size, 1, 'authority acquire 必须按需创建一个失权通知 channel');
+assert.equal(authorityHarness.records.get(TODAY_TREND_V2_AUTHORITY_KEY).storeRevision, 1, '首次激活必须在同一 CAS 建立 store revision');
+assert.deepEqual((await authorityA.load()).store, valid, '首次激活必须原子写入可读取的 v2 primary');
+const scopeChangedStore = structuredClone(valid);
+scopeChangedStore.scopes.chat.operation.lastSuccessfulRunAt += 1;
+await authorityA.save(scopeChangedStore, { scopeId: 'chat' });
+assert.equal(authorityHarness.records.get(TODAY_TREND_V2_AUTHORITY_KEY).storeRevision, 2, '首次 v2 变更保存必须在激活 revision 后继续递增');
+assert.equal(authorityHarness.records.get(TODAY_TREND_V2_AUTHORITY_KEY).scopeRevisionByStorageId.chat, 1, 'scope CAS 保存必须递增对应 scope revision');
+assert.deepEqual((await authorityA.load()).store, scopeChangedStore, 'v2 primary 必须按 authority revision 往返规范 store');
+const reorderedScopeStore = structuredClone(scopeChangedStore);
+reorderedScopeStore.scopes.chat.operation = Object.fromEntries(Object.entries(reorderedScopeStore.scopes.chat.operation).reverse());
+await authorityA.save(reorderedScopeStore);
+assert.equal(authorityHarness.records.get(TODAY_TREND_V2_AUTHORITY_KEY).scopeRevisionByStorageId.chat, 1,
+    'scope 对象键顺序变化不得被误判为业务变更并递增 revision');
+const reorderedArrayStore = structuredClone(reorderedScopeStore);
+reorderedArrayStore.scopes.chat.factions.reverse();
+await authorityA.save(reorderedArrayStore, { scopeId: 'chat' });
+assert.equal(authorityHarness.records.get(TODAY_TREND_V2_AUTHORITY_KEY).scopeRevisionByStorageId.chat, 2,
+    'scope 数组顺序变化必须被识别为业务变更并递增 revision');
+assert.deepEqual((await authorityA.load()).store.scopes.chat.factions.map(item => item.id),
+    reorderedArrayStore.scopes.chat.factions.map(item => item.id), 'v2 store 必须保留 scope 数组的新顺序');
+await assert.rejects(() => authorityA.save(valid, { scopeId: 'other' }), error => error?.code === 'TT_SCOPE_REVISION_MISMATCH',
+    '声明 scope 与 candidate 实际变化不一致时必须拒绝写入，不能漏记 scope revision');
+await assert.rejects(() => authorityB.acquire({ readV2: true, writeV2: true, serveV2: false }), error => error?.code === 'TT_AUTHORITY_BUSY',
+    '其他标签不得接管尚未显式释放的 active writer');
+assert.equal((await authorityA.status()).owned, true, '被拒绝的 takeover 不得使当前 owner 失权');
+assert.equal(await authorityA.release({ readV2: true, serveV2: false }), true, '当前 owner 必须先显式释放 authority');
+const acquiredByB = await authorityB.acquire({ readV2: true, writeV2: true, serveV2: false });
+assert.ok(acquiredByB.epoch > initialV2Authority.epoch, '显式交接后的后继 owner 必须使用严格递增 epoch');
+await assert.rejects(() => authorityA.save(valid), error => error?.code === 'TT_AUTHORITY_LOST', '已释放的旧 writer 必须在 CAS 前拒绝写入');
+assert.equal((await authorityA.status()).owned, false, '失权 owner 的 status 不得继续报告 owned');
+const releasedStore = structuredClone(scopeChangedStore);
+releasedStore.scopes.chat.operation.lastSuccessfulRunAt += 1;
+await authorityB.save(releasedStore);
+assert.equal(authorityHarness.records.get(TODAY_TREND_V2_AUTHORITY_KEY).storeRevision, 5, '新 owner 必须从当前 store revision 继续递增');
+assert.equal(authorityHarness.records.get(TODAY_TREND_V2_AUTHORITY_KEY).scopeRevisionByStorageId.chat, 3,
+    '整树保存未显式传 scopeId 时必须从前后 store 推导并递增变更 scope revision');
+assert.equal(await authorityB.release(), true, '当前 owner 必须通过 CAS 释放 authority');
+assert.deepEqual((await authorityB.load()).store, releasedStore, 'release 只释放 writer，v2 mutation 后不得回读陈旧 v1');
+assert.equal(authorityChannels.size, 0, '失权 owner 与释放 owner 都必须立即关闭 BroadcastChannel');
+authorityA.close();
+authorityB.close();
+assert.equal(authorityChannels.size, 0, 'authority close 必须释放全部 BroadcastChannel 资源');
+
+const fifoHarness = createAuthorityHarness();
+let blockedSaveResolve;
+let saveCasEnteredResolve;
+const blockedSave = new Promise(resolve => { blockedSaveResolve = resolve; });
+const saveCasEntered = new Promise(resolve => { saveCasEnteredResolve = resolve; });
+let fifoCasCalls = 0;
+const fifoAuthority = createTodayTrendV2Authority({
+    readEntry: fifoHarness.readEntry,
+    compareAndSwap: async request => {
+        fifoCasCalls += 1;
+        if (fifoCasCalls === 2) {
+            saveCasEnteredResolve();
+            await blockedSave;
+        }
+        return fifoHarness.compareAndSwap(request);
+    },
+    tabId: 'fifo-owner', BroadcastChannelImpl: undefined,
+});
+await fifoAuthority.acquire({ readV2: true, writeV2: true, initialStore: valid });
+const fifoStore = structuredClone(valid);
+fifoStore.scopes.chat.operation.lastSuccessfulRunAt += 2;
+const queuedSave = fifoAuthority.save(fifoStore, { scopeId: 'chat' });
+await saveCasEntered;
+const queuedRelease = fifoAuthority.release({ readV2: true, serveV2: false });
+assert.throws(() => fifoAuthority.close(), error => error?.code === 'TT_AUTHORITY_BUSY',
+    'pending mutation 存在时 close 必须拒绝静默清空本地 token');
+assert.equal(fifoCasCalls, 2, 'release 必须排在正在执行的 save 后，不能并发进入 CAS');
+blockedSaveResolve();
+const [fifoReceipt, fifoReleased] = await Promise.all([queuedSave, queuedRelease]);
+assert.equal(fifoReceipt.storeRevision, 2, 'FIFO 中 save 必须先提交并返回 revision');
+assert.equal(fifoReleased, true, 'FIFO 中 release 必须基于 save 的新 token 成功释放');
+assert.equal(fifoHarness.records.get(TODAY_TREND_V2_AUTHORITY_KEY).ownerTabId, null,
+    'save→release 交错完成后不得遗留 orphan owner');
+assert.deepEqual(fifoHarness.records.get(TODAY_TREND_V2_STORAGE_KEY).payload, normalizeTodayTrendStore(fifoStore),
+    'FIFO release 不得丢失排在前面的 save payload');
+fifoAuthority.close();
+
+const releaseConflictHarness = createAuthorityHarness();
+let injectReleaseConflict = true;
+const releaseConflictAuthority = createTodayTrendV2Authority({
+    readEntry: releaseConflictHarness.readEntry,
+    compareAndSwap: async request => {
+        const current = releaseConflictHarness.records.get(TODAY_TREND_V2_AUTHORITY_KEY);
+        if (injectReleaseConflict && current?.ownerTabId === 'release-conflict-owner'
+            && request.writes.length === 1 && request.writes[0].value.ownerTabId === null) {
+            injectReleaseConflict = false;
+            releaseConflictHarness.records.set(TODAY_TREND_V2_AUTHORITY_KEY, {
+                ...structuredClone(current), authorityRevision: current.authorityRevision + 1,
+            });
+            return { ok: false, reason: 'CAS_CONFLICT' };
+        }
+        return releaseConflictHarness.compareAndSwap(request);
+    },
+    tabId: 'release-conflict-owner', BroadcastChannelImpl: undefined,
+});
+await releaseConflictAuthority.acquire({ readV2: true, writeV2: true, initialStore: valid });
+await assert.rejects(() => releaseConflictAuthority.release({ readV2: true, serveV2: false }),
+    error => error?.code === 'TT_AUTHORITY_CONFLICT',
+    'release CAS conflict 且 owner 仍属于当前 tab 时必须抛出可重试冲突，不能返回 false');
+assert.equal((await releaseConflictAuthority.status()).owned, true,
+    '可重试 release conflict 后必须从持久化 authority 恢复本地 token');
+assert.throws(() => releaseConflictAuthority.close(), error => error?.code === 'TT_AUTHORITY_BUSY',
+    'active owner 未 release 前 close 必须拒绝制造 orphan owner');
+assert.equal(await releaseConflictAuthority.release({ readV2: true, serveV2: false }), true,
+    'release conflict 后的显式重试必须能够释放恢复后的 token');
+releaseConflictAuthority.close();
+
+const concurrentHarness = createAuthorityHarness();
+const concurrentA = createTodayTrendV2Authority({ ...concurrentHarness, tabId: 'race-a', BroadcastChannelImpl: undefined });
+const concurrentB = createTodayTrendV2Authority({ ...concurrentHarness, tabId: 'race-b', BroadcastChannelImpl: undefined });
+const race = await Promise.allSettled([
+    concurrentA.acquire({ readV2: true, writeV2: true, initialStore: valid }),
+    concurrentB.acquire({ readV2: true, writeV2: true, initialStore: valid }),
+]);
+assert.equal(race.filter(result => result.status === 'fulfilled').length, 1, '双标签基于同一 guard 竞争时只能有一个 authority acquire 成功');
+assert.equal(race.filter(result => result.status === 'rejected' && result.reason?.code === 'TT_AUTHORITY_CONFLICT').length, 1,
+    '双标签竞争失败方必须得到明确 authority conflict');
+const concurrentReleaseResults = await Promise.all([concurrentA.release(), concurrentB.release()]);
+assert.deepEqual(concurrentReleaseResults.sort(), [false, true],
+    '并发 acquire 的胜者必须显式 release，失败方 release 应稳定返回 false');
+concurrentA.close();
+concurrentB.close();
+
+assert.throws(() => normalizeTodayTrendV2Authority({ schemaVersion: 2 }), error => error?.code === 'TT_V2_FUTURE_VERSION',
+    '未来 authority schema 必须 fail-closed');
+assert.throws(() => normalizeTodayTrendV2Envelope({ schemaVersion: 2 }), error => error?.code === 'TT_V2_FUTURE_VERSION',
+    '未来 v2 store schema 必须 fail-closed');
+const splitHarness = createAuthorityHarness();
+const splitPrimary = createTodayTrendV2Envelope(valid, 1);
+splitHarness.records.set(TODAY_TREND_V2_AUTHORITY_KEY, normalizeTodayTrendV2Authority({
+    schemaVersion: 1, epoch: 1, authorityRevision: 2, storeRevision: 1, scopeRevisionByStorageId: {},
+    ownerTabId: 'split-owner', readV2: true, writeV2: true, serveV2: false,
+}));
+splitHarness.records.set(TODAY_TREND_V2_STORAGE_KEY, splitPrimary);
+const splitStorage = memoryStorage();
+const splitPayload = structuredClone(valid);
+splitPayload.presets.preset.name = '冲突副本';
+splitStorage.setItem(TODAY_TREND_V2_FALLBACK_KEY, JSON.stringify(createTodayTrendV2Envelope(splitPayload, 1)));
+const splitAuthority = createTodayTrendV2Authority({ ...splitHarness, storage: splitStorage, tabId: 'split-reader', BroadcastChannelImpl: undefined });
+await assert.rejects(() => splitAuthority.load(), error => error?.code === 'TT_STORAGE_SPLIT_BRAIN', '相同 revision 的主副本内容不同时必须阻断读取');
+splitAuthority.close();
+const unavailableAuthority = createTodayTrendV2Authority({
+    readEntry: async () => ({ ok: false }), compareAndSwap: async () => ({ ok: false, reason: 'IDB_UNAVAILABLE' }),
+    tabId: 'unavailable', BroadcastChannelImpl: undefined,
+});
+await assert.rejects(() => unavailableAuthority.acquire({ readV2: true, writeV2: true }), error => error?.code === 'TT_V2_IDB_UNAVAILABLE',
+    'IDB 不可用时 v2 writer 必须 fail-closed，不能降级为 localStorage writer');
+unavailableAuthority.close();
+
+const createTransactionalDb = initialEntries => {
+    const records = new Map(initialEntries.map(([key, value]) => [key, structuredClone(value)]));
+    let queue = Promise.resolve();
+    const db = {
+        transaction(_storeName, mode) {
+            assert.equal(mode, 'readwrite', '生产 CAS 必须打开 readwrite 事务');
+            const writes = [];
+            let getRequest = null;
+            let guardKey = null;
+            let aborted = false;
+            const transaction = {
+                abort() { aborted = true; },
+                objectStore() {
+                    return {
+                        get(key) { guardKey = key; getRequest = {}; return getRequest; },
+                        put(value, key) { writes.push({ key, value: structuredClone(value) }); },
+                    };
+                },
+            };
+            queue = queue.then(() => new Promise(resolve => queueMicrotask(() => {
+                getRequest.result = records.has(guardKey) ? structuredClone(records.get(guardKey)) : undefined;
+                getRequest.onsuccess?.();
+                if (aborted) transaction.onabort?.();
+                else {
+                    for (const entry of writes) records.set(entry.key, entry.value);
+                    transaction.oncomplete?.();
+                }
+                resolve();
+            })));
+            return transaction;
+        },
+    };
+    return { db, records };
+};
+const realCasGuard = { epoch: 1, revision: 2 };
+const realCasDb = createTransactionalDb([['guard', realCasGuard]]);
+const [realCasA, realCasB] = await Promise.all([
+    pmIDBCompareAndSwap({
+        guardKey: 'guard', expectedGuard: realCasGuard,
+        writes: [{ key: 'payload-a', value: { accepted: 'a' } }, { key: 'guard', value: { epoch: 2, revision: 3 } }],
+        openIDB: async () => realCasDb.db,
+    }),
+    pmIDBCompareAndSwap({
+        guardKey: 'guard', expectedGuard: realCasGuard,
+        writes: [{ key: 'payload-b', value: { accepted: 'b' } }, { key: 'guard', value: { epoch: 3, revision: 3 } }],
+        openIDB: async () => realCasDb.db,
+    }),
+]);
+assert.deepEqual([realCasA.ok, realCasB.ok].sort(), [false, true], '真实 pmIDBCompareAndSwap 并发竞争必须只允许一个事务成功');
+assert.equal(realCasDb.records.has('payload-a') !== realCasDb.records.has('payload-b'), true,
+    'CAS 冲突事务的全部 writes 必须原子丢弃，不能留下部分 payload');
+const missingDbResult = await pmIDBCompareAndSwap({
+    guardKey: 'guard', expectedGuard: realCasGuard, writes: [{ key: 'payload', value: 1 }], openIDB: async () => null,
+});
+assert.deepEqual(missingDbResult, { ok: false, reason: 'IDB_UNAVAILABLE' }, '生产 CAS 必须区分数据库不可用与 guard 冲突');
+
+const originalIndexedDB = globalThis.indexedDB;
+try {
+    const openRequests = [];
+    globalThis.indexedDB = {
+        open() {
+            const request = {};
+            openRequests.push(request);
+            return request;
+        },
+    };
+    const isolatedPmIdb = await import(`../src/pm-idb.js?open-lifecycle=${Date.now()}`);
+    const firstOpen = isolatedPmIdb.pmOpenIDB();
+    const concurrentOpen = isolatedPmIdb.pmOpenIDB();
+    assert.equal(openRequests.length, 1, '首次并发 pmOpenIDB 必须共享同一个 pending open request');
+    const firstConnection = {
+        objectStoreNames: { contains: () => true },
+        transaction: () => ({}),
+        closeCalls: 0,
+        close() { this.closeCalls += 1; },
+    };
+    openRequests[0].result = firstConnection;
+    openRequests[0].onsuccess();
+    assert.equal(await firstOpen, firstConnection);
+    assert.equal(await concurrentOpen, firstConnection, '并发调用必须解析为同一数据库连接');
+    const firstVersionChange = firstConnection.onversionchange;
+    firstVersionChange();
+    assert.equal(firstConnection.closeCalls, 1, 'versionchange 必须关闭事件所属连接');
+    const reopened = isolatedPmIdb.pmOpenIDB();
+    assert.equal(openRequests.length, 2, 'versionchange 清除当前连接后必须允许重新打开');
+    const secondConnection = {
+        objectStoreNames: { contains: () => true },
+        transaction: () => ({}),
+        closeCalls: 0,
+        close() { this.closeCalls += 1; },
+    };
+    openRequests[1].result = secondConnection;
+    openRequests[1].onsuccess();
+    assert.equal(await reopened, secondConnection);
+    firstVersionChange();
+    assert.equal(secondConnection.closeCalls, 0, '旧连接的迟到 versionchange 不得关闭后来缓存的连接');
+    assert.equal(await isolatedPmIdb.pmOpenIDB(), secondConnection, '旧连接事件不得清空后来连接的缓存');
+
+    let synchronousOpenAttempts = 0;
+    const synchronousRetryRequests = [];
+    globalThis.indexedDB = {
+        open() {
+            synchronousOpenAttempts += 1;
+            if (synchronousOpenAttempts === 1) throw new Error('injected synchronous open failure');
+            const request = {};
+            synchronousRetryRequests.push(request);
+            return request;
+        },
+    };
+    const synchronousRetryPmIdb = await import(`../src/pm-idb.js?open-sync-retry=${Date.now()}`);
+    assert.equal(await synchronousRetryPmIdb.pmOpenIDB(), null,
+        'indexedDB.open 同步抛错时 pmOpenIDB 必须返回 null');
+    const synchronousRetry = synchronousRetryPmIdb.pmOpenIDB();
+    assert.equal(synchronousOpenAttempts, 2, '同步打开失败后下一次调用必须重新发起 open');
+    const synchronousRetryConnection = {
+        objectStoreNames: { contains: () => true }, transaction: () => ({}), close() {},
+    };
+    synchronousRetryRequests[0].result = synchronousRetryConnection;
+    synchronousRetryRequests[0].onsuccess();
+    assert.equal(await synchronousRetry, synchronousRetryConnection,
+        '同步打开失败不得让已完成的 openingPromise 永久阻断后续成功重试');
+
+    const asynchronousRetryRequests = [];
+    globalThis.indexedDB = {
+        open() {
+            const request = {};
+            asynchronousRetryRequests.push(request);
+            return request;
+        },
+    };
+    const asynchronousRetryPmIdb = await import(`../src/pm-idb.js?open-async-retry=${Date.now()}`);
+    const asynchronousFailure = asynchronousRetryPmIdb.pmOpenIDB();
+    asynchronousRetryRequests[0].onerror();
+    assert.equal(await asynchronousFailure, null, 'IDB open request error 时 pmOpenIDB 必须返回 null');
+    const asynchronousRetry = asynchronousRetryPmIdb.pmOpenIDB();
+    assert.equal(asynchronousRetryRequests.length, 2, '异步打开失败后下一次调用必须创建新的 open request');
+    const asynchronousRetryConnection = {
+        objectStoreNames: { contains: () => true }, transaction: () => ({}), close() {},
+    };
+    asynchronousRetryRequests[1].result = asynchronousRetryConnection;
+    asynchronousRetryRequests[1].onsuccess();
+    assert.equal(await asynchronousRetry, asynchronousRetryConnection,
+        '异步打开失败不得缓存旧失败结果');
+} finally {
+    if (originalIndexedDB === undefined) delete globalThis.indexedDB;
+    else globalThis.indexedDB = originalIndexedDB;
+}
 
 let committed = structuredClone(valid);
 const committer = createTodayTrendCommitter({
@@ -1122,6 +1555,41 @@ const failingCommitter = createTodayTrendCommitter({
 });
 await assert.rejects(() => failingCommitter.commitStore(store => ({ ...store, scopes: {} })), /今日风向注入刷新失败/);
 assert.deepEqual(committed, beforeInjectionFailure, '注入失败必须补偿为提交前的持久化快照');
+
+let fencedStore = structuredClone(valid);
+let fencedRevision = 1;
+let releaseFailedRefresh;
+const failedRefreshEntered = new Promise(resolve => { releaseFailedRefresh = resolve; });
+let continueFailedRefresh;
+const failedRefreshBlocked = new Promise(resolve => { continueFailedRefresh = resolve; });
+const fencedCommitter = createTodayTrendCommitter({
+    load: async () => structuredClone(fencedStore),
+    save: async (value, options = {}) => {
+        if (options.expectedStoreRevision !== undefined && options.expectedStoreRevision !== fencedRevision) {
+            const error = new Error('revision changed');
+            error.code = 'TT_STORE_REVISION_CONFLICT';
+            throw error;
+        }
+        fencedStore = structuredClone(value);
+        fencedRevision += 1;
+        return options.returnReceipt ? { store: structuredClone(fencedStore), storeRevision: fencedRevision } : structuredClone(fencedStore);
+    },
+    refreshInjection: async () => {
+        releaseFailedRefresh();
+        await failedRefreshBlocked;
+        return { failedWrites: 1, failedKeys: [] };
+    },
+});
+const fencedCommit = fencedCommitter.commitStore(store => ({ ...store, scopes: {} }));
+await failedRefreshEntered;
+const laterSuccessfulStore = structuredClone(valid);
+laterSuccessfulStore.presets.preset.name = '稍后成功提交';
+fencedStore = laterSuccessfulStore;
+fencedRevision += 1;
+continueFailedRefresh();
+await assert.rejects(() => fencedCommit, error => error?.rollbackError?.code === 'TT_STORE_REVISION_CONFLICT',
+    '候选提交后的 revision 已变化时，迟到补偿必须报告明确冲突而不是覆盖新数据');
+assert.deepEqual(fencedStore, laterSuccessfulStore, '迟到补偿冲突后必须保留稍后成功提交的数据');
 
 let installedStore = structuredClone(valid);
 installedStore.presets.free = { ...structuredClone(installedStore.presets.preset), id: 'free', name: '未绑定预设' };
@@ -2189,6 +2657,172 @@ for (let index = 0; index < 20 && concurrentRollbackStore.scopes.chat.operation.
 assert.equal(concurrentRollbackCalls, 1, '回退提交期间累计满阈值的新增楼层必须在回退后补调度一次');
 assert.equal(concurrentRollbackStore.scopes.chat.operation.lastSuccessfulAssistantCount, 3409, '回退期间新增宿主楼层不得被 pendingTurns 清零或吞掉');
 assert.deepEqual(concurrentRollbackStore.scopes.chat.generationSnapshots.map(item => item.assistantCount), [0, 7, 3409], '回退后补调度必须按宿主楼层重新建立最新快照');
+
+const seededSamples = seed => {
+    const random = createSeededRandom(seed);
+    return Array.from({ length: 8 }, () => random());
+};
+const seededRandomA = createSeededRandom('today-trend-v1');
+const seededRandomB = createSeededRandom('today-trend-v1');
+assert.deepEqual(Array.from({ length: 8 }, () => seededRandomA()), Array.from({ length: 8 }, () => seededRandomB()), '同 seed 必须重放相同随机序列');
+assert.deepEqual(seededSamples('today-trend-v1'), [
+    0.9704373918939382, 0.38605407858267426, 0.7518562425393611, 0.4772277001757175,
+    0.7917709436733276, 0.15437844768166542, 0.18535474338568747, 0.8009844277985394,
+], '固定 seed 的 golden vector 不得漂移');
+assert.notDeepEqual(seededSamples('today-trend-v1'), seededSamples('today-trend-v2'), '不同 seed 的固定样本不得退化为相同序列');
+assert.equal(createSeededRandom(-0).normalizedSeed, 'number:0', '负零 seed 必须规范化为稳定数字零');
+assert.equal(normalizeDeterministicSeed(' today-trend-v1 '), 'string:today-trend-v1', '字符串 seed 必须去除边界空白并暴露规范值');
+for (const invalidSeed of [null, undefined, '', '   ', Number.NaN, Number.POSITIVE_INFINITY, {}]) {
+    assert.throws(() => createSeededRandom(invalidSeed), /seed must be a non-empty string or finite number/, '非法 seed 必须 fail-fast');
+}
+assert.throws(() => createFaultSchedule([{ step: -1, code: 'TT_NEGATIVE' }]), /non-negative safe integer/, '负数 fault step 必须拒绝');
+assert.throws(() => createFaultSchedule([{ step: 1.5, code: 'TT_FRACTION' }]), /non-negative safe integer/, '小数 fault step 必须拒绝');
+assert.throws(() => createFaultSchedule([{ step: 1, code: '' }]), /non-empty string/, '空 fault code 必须拒绝');
+assert.throws(() => createFaultSchedule([{ step: 1, code: 'TT_ONE' }, { step: 1, code: 'TT_TWO' }]), /duplicate fault step/, '重复 fault step 不得静默覆盖');
+assert.throws(() => createFaultSchedule([{ step: 2, code: 'TT_OUTSIDE' }], { steps: 2 }), /lower than steps/, '超出序列的 fault 必须在运行前拒绝');
+const isolatedFixtureA = fixture();
+isolatedFixtureA.scopes.chat.world.items[0].summary = '已污染';
+assert.equal(fixture().scopes.chat.world.items[0].summary, '晚餐服务临近', 'v1 fixture 每次创建必须相互隔离');
+
+const createOwnerSequenceTransition = () => async ({ state, step, sample, fault }) => {
+    const registeredListeners = new Map();
+    const container = {
+        addEventListener: (type, listener) => {
+            const listeners = registeredListeners.get(type) || new Set();
+            listeners.add(listener);
+            registeredListeners.set(type, listeners);
+        },
+        removeEventListener: (type, listener) => {
+            const listeners = registeredListeners.get(type);
+            listeners?.delete(listener);
+            if (!listeners?.size) registeredListeners.delete(type);
+        },
+        contains: () => true,
+    };
+    const dispatcher = createTodayTrendActionDispatcher({
+        container, getStorageId: () => 'chat', getStore: async () => fixture(),
+        committer: { commitScope: async () => fixture() }, render: async () => {}, confirmImpl: () => true,
+    });
+    assert.deepEqual([...registeredListeners.keys()].sort(), ['click', 'keydown', 'submit'], '真实 dispatcher 必须注册三类代理事件');
+
+    let ownerStore = normalizeTodayTrendStore(fixture());
+    const ownerCommitter = createTodayTrendCommitter({
+        load: async () => ownerStore,
+        save: async value => { ownerStore = structuredClone(value); return ownerStore; },
+        refreshInjection: async () => ({ failedWrites: 0, failedKeys: [] }),
+    });
+    let observedSignal = null;
+    const scheduler = createTodayTrendScheduler({
+        controller: { generate: async ({ scope, signal }) => {
+            observedSignal = signal;
+            if (fault) throw fault;
+            return { scope: { ...scope, world: { items: [{ ...scope.world.items[0], summary: `owner-step-${step}-${sample}` }] } } };
+        } },
+        committer: ownerCommitter, getStore: async () => ownerStore, getStorageId: () => 'chat', getFloor: () => step + 1,
+    });
+    const schedulerStates = [];
+    const unsubscribe = scheduler.subscribe(snapshot => schedulerStates.push(snapshot));
+    let transitionError = null;
+    let terminalPhase = null;
+    let terminalTask = null;
+    let notificationsBeforeUnsubscribe = 0;
+    let firstUnsubscribeResult = null;
+    let secondUnsubscribeResult = null;
+    try {
+        await scheduler.manual({ storageId: 'chat', floor: step + 1 });
+        terminalPhase = scheduler.state().phase;
+    } catch (error) {
+        transitionError = error;
+        terminalPhase = scheduler.state().phase;
+    } finally {
+        terminalTask = scheduler.state().task;
+        notificationsBeforeUnsubscribe = schedulerStates.length;
+        try {
+            firstUnsubscribeResult = unsubscribe();
+            secondUnsubscribeResult = unsubscribe();
+            scheduler.cancel('phase-0-owner-cleanup', true);
+        } finally {
+            dispatcher.destroy();
+        }
+    }
+    assert.ok(observedSignal instanceof AbortSignal, '真实 scheduler 必须向生成控制器传入 AbortSignal');
+    assert.equal(terminalPhase, fault ? 'failed' : 'completed', 'scheduler 必须进入与生成结果一致的公开终态');
+    assert.deepEqual(terminalTask, fault ? { kind: 'manual', storageId: 'chat', floor: step + 1, target: null } : null, 'scheduler 结束后不得保留 active task；失败只允许保留可观察终态摘要');
+    assert.equal(firstUnsubscribeResult, true, 'scheduler 首次 unsubscribe 必须释放真实订阅');
+    assert.equal(secondUnsubscribeResult, false, 'scheduler 重复 unsubscribe 不得伪报释放成功');
+    assert.equal(schedulerStates.length, notificationsBeforeUnsubscribe, 'unsubscribe 后 scheduler 状态变化不得继续通知旧 listener');
+    assert.equal(registeredListeners.size, 0, 'dispatcher.destroy 必须按原引用移除全部代理事件');
+    assert.equal(scheduler.state().task, null, '显式 cleanup 后 scheduler 终态 task 摘要必须清除');
+    if (transitionError) throw transitionError;
+    return {
+        state: { completed: (state?.completed || 0) + 1 },
+        outcome: { terminalPhase, notifications: schedulerStates.length, listenerCount: registeredListeners.size, signalAborted: observedSignal.aborted },
+    };
+};
+
+const sequenceOptions = {
+    scenarioId: 'phase-0-real-owner-replay', seed: 'phase-0-replay', steps: 20,
+    faults: [{ step: 7, code: 'TT_TEST_STORAGE_WRITE' }], fixtureVersion: 'today-trend-v1',
+    transition: createOwnerSequenceTransition(),
+};
+const sequenceA = await runDeterministicSequence(sequenceOptions);
+const replayDescriptor = JSON.parse(JSON.stringify(sequenceA.replayDescriptor));
+const sequenceB = await runDeterministicSequence({ ...replayDescriptor, transition: createOwnerSequenceTransition() });
+assert.deepEqual(sequenceA, sequenceB, '序列化 replay descriptor 必须能在新 transition 与新 options 实例中重放相同结果');
+assert.deepEqual(sequenceA.replayDescriptor, {
+    schema: 'today-trend-deterministic-sequence', version: 1, scenarioId: 'phase-0-real-owner-replay',
+    seed: 'string:phase-0-replay', seedFormat: 'normalized-v1', steps: 20, faults: [{ step: 7, code: 'TT_TEST_STORAGE_WRITE' }],
+    fixtureVersion: 'today-trend-v1', firstFailureStep: 7,
+}, 'replay descriptor 必须包含版本、场景、JSON 安全规范 seed、故障和首个失败步骤');
+assert.ok(Object.isFrozen(sequenceA.replayDescriptor) && Object.isFrozen(sequenceA.replayDescriptor.faults) && Object.isFrozen(sequenceA.replayDescriptor.faults[0]), 'replay descriptor 及其 fault 列表必须深度冻结');
+assert.throws(() => { sequenceA.replayDescriptor.faults.push({ step: 9, code: 'TT_MUTATED' }); }, TypeError, '冻结的 replay fault 列表不得追加条目');
+assert.deepEqual(sequenceA.trace.filter(entry => entry.status === 'accepted').map(entry => entry.step), [0, 1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19], 'accepted 步骤必须精确排除 fault step');
+assert.deepEqual(sequenceA.trace.filter(entry => entry.status === 'rejected').map(entry => entry.step), [7], 'rejected 步骤必须只包含登记 fault');
+assert.deepEqual(sequenceA.trace[7], {
+    step: 7, sample: seededSamples('phase-0-replay')[7], fault: 'TT_TEST_STORAGE_WRITE', status: 'rejected',
+    error: { code: 'TT_TEST_STORAGE_WRITE', message: 'Injected fault: TT_TEST_STORAGE_WRITE' },
+}, 'trace[7] 必须精确记录登记 fault 的 sample、code 与错误摘要');
+assert.deepEqual(sequenceA.state, { completed: 19 }, '20 步真实 owner 序列必须成功完成 19 步并拒绝唯一 fault step');
+assert.deepEqual(sequenceA.remainingFaults, [], '命中的故障计划必须被消费完毕');
+const negativeZeroSequence = await runDeterministicSequence({ seed: -0, steps: 1, transition: () => ({ state: 'ok' }) });
+const replayedNegativeZeroSequence = await runDeterministicSequence({
+    ...JSON.parse(JSON.stringify(negativeZeroSequence.replayDescriptor)), transition: () => ({ state: 'ok' }),
+});
+assert.deepEqual(replayedNegativeZeroSequence, negativeZeroSequence, '负零 seed 的 replay descriptor 必须跨 JSON 保持等价');
+const immutableRejectedState = await runDeterministicSequence({
+    seed: 'rejected-state-isolation', steps: 2, faults: [{ step: 1, code: 'TT_REJECTED_STATE' }],
+    transition: ({ state, fault }) => {
+        const next = state || { committed: 0 };
+        next.committed += 1;
+        if (fault) throw fault;
+        return { state: next };
+    },
+});
+assert.deepEqual(immutableRejectedState.state, { committed: 1 }, 'rejected step 对 candidate state 的原地修改不得污染已提交 state');
+await assert.rejects(() => runDeterministicSequence({
+    schema: 'unknown-replay-schema', version: 1, seed: 'unsupported-schema', steps: 1, transition: () => ({ state: null }),
+}), /schema or version is unsupported/, '未知 replay schema 必须 fail-closed');
+await assert.rejects(() => runDeterministicSequence({
+    schema: 'today-trend-deterministic-sequence', version: 2, seed: 'unsupported-version', steps: 1, transition: () => ({ state: null }),
+}), /schema or version is unsupported/, '未知 replay version 必须 fail-closed');
+await assert.rejects(() => runDeterministicSequence({
+    seed: 'uncloneable-state', steps: 1, transition: () => ({ state: { callback: () => {} } }),
+}), error => error?.code === 'TT_TEST_INFRASTRUCTURE' && /structured-cloneable/.test(error.message), '不可克隆 transition state 必须在当前步骤立即失败');
+await assert.rejects(() => runDeterministicSequence({ seed: 'unexpected-error', steps: 1, transition: () => { throw new Error('assertion escaped'); } }), error => {
+    assert.equal(error.code, 'TT_TEST_INFRASTRUCTURE');
+    assert.equal(error.firstFailureStep, 0);
+    assert.equal(error.cause?.message, 'assertion escaped');
+    assert.equal(error.replayDescriptor.firstFailureStep, 0);
+    return true;
+}, '未登记异常必须作为测试基础设施失败抛出，不能吞为业务拒绝');
+await assert.rejects(() => runDeterministicSequence({
+    seed: 'missing-fault', steps: 1, faults: [{ step: 0, code: 'TT_EXPECTED' }], transition: () => ({ state: null }),
+}), error => error?.code === 'TT_TEST_INFRASTRUCTURE' && error.firstFailureStep === 0, '登记 fault 未抛出时必须立即判定测试基础设施失败');
+await assert.rejects(() => runDeterministicSequence({
+    seed: 'same-code-impostor', steps: 1, faults: [{ step: 0, code: 'TT_EXPECTED' }],
+    transition: () => { const error = new Error('same code, different identity'); error.code = 'TT_EXPECTED'; throw error; },
+}), error => error?.code === 'TT_TEST_INFRASTRUCTURE'
+    && error.cause?.message === 'same code, different identity', '同 code 的其他异常不得冒充 fault schedule 注入对象');
 
 assert.match(await import('node:fs/promises').then(({ readFile }) => readFile(new URL('../src/today-trend.js', import.meta.url), 'utf8')),
     /initializeTodayTrend[\s\S]*bindTodayTrendPreset[\s\S]*commitTodayTrendScope/, '安装层必须公开初始化、预设绑定与设置提交接口');

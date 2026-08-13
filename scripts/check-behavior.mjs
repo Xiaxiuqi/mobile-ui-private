@@ -8,7 +8,8 @@ import {
     getGalBubbleAssistantText, getGalBubblePrompt, getGalBubbleScriptDefinition,
     installGalBubble, parseGalBubbleMessages, reconcileGalBubble, uninstallGalBubble,
 } from '../src/gal-bubble.js';
-import { createEmptyTodayTrendStore } from '../src/today-trend-model.js';
+import { createDefaultTodayTrendDynamicsSettings, createEmptyTodayTrendStore, normalizeTodayTrendStore } from '../src/today-trend-model.js';
+import { createTodayTrendStorage, todayTrendV2Authority } from '../src/today-trend-storage.js';
 import { normalizeThemePreset, THEME_PRESETS } from '../src/config.js';
 import { createWorldBookEntryKey, getCurrentChatWorldBooks, getEnabledWorldBookNames, getReadableWorldBookNames, getTavernDbColumn, isMemberPrivateWorldBookEntryAllowed, isWorldBookEntryAllowed, normalizeWorldBookConfig } from '../src/worldbook-config.js';
 import { buildWorldBookContext } from '../src/worldbook-context.js';
@@ -93,6 +94,7 @@ import {
     commitEditedGroupUpdate, installPhoneDirectory, refreshEditedGroupRuntime,
 } from '../src/phone-directory.js';
 import { createPhoneQuoteController } from '../src/phone-quote.js';
+import { createTodayTrendV1Fixture } from './today-trend-test-foundation.mjs';
 function createQuickReplyApiFixture({ set = null, active = false, fail = {}, beforeMutation = null } = {}) {
     const sets = new Map();
     if (set) sets.set(set.name, set);
@@ -6234,6 +6236,108 @@ assert.equal(Object.hasOwn(lineageAfterBackupRollback, getStorageIdFor('alice.pn
     '备份回滚只能删除本事务实际插入且未被后续修改的 lineage marker');
 assert.equal(lineageAfterBackupRollback[concurrentBackupTargetId].targetChatId, 'branch-during-backup',
     '备份回滚不得删除事务期间其他合法提交的 lineage marker');
+
+const backupAuthorityKey = 'ST_SMS_TODAY_TREND_V2_AUTHORITY_V1';
+const backupV2StoreKey = 'ST_SMS_TODAY_TREND_V2';
+const previousBackupAuthority = idbValues.has(backupAuthorityKey) ? structuredClone(idbValues.get(backupAuthorityKey)) : undefined;
+const previousBackupV2Store = idbValues.has(backupV2StoreKey) ? structuredClone(idbValues.get(backupV2StoreKey)) : undefined;
+const backupOriginalTrend = createTodayTrendV1Fixture(createDefaultTodayTrendDynamicsSettings);
+const backupImportedTrend = structuredClone(backupOriginalTrend);
+backupImportedTrend.presets.preset.name = '备份导入版本';
+const backupLaterTrend = structuredClone(backupOriginalTrend);
+backupLaterTrend.presets.preset.name = '后续合法提交';
+let backupLaterReceipt = null;
+let backupFenceError = null;
+try {
+    await todayTrendV2Authority.acquire({
+        readV2: true, writeV2: true, serveV2: false, initialStore: backupOriginalTrend,
+    });
+    await todayTrendV2Authority.release({ readV2: true, serveV2: false });
+    try {
+        await runBackupTransaction({
+            capture: backupHandlers.capture,
+            apply: snapshot => backupHandlers.apply(snapshot || {
+                ...importedBackupWithLineage,
+                todayTrend: backupImportedTrend,
+            }),
+            persist: backupHandlers.persist,
+            afterPersist: async phase => {
+                if (phase !== 'apply') return;
+                await todayTrendV2Authority.acquire({ readV2: true, writeV2: true, serveV2: false });
+                backupLaterReceipt = await todayTrendV2Authority.save(backupLaterTrend);
+                throw new Error('backup-fence-after-persist-failed');
+            },
+        });
+    } catch (error) {
+        backupFenceError = error;
+    }
+    assert.equal(backupFenceError?.backupPhase, 'rollback-failed',
+        '备份 apply 后发生后续合法提交时，旧事务必须明确报告 rollback-failed');
+    assert.match(backupFenceError?.cause?.message || '', /backup-fence-after-persist-failed/,
+        '备份 rollback fence 冲突不得掩盖触发回滚的主错误');
+    assert.equal(backupFenceError?.rollbackError?.code, 'TT_STORE_REVISION_CONFLICT',
+        '备份 rollback 必须使用 apply receipt 的 storeRevision 拒绝覆盖后续提交');
+    assert.ok(Number.isSafeInteger(backupLaterReceipt?.storeRevision), '后续合法提交必须返回可验证的 store revision');
+    assert.deepEqual((await todayTrendV2Authority.load()).store, normalizeTodayTrendStore(backupLaterTrend),
+        '备份 rollback fence 冲突后必须保留后续合法提交的 Today Trend store');
+} finally {
+    try { await todayTrendV2Authority.release({ readV2: true, serveV2: false }); } catch {}
+    if (previousBackupAuthority === undefined) idbValues.delete(backupAuthorityKey);
+    else idbValues.set(backupAuthorityKey, previousBackupAuthority);
+    if (previousBackupV2Store === undefined) idbValues.delete(backupV2StoreKey);
+    else idbValues.set(backupV2StoreKey, previousBackupV2Store);
+}
+
+const releaseOnlyFailure = new Error('backup release failed');
+let releaseOnlyRevision = 3;
+const releaseOnlyOptions = [];
+const releaseOnlyAuthority = {
+    load: async () => ({ active: true, store: backupOriginalTrend, authority: null }),
+    status: async () => ({ available: true, owned: false, authority: {
+        ownerTabId: null, readV2: true, writeV2: false, serveV2: false, storeRevision: releaseOnlyRevision,
+    } }),
+    acquire: async () => {},
+    save: async (value, options) => {
+        releaseOnlyOptions.push(structuredClone(options));
+        if (options.expectedStoreRevision !== null && options.expectedStoreRevision !== releaseOnlyRevision) {
+            const error = new Error('backup revision conflict');
+            error.code = 'TT_STORE_REVISION_CONFLICT';
+            throw error;
+        }
+        releaseOnlyRevision += 1;
+        return { store: normalizeTodayTrendStore(value), storeRevision: releaseOnlyRevision };
+    },
+    release: async () => {
+        if (releaseOnlyOptions.length === 1) {
+            releaseOnlyRevision += 1;
+            throw releaseOnlyFailure;
+        }
+    },
+};
+const releaseOnlyBridge = createTodayTrendStorage({ storage: localStorage, v2Authority: releaseOnlyAuthority });
+const releaseOnlyBackupHandlers = createBackupStateHandlers({ saveTodayTrendStore: releaseOnlyBridge.save });
+let releaseOnlyBackupError = null;
+try {
+    await runBackupTransaction({
+        capture: releaseOnlyBackupHandlers.capture,
+        apply: snapshot => releaseOnlyBackupHandlers.apply(snapshot || {
+            ...importedBackupWithLineage,
+            todayTrend: backupImportedTrend,
+        }),
+        persist: releaseOnlyBackupHandlers.persist,
+    });
+} catch (error) {
+    releaseOnlyBackupError = error;
+}
+assert.equal(releaseOnlyBackupError?.backupPhase, 'rollback-failed',
+    'save 已提交但临时 authority 释放失败时，backup 必须进入可诊断的 fenced rollback');
+assert.equal(releaseOnlyBackupError?.cause?.code, 'TT_AUTHORITY_RELEASE_FAILED',
+    'release-only failure 必须保持为触发 rollback 的主错误');
+assert.equal(releaseOnlyBackupError?.cause?.cause, releaseOnlyFailure, 'backup 必须保留底层 release cause');
+assert.equal(releaseOnlyBackupError?.rollbackError?.code, 'TT_STORE_REVISION_CONFLICT',
+    'release-only failure 后的后续合法 revision 必须阻止旧 backup rollback 覆盖');
+assert.equal(releaseOnlyOptions[1]?.expectedStoreRevision, 4,
+    'backup 必须把 release-only failure 携带的 committed receipt 贯穿到 rollback fence');
 
 globalThis.document = {
     getElementById: id => uiElements.get(id) || null,

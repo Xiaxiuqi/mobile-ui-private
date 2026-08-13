@@ -2716,6 +2716,9 @@ ${userPrompt}` : userPrompt;
   var CALENDAR_OUTFIT_STORAGE_KEY = "ST_SMS_CALENDAR_OUTFITS_V1";
   var TODAY_TREND_STORAGE_KEY = "ST_SMS_TODAY_TREND_V1";
   var TODAY_TREND_FALLBACK_KEY = "ST_SMS_TODAY_TREND_V1_LOCAL_FALLBACK";
+  var TODAY_TREND_V2_STORAGE_KEY = "ST_SMS_TODAY_TREND_V2";
+  var TODAY_TREND_V2_FALLBACK_KEY = "ST_SMS_TODAY_TREND_V2_LOCAL_FALLBACK";
+  var TODAY_TREND_V2_AUTHORITY_KEY = "ST_SMS_TODAY_TREND_V2_AUTHORITY_V1";
   var TODAY_TREND_INJECTION_KEY_PREFIX = "ST_SMS_TODAY_TREND_INJECTION_V1:";
   var CHARACTER_BEHAVIOR_KEY = "ST_SMS_CHARACTER_BEHAVIOR";
   var INJECTION_CONFIG_KEY = "ST_SMS_INJECTION_CONFIG";
@@ -5696,17 +5699,18 @@ ${lines.join("\n")}
 
   // src/pm-idb.js
   var database = null;
+  var openingPromise = null;
   function pmOpenIDB() {
-    return new Promise((resolve) => {
-      if (database) {
-        try {
-          database.transaction(PM_IDB_STORE, "readonly");
-          resolve(database);
-          return;
-        } catch (error) {
-          database = null;
-        }
+    if (database) {
+      try {
+        database.transaction(PM_IDB_STORE, "readonly");
+        return Promise.resolve(database);
+      } catch (error) {
+        database = null;
       }
+    }
+    if (openingPromise) return openingPromise;
+    const pending = new Promise((resolve) => {
       try {
         const request = indexedDB.open(PM_IDB_NAME, 1);
         request.onupgradeneeded = () => {
@@ -5714,16 +5718,77 @@ ${lines.join("\n")}
           if (!db.objectStoreNames.contains(PM_IDB_STORE)) db.createObjectStore(PM_IDB_STORE);
         };
         request.onsuccess = () => {
-          database = request.result;
-          database.onversionchange = () => {
-            database?.close();
-            database = null;
+          const opened = request.result;
+          opened.onversionchange = () => {
+            opened.close();
+            if (database === opened) database = null;
           };
-          resolve(database);
+          database = opened;
+          resolve(opened);
         };
         request.onerror = () => resolve(null);
       } catch (error) {
         resolve(null);
+      }
+    });
+    openingPromise = pending;
+    pending.finally(() => {
+      if (openingPromise === pending) openingPromise = null;
+    });
+    return pending;
+  }
+  function structurallyEqual(left, right) {
+    if (Object.is(left, right)) return true;
+    if (Array.isArray(left) || Array.isArray(right)) {
+      return Array.isArray(left) && Array.isArray(right) && left.length === right.length && left.every((value, index) => structurallyEqual(value, right[index]));
+    }
+    if (!left || !right || typeof left !== "object" || typeof right !== "object") return false;
+    const leftKeys = Object.keys(left).sort();
+    const rightKeys = Object.keys(right).sort();
+    return leftKeys.length === rightKeys.length && leftKeys.every((key, index) => key === rightKeys[index] && structurallyEqual(left[key], right[key]));
+  }
+  async function pmIDBCompareAndSwap({ guardKey, expectedGuard, writes, openIDB = pmOpenIDB } = {}) {
+    if (typeof guardKey !== "string" || !guardKey) throw new TypeError("IDB CAS guard key \u5FC5\u987B\u662F\u975E\u7A7A\u5B57\u7B26\u4E32");
+    if (!Array.isArray(writes) || !writes.length) throw new TypeError("IDB CAS writes \u5FC5\u987B\u662F\u975E\u7A7A\u6570\u7EC4");
+    for (const entry2 of writes) {
+      if (!entry2 || typeof entry2.key !== "string" || !entry2.key || !Object.hasOwn(entry2, "value")) {
+        throw new TypeError("IDB CAS write \u5FC5\u987B\u5305\u542B\u975E\u7A7A key \u4E0E value");
+      }
+    }
+    if (typeof openIDB !== "function") throw new TypeError("IDB CAS openIDB \u5FC5\u987B\u662F\u51FD\u6570");
+    const db = await openIDB();
+    if (!db) return { ok: false, reason: "IDB_UNAVAILABLE" };
+    return new Promise((resolve) => {
+      let settled = false;
+      let conflict = false;
+      const finish = (result) => {
+        if (settled) return;
+        settled = true;
+        resolve(result);
+      };
+      try {
+        const transaction = db.transaction(PM_IDB_STORE, "readwrite");
+        const store = transaction.objectStore(PM_IDB_STORE);
+        const request = store.get(guardKey);
+        request.onsuccess = () => {
+          if (!structurallyEqual(request.result, expectedGuard)) {
+            conflict = true;
+            transaction.abort();
+            return;
+          }
+          for (const entry2 of writes) store.put(entry2.value, entry2.key);
+        };
+        request.onerror = () => {
+          try {
+            transaction.abort();
+          } catch {
+          }
+        };
+        transaction.oncomplete = () => finish({ ok: true });
+        transaction.onabort = () => finish({ ok: false, reason: conflict ? "CAS_CONFLICT" : "IDB_ERROR" });
+        transaction.onerror = () => finish({ ok: false, reason: "IDB_ERROR" });
+      } catch (error) {
+        finish({ ok: false, reason: "IDB_ERROR" });
       }
     });
   }
@@ -7248,7 +7313,8 @@ ${lines.join("\n")}
     CALENDAR_CYCLE_STORAGE_KEY,
     CALENDAR_RECIPE_STORAGE_KEY,
     CALENDAR_OUTFIT_STORAGE_KEY,
-    TODAY_TREND_FALLBACK_KEY
+    TODAY_TREND_FALLBACK_KEY,
+    TODAY_TREND_V2_FALLBACK_KEY
   ]);
   var PLUGIN_IDB_STATIC_KEYS = Object.freeze([
     "ST_SMS_DATA_V2",
@@ -7258,7 +7324,9 @@ ${lines.join("\n")}
     BRANCH_LINEAGE_STORE_KEY,
     "ST_SMS_BG_GLOBAL",
     DESKTOP_BG_KEY,
-    TODAY_TREND_STORAGE_KEY
+    TODAY_TREND_STORAGE_KEY,
+    TODAY_TREND_V2_STORAGE_KEY,
+    TODAY_TREND_V2_AUTHORITY_KEY
   ]);
   var PLUGIN_IDB_DYNAMIC_PREFIXES = Object.freeze(["ST_SMS_BG_LOCAL_"]);
   async function loadEmojis() {
@@ -9363,10 +9431,346 @@ ${entry2.content}` : entry2.content;
     return enqueueDirectorySave("backgrounds", data, persist);
   }
 
+  // src/today-trend-v2-authority.js
+  var AUTHORITY_VERSION = 1;
+  var ENVELOPE_VERSION = 1;
+  var CHANNEL_NAME = "pm-today-trend-v2-authority";
+  var clone3 = (value) => structuredClone(value);
+  var structurallyEqual2 = (left, right) => {
+    if (Object.is(left, right)) return true;
+    if (Array.isArray(left) || Array.isArray(right)) {
+      return Array.isArray(left) && Array.isArray(right) && left.length === right.length && left.every((value, index) => structurallyEqual2(value, right[index]));
+    }
+    if (!left || !right || typeof left !== "object" || typeof right !== "object") return false;
+    const leftKeys = Object.keys(left).sort();
+    const rightKeys = Object.keys(right).sort();
+    return leftKeys.length === rightKeys.length && leftKeys.every((key, index) => key === rightKeys[index] && structurallyEqual2(left[key], right[key]));
+  };
+  function failure(code, message, cause) {
+    const error = new Error(message, cause === void 0 ? void 0 : { cause });
+    error.code = code;
+    return error;
+  }
+  function nonNegativeInteger(value, field) {
+    if (!Number.isSafeInteger(value) || value < 0) throw failure("TT_V2_SCHEMA_INVALID", `${field} \u5FC5\u987B\u662F\u975E\u8D1F\u5B89\u5168\u6574\u6570`);
+    return value;
+  }
+  function normalizeScopeRevisions(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw failure("TT_V2_SCHEMA_INVALID", "scopeRevisionByStorageId \u5FC5\u987B\u662F\u5BF9\u8C61");
+    const result = /* @__PURE__ */ Object.create(null);
+    for (const [storageId, revision] of Object.entries(value)) {
+      if (!storageId || storageId === "__proto__" || storageId === "constructor" || storageId === "prototype") {
+        throw failure("TT_V2_SCHEMA_INVALID", "scope revision key \u65E0\u6548");
+      }
+      result[storageId] = nonNegativeInteger(revision, `scopeRevisionByStorageId.${storageId}`);
+    }
+    return result;
+  }
+  function normalizeTodayTrendV2Authority(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw failure("TT_V2_SCHEMA_INVALID", "v2 authority \u5FC5\u987B\u662F\u5BF9\u8C61");
+    if (value.schemaVersion > AUTHORITY_VERSION) throw failure("TT_V2_FUTURE_VERSION", `v2 authority \u7248\u672C ${value.schemaVersion} \u9AD8\u4E8E\u5F53\u524D\u652F\u6301\u7248\u672C ${AUTHORITY_VERSION}`);
+    if (value.schemaVersion !== AUTHORITY_VERSION) throw failure("TT_V2_SCHEMA_INVALID", "v2 authority \u7248\u672C\u65E0\u6548");
+    if (value.ownerTabId !== null && (typeof value.ownerTabId !== "string" || !value.ownerTabId)) throw failure("TT_V2_SCHEMA_INVALID", "ownerTabId \u5FC5\u987B\u662F\u975E\u7A7A\u5B57\u7B26\u4E32\u6216 null");
+    for (const key of ["readV2", "writeV2", "serveV2"]) if (typeof value[key] !== "boolean") throw failure("TT_V2_SCHEMA_INVALID", `${key} \u5FC5\u987B\u662F\u5E03\u5C14\u503C`);
+    if (value.writeV2 && !value.ownerTabId) throw failure("TT_V2_SCHEMA_INVALID", "writeV2 \u542F\u7528\u65F6\u5FC5\u987B\u5B58\u5728 ownerTabId");
+    return {
+      schemaVersion: AUTHORITY_VERSION,
+      epoch: nonNegativeInteger(value.epoch, "epoch"),
+      authorityRevision: nonNegativeInteger(value.authorityRevision, "authorityRevision"),
+      storeRevision: nonNegativeInteger(value.storeRevision, "storeRevision"),
+      scopeRevisionByStorageId: normalizeScopeRevisions(value.scopeRevisionByStorageId),
+      ownerTabId: value.ownerTabId,
+      readV2: value.readV2,
+      writeV2: value.writeV2,
+      serveV2: value.serveV2
+    };
+  }
+  function createTodayTrendV2Envelope(payload, revision) {
+    return { schemaVersion: ENVELOPE_VERSION, revision: nonNegativeInteger(revision, "revision"), payload: normalizeTodayTrendStore(payload) };
+  }
+  function normalizeTodayTrendV2Envelope(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw failure("TT_V2_SCHEMA_INVALID", "v2 store envelope \u5FC5\u987B\u662F\u5BF9\u8C61");
+    if (value.schemaVersion > ENVELOPE_VERSION) throw failure("TT_V2_FUTURE_VERSION", `v2 store \u7248\u672C ${value.schemaVersion} \u9AD8\u4E8E\u5F53\u524D\u652F\u6301\u7248\u672C ${ENVELOPE_VERSION}`);
+    if (value.schemaVersion !== ENVELOPE_VERSION) throw failure("TT_V2_SCHEMA_INVALID", "v2 store \u7248\u672C\u65E0\u6548");
+    return createTodayTrendV2Envelope(value.payload, value.revision);
+  }
+  function readFallback(storage) {
+    try {
+      const raw = storage?.getItem(TODAY_TREND_V2_FALLBACK_KEY);
+      return raw ? normalizeTodayTrendV2Envelope(JSON.parse(raw)) : null;
+    } catch (error) {
+      if (error?.code) throw error;
+      throw failure("TT_V2_FALLBACK_INVALID", "v2 fallback \u6570\u636E\u4E0D\u53EF\u8BFB", error);
+    }
+  }
+  function defaultTabId() {
+    return globalThis.crypto?.randomUUID?.() || `tab-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  }
+  function initialAuthority() {
+    return {
+      schemaVersion: AUTHORITY_VERSION,
+      epoch: 0,
+      authorityRevision: 0,
+      storeRevision: 0,
+      scopeRevisionByStorageId: /* @__PURE__ */ Object.create(null),
+      ownerTabId: null,
+      readV2: false,
+      writeV2: false,
+      serveV2: false
+    };
+  }
+  function createTodayTrendV2Authority({
+    readEntry = pmIDBReadEntry,
+    compareAndSwap = pmIDBCompareAndSwap,
+    storage = globalThis.localStorage,
+    tabId = defaultTabId(),
+    BroadcastChannelImpl = globalThis.BroadcastChannel
+  } = {}) {
+    if (typeof tabId !== "string" || !tabId) throw new TypeError("Today Trend v2 tabId \u5FC5\u987B\u662F\u975E\u7A7A\u5B57\u7B26\u4E32");
+    let token = null;
+    let closed = false;
+    let channel = null;
+    let mutationQueue = Promise.resolve();
+    let pendingMutations = 0;
+    const enqueueMutation = (operation) => {
+      pendingMutations += 1;
+      const scheduled = mutationQueue.then(operation);
+      mutationQueue = scheduled.catch(() => {
+      });
+      return scheduled.finally(() => {
+        pendingMutations -= 1;
+      });
+    };
+    const invalidateToken = () => {
+      if (token) token.lost = true;
+    };
+    const closeChannel = () => {
+      try {
+        channel?.close?.();
+      } catch {
+      }
+      channel = null;
+    };
+    const ensureChannel = () => {
+      if (channel || typeof BroadcastChannelImpl !== "function") return;
+      try {
+        channel = new BroadcastChannelImpl(CHANNEL_NAME);
+        channel.addEventListener?.("message", (event) => {
+          const message = event?.data;
+          if (!token || !message || message.tabId === tabId) return;
+          if (message.epoch >= token.authority.epoch && message.ownerTabId !== tabId) {
+            invalidateToken();
+            closeChannel();
+          }
+        });
+      } catch {
+        channel = null;
+      }
+    };
+    const broadcast = (authority) => {
+      try {
+        channel?.postMessage?.({ epoch: authority.epoch, ownerTabId: authority.ownerTabId, tabId });
+      } catch {
+      }
+    };
+    const readAuthority = async () => {
+      const entry2 = await readEntry(TODAY_TREND_V2_AUTHORITY_KEY);
+      if (!entry2?.ok) return { available: false, authority: null };
+      return { available: true, authority: entry2.value === void 0 ? null : normalizeTodayTrendV2Authority(entry2.value) };
+    };
+    const status = async () => {
+      const state = await readAuthority();
+      return { ...state, owned: !!token && !token.lost && state.authority?.ownerTabId === tabId };
+    };
+    const load = async () => {
+      const state = await readAuthority();
+      if (!state.available) throw failure("TT_V2_IDB_UNAVAILABLE", "\u65E0\u6CD5\u786E\u8BA4 v2 authority \u72B6\u6001");
+      if (!state.authority?.readV2 && state.authority?.storeRevision > 0) throw failure("TT_V2_READ_FROZEN", "v2 store \u5DF2\u5B58\u5728\u4F46\u8BFB\u53D6\u5F00\u5173\u88AB\u5173\u95ED");
+      if (!state.authority?.readV2) return { active: false, store: null, authority: state.authority };
+      const primaryEntry = await readEntry(TODAY_TREND_V2_STORAGE_KEY);
+      const primary = primaryEntry?.ok && primaryEntry.value !== void 0 ? normalizeTodayTrendV2Envelope(primaryEntry.value) : null;
+      const fallback = readFallback(storage);
+      if (!primary && !fallback) throw failure("TT_V2_STORE_MISSING", "v2 authority \u5DF2\u542F\u7528\u8BFB\u53D6\u4F46 store \u4E0D\u5B58\u5728");
+      if (primary && fallback && primary.revision === fallback.revision && !structurallyEqual2(primary, fallback)) {
+        throw failure("TT_STORAGE_SPLIT_BRAIN", "v2 \u4E3B\u5B58\u50A8\u4E0E fallback \u5728\u76F8\u540C revision \u5185\u5BB9\u4E0D\u540C");
+      }
+      const envelope = !primary ? fallback : !fallback || primary.revision >= fallback.revision ? primary : fallback;
+      if (envelope.revision !== state.authority.storeRevision) throw failure("TT_V2_REVISION_MISMATCH", "v2 store revision \u4E0E authority \u4E0D\u4E00\u81F4");
+      return { active: true, store: clone3(envelope.payload), authority: state.authority };
+    };
+    const acquireInternal = async ({ readV2 = false, writeV2 = false, serveV2 = false, initialStore } = {}) => {
+      if (closed) throw failure("TT_AUTHORITY_CLOSED", "v2 authority owner \u5DF2\u5173\u95ED");
+      if (typeof readV2 !== "boolean" || typeof writeV2 !== "boolean" || typeof serveV2 !== "boolean") throw new TypeError("v2 \u5F00\u5173\u5FC5\u987B\u662F\u5E03\u5C14\u503C");
+      if ((writeV2 || serveV2) && !readV2) throw failure("TT_V2_FLAGS_INVALID", "writeV2/serveV2 \u542F\u7528\u65F6 readV2 \u5FC5\u987B\u542F\u7528");
+      const state = await readAuthority();
+      if (!state.available) throw failure("TT_V2_IDB_UNAVAILABLE", "v2 authority \u5B58\u50A8\u4E0D\u53EF\u7528");
+      const previous = state.authority;
+      if (previous?.ownerTabId) {
+        if (previous.ownerTabId !== tabId || !token || token.lost) {
+          throw failure("TT_AUTHORITY_BUSY", "\u5176\u4ED6 authority owner \u5C1A\u672A\u663E\u5F0F\u91CA\u653E\u5199\u5165\u6743");
+        }
+        if (previous.readV2 !== readV2 || previous.writeV2 !== writeV2 || previous.serveV2 !== serveV2) {
+          throw failure("TT_AUTHORITY_BUSY", "\u5F53\u524D authority owner \u5FC5\u987B\u5148\u663E\u5F0F\u91CA\u653E\u518D\u53D8\u66F4\u5F00\u5173");
+        }
+        token.authority = previous;
+        ensureChannel();
+        return clone3(previous);
+      }
+      const base = previous || initialAuthority();
+      const activating = readV2 && base.storeRevision === 0;
+      if (activating && initialStore === void 0) {
+        throw failure("TT_V2_INITIAL_STORE_REQUIRED", "\u9996\u6B21\u542F\u7528 v2 \u8BFB\u53D6\u5FC5\u987B\u63D0\u4F9B\u521D\u59CB store");
+      }
+      const storeRevision = activating ? 1 : base.storeRevision;
+      const next = normalizeTodayTrendV2Authority({
+        ...base,
+        epoch: base.epoch + 1,
+        authorityRevision: base.authorityRevision + 1,
+        storeRevision,
+        ownerTabId: tabId,
+        readV2,
+        writeV2,
+        serveV2
+      });
+      const writes = [];
+      if (activating) writes.push({ key: TODAY_TREND_V2_STORAGE_KEY, value: createTodayTrendV2Envelope(initialStore, storeRevision) });
+      writes.push({ key: TODAY_TREND_V2_AUTHORITY_KEY, value: next });
+      const result = await compareAndSwap({
+        guardKey: TODAY_TREND_V2_AUTHORITY_KEY,
+        expectedGuard: previous === null ? void 0 : previous,
+        writes
+      });
+      if (!result?.ok) throw failure(result?.reason === "CAS_CONFLICT" ? "TT_AUTHORITY_CONFLICT" : "TT_V2_IDB_UNAVAILABLE", "v2 authority \u83B7\u53D6\u5931\u8D25");
+      token = { authority: next, lost: false };
+      ensureChannel();
+      broadcast(next);
+      return clone3(next);
+    };
+    const changedScopes = async (value, declaredScopeIds) => {
+      if (declaredScopeIds !== void 0 && !Array.isArray(declaredScopeIds)) throw new TypeError("changedScopeIds \u5FC5\u987B\u662F\u5B57\u7B26\u4E32\u6570\u7EC4");
+      const declared = declaredScopeIds === void 0 ? null : [...new Set(declaredScopeIds)];
+      if (declared?.some((storageId) => typeof storageId !== "string" || !storageId)) throw new TypeError("changedScopeIds \u5FC5\u987B\u53EA\u5305\u542B\u975E\u7A7A\u5B57\u7B26\u4E32");
+      const entry2 = await readEntry(TODAY_TREND_V2_STORAGE_KEY);
+      if (!entry2?.ok || entry2.value === void 0) throw failure("TT_V2_IDB_UNAVAILABLE", "\u65E0\u6CD5\u8BFB\u53D6\u5F53\u524D v2 store \u4EE5\u8BA1\u7B97 scope revision");
+      const current = normalizeTodayTrendV2Envelope(entry2.value).payload;
+      const candidate = normalizeTodayTrendStore(value);
+      const ids = /* @__PURE__ */ new Set([...Object.keys(current.scopes), ...Object.keys(candidate.scopes)]);
+      const actual = [...ids].filter((storageId) => !structurallyEqual2(current.scopes[storageId], candidate.scopes[storageId])).sort();
+      if (declared && !structurallyEqual2([...declared].sort(), actual)) {
+        throw failure("TT_SCOPE_REVISION_MISMATCH", "\u58F0\u660E\u7684 scope \u53D8\u66F4\u8303\u56F4\u4E0E\u5B9E\u9645 candidate \u4E0D\u4E00\u81F4");
+      }
+      return actual;
+    };
+    const saveInternal = async (value, { scopeId = null, changedScopeIds, expectedStoreRevision = null } = {}) => {
+      if (closed) throw failure("TT_AUTHORITY_CLOSED", "v2 authority owner \u5DF2\u5173\u95ED");
+      if (!token || token.lost || token.authority.ownerTabId !== tabId || !token.authority.writeV2) {
+        throw failure("TT_AUTHORITY_LOST", "\u5F53\u524D\u6807\u7B7E\u4E0D\u5177\u5907 v2 \u5199\u5165\u6743\u5A01");
+      }
+      if (scopeId !== null && (typeof scopeId !== "string" || !scopeId)) throw new TypeError("scopeId \u5FC5\u987B\u662F\u975E\u7A7A\u5B57\u7B26\u4E32\u6216 null");
+      const previous = token.authority;
+      if (expectedStoreRevision !== null && expectedStoreRevision !== previous.storeRevision) {
+        throw failure("TT_STORE_REVISION_CONFLICT", "v2 store \u5DF2\u5728\u5F53\u524D\u63D0\u4EA4\u540E\u53D1\u751F\u53D8\u5316\uFF0C\u62D2\u7EDD\u8986\u76D6");
+      }
+      const affectedScopeIds = await changedScopes(value, changedScopeIds === void 0 && scopeId !== null ? [scopeId] : changedScopeIds);
+      const scopeRevisions = { ...previous.scopeRevisionByStorageId };
+      for (const storageId of affectedScopeIds) scopeRevisions[storageId] = (scopeRevisions[storageId] || 0) + 1;
+      const next = normalizeTodayTrendV2Authority({
+        ...previous,
+        authorityRevision: previous.authorityRevision + 1,
+        storeRevision: previous.storeRevision + 1,
+        scopeRevisionByStorageId: scopeRevisions
+      });
+      const envelope = createTodayTrendV2Envelope(value, next.storeRevision);
+      const result = await compareAndSwap({
+        guardKey: TODAY_TREND_V2_AUTHORITY_KEY,
+        expectedGuard: previous,
+        writes: [
+          { key: TODAY_TREND_V2_STORAGE_KEY, value: envelope },
+          { key: TODAY_TREND_V2_AUTHORITY_KEY, value: next }
+        ]
+      });
+      if (!result?.ok) {
+        invalidateToken();
+        throw failure(result?.reason === "CAS_CONFLICT" ? "TT_AUTHORITY_LOST" : "TT_V2_IDB_UNAVAILABLE", "v2 store CAS \u4FDD\u5B58\u5931\u8D25");
+      }
+      token.authority = next;
+      try {
+        storage?.removeItem?.(TODAY_TREND_V2_FALLBACK_KEY);
+      } catch {
+      }
+      broadcast(next);
+      return {
+        store: clone3(envelope.payload),
+        storeRevision: next.storeRevision,
+        authorityRevision: next.authorityRevision,
+        scopeRevisionByStorageId: clone3(next.scopeRevisionByStorageId)
+      };
+    };
+    const releaseInternal = async ({ readV2, serveV2 } = {}) => {
+      if (closed) throw failure("TT_AUTHORITY_CLOSED", "v2 authority owner \u5DF2\u5173\u95ED");
+      if (!token) {
+        closeChannel();
+        return false;
+      }
+      const previous = token.authority;
+      const nextReadV2 = readV2 === void 0 ? previous.storeRevision > 0 : readV2;
+      const nextServeV2 = serveV2 === void 0 ? false : serveV2;
+      if (typeof nextReadV2 !== "boolean" || typeof nextServeV2 !== "boolean") throw new TypeError("release \u5F00\u5173\u5FC5\u987B\u662F\u5E03\u5C14\u503C");
+      if (nextServeV2 && !nextReadV2) throw failure("TT_V2_FLAGS_INVALID", "serveV2 \u542F\u7528\u65F6 readV2 \u5FC5\u987B\u542F\u7528");
+      const next = normalizeTodayTrendV2Authority({
+        ...previous,
+        epoch: previous.epoch + 1,
+        authorityRevision: previous.authorityRevision + 1,
+        ownerTabId: null,
+        readV2: nextReadV2,
+        writeV2: false,
+        serveV2: nextServeV2
+      });
+      const result = await compareAndSwap({
+        guardKey: TODAY_TREND_V2_AUTHORITY_KEY,
+        expectedGuard: previous,
+        writes: [{ key: TODAY_TREND_V2_AUTHORITY_KEY, value: next }]
+      });
+      if (result?.ok) {
+        invalidateToken();
+        token = null;
+        broadcast(next);
+        closeChannel();
+        return true;
+      }
+      if (result?.reason === "CAS_CONFLICT") {
+        const current = await readAuthority();
+        if (current.available && current.authority?.ownerTabId === tabId) {
+          token = { authority: current.authority, lost: false };
+          ensureChannel();
+          throw failure("TT_AUTHORITY_CONFLICT", "v2 authority \u91CA\u653E\u53D1\u751F\u5E76\u53D1\u51B2\u7A81\uFF0C\u8BF7\u91CD\u8BD5");
+        }
+        invalidateToken();
+        token = null;
+        closeChannel();
+        throw failure("TT_AUTHORITY_LOST", "v2 authority \u91CA\u653E\u65F6\u5DF2\u5931\u6743");
+      }
+      throw failure("TT_V2_IDB_UNAVAILABLE", "v2 authority \u91CA\u653E\u5931\u8D25");
+    };
+    const acquire = (options2) => enqueueMutation(() => acquireInternal(options2));
+    const save = (value, options2) => enqueueMutation(() => saveInternal(value, options2));
+    const release = (options2) => enqueueMutation(() => releaseInternal(options2));
+    const close = () => {
+      if (pendingMutations > 0 || token && !token.lost) {
+        throw failure("TT_AUTHORITY_BUSY", "\u5173\u95ED authority owner \u524D\u5FC5\u987B\u7B49\u5F85 mutation \u5B8C\u6210\u5E76\u663E\u5F0F release");
+      }
+      closed = true;
+      invalidateToken();
+      token = null;
+      closeChannel();
+    };
+    return { status, load, acquire, save, release, close };
+  }
+
   // src/today-trend-storage.js
   var TODAY_TREND_STORAGE_KEYS = Object.freeze({ primary: TODAY_TREND_STORAGE_KEY, fallback: TODAY_TREND_FALLBACK_KEY });
-  var clone3 = (value) => structuredClone(value);
-  function readFallback(storage) {
+  var clone4 = (value) => structuredClone(value);
+  function readFallback2(storage) {
     try {
       const raw = storage?.getItem(TODAY_TREND_FALLBACK_KEY);
       return raw ? JSON.parse(raw) : null;
@@ -9378,15 +9782,22 @@ ${entry2.content}` : entry2.content;
   function normalizeLoaded(value) {
     return migrateTodayTrendStore(value).store;
   }
-  function createTodayTrendStorage({ idbGet = pmIDBGet, idbSet = pmIDBSet, storage = globalThis.localStorage } = {}) {
+  function createTodayTrendStorage({
+    idbGet = pmIDBGet,
+    idbSet = pmIDBSet,
+    storage = globalThis.localStorage,
+    v2Authority = createTodayTrendV2Authority({ storage })
+  } = {}) {
     const load = async () => {
+      const v2 = await v2Authority.load();
+      if (v2.active) return normalizeTodayTrendStore(v2.store);
       try {
         const primary = await idbGet(TODAY_TREND_STORAGE_KEY);
         if (primary !== null && primary !== void 0) return normalizeLoaded(primary);
       } catch (error) {
         console.warn("[phone-mode] \u4ECA\u65E5\u98CE\u5411\u4E3B\u5B58\u50A8\u8BFB\u53D6\u5931\u8D25", error);
       }
-      const fallback = readFallback(storage);
+      const fallback = readFallback2(storage);
       if (fallback !== null) {
         try {
           return normalizeLoaded(fallback);
@@ -9396,9 +9807,69 @@ ${entry2.content}` : entry2.content;
       }
       return createEmptyTodayTrendStore();
     };
-    const save = async (value) => {
+    const save = async (value, options2 = {}) => {
       const normalized = normalizeTodayTrendStore(value);
-      const snapshot = clone3(normalized);
+      const v2 = await v2Authority.status();
+      if (!v2.available) {
+        const error = new Error("\u65E0\u6CD5\u786E\u8BA4 v2 authority \u72B6\u6001\uFF0C\u62D2\u7EDD\u964D\u7EA7\u5199\u5165 v1");
+        error.code = "TT_V2_AUTHORITY_UNAVAILABLE";
+        throw error;
+      }
+      let acquiredForOperation = false;
+      const previousFlags = v2.authority ? { readV2: v2.authority.readV2, serveV2: v2.authority.serveV2 } : null;
+      if (options2.allowAuthorityAcquire && v2.authority && !v2.owned) {
+        if (v2.authority.ownerTabId) {
+          const error = new Error("\u5176\u4ED6\u6807\u7B7E\u5F53\u524D\u6301\u6709 v2 \u5199\u5165\u6743\u5A01");
+          error.code = "TT_AUTHORITY_BUSY";
+          throw error;
+        }
+        await v2Authority.acquire({
+          readV2: true,
+          writeV2: true,
+          serveV2: v2.authority.serveV2,
+          initialStore: v2.authority.storeRevision === 0 ? normalized : void 0
+        });
+        acquiredForOperation = true;
+      }
+      if (v2.authority?.writeV2 || acquiredForOperation) {
+        let result;
+        let operationError = null;
+        try {
+          result = await v2Authority.save(normalized, options2);
+        } catch (error) {
+          operationError = error;
+        }
+        let releaseError = null;
+        if (acquiredForOperation) {
+          try {
+            const released = await v2Authority.release(previousFlags || void 0);
+            if (released !== true) {
+              const error = new Error("\u4E34\u65F6 authority \u672A\u786E\u8BA4\u91CA\u653E\u6210\u529F");
+              error.code = "TT_AUTHORITY_RELEASE_FAILED";
+              releaseError = error;
+            }
+          } catch (error) {
+            releaseError = error;
+          }
+        }
+        if (operationError) {
+          if (releaseError) operationError.releaseError = releaseError;
+          throw operationError;
+        }
+        if (releaseError) {
+          const error = new Error(`\u4ECA\u65E5\u98CE\u5411\u4FDD\u5B58\u6210\u529F\uFF0C\u4F46\u4E34\u65F6 authority \u91CA\u653E\u5931\u8D25\uFF1A${releaseError.message}`, { cause: releaseError });
+          error.code = "TT_AUTHORITY_RELEASE_FAILED";
+          error.committedReceipt = result;
+          throw error;
+        }
+        return options2.returnReceipt ? result : result.store;
+      }
+      if (v2.authority && (v2.authority.readV2 || v2.authority.storeRevision > 0)) {
+        const error = new Error("v2 authority \u5DF2\u51BB\u7ED3 v1 \u5199\u5165");
+        error.code = v2.authority.ownerTabId ? "TT_AUTHORITY_LOST" : "TT_V1_WRITE_FROZEN";
+        throw error;
+      }
+      const snapshot = clone4(normalized);
       if (await idbSet(TODAY_TREND_STORAGE_KEY, snapshot)) {
         try {
           storage?.removeItem(TODAY_TREND_FALLBACK_KEY);
@@ -9415,14 +9886,15 @@ ${entry2.content}` : entry2.content;
         throw new Error("\u4ECA\u65E5\u98CE\u5411\u4FDD\u5B58\u5931\u8D25\uFF1A\u6D4F\u89C8\u5668\u5B58\u50A8\u4E0D\u53EF\u7528", { cause: error });
       }
     };
-    return { load, save };
+    return { load, save, v2Authority };
   }
   var defaultStorage = createTodayTrendStorage();
   var loadTodayTrendStore = () => defaultStorage.load();
-  var saveTodayTrendStore = (value) => defaultStorage.save(value);
+  var saveTodayTrendStore = (value, options2) => defaultStorage.save(value, options2);
+  var todayTrendV2Authority = defaultStorage.v2Authority;
 
   // src/branch-scope-inheritance.js
-  var clone4 = (value) => structuredClone(value);
+  var clone5 = (value) => structuredClone(value);
   var own = (value, key) => !!value && typeof value === "object" && Object.hasOwn(value, key);
   var validText = (value) => typeof value === "string" && value.trim() ? value.trim() : "";
   var BRANCH_INTERACTIVE_STORE_KEY = "ST_INTERACTIVE_SCENES_V1";
@@ -9472,10 +9944,10 @@ ${entry2.content}` : entry2.content;
     return hasScopeData(scopePresence(targetId, stores, false));
   }
   function copyEntry(target, source, sourceId, targetId) {
-    if (own(source, sourceId)) target[targetId] = clone4(source[sourceId]);
+    if (own(source, sourceId)) target[targetId] = clone5(source[sourceId]);
   }
   function remapInteractiveScope(sourceScope, targetId) {
-    const scope = clone4(sourceScope);
+    const scope = clone5(sourceScope);
     const actorIdMap = /* @__PURE__ */ new Map();
     const actors = {};
     for (const [sourceActorId, actor] of Object.entries(scope.actors || {})) {
@@ -9497,12 +9969,12 @@ ${entry2.content}` : entry2.content;
     return scope;
   }
   function createCandidates(sourceId, targetId, stores) {
-    const next = clone4(stores);
+    const next = clone5(stores);
     for (const key of ["histories", "groupMeta", "pokeConfig", "characterBehavior", "bidirectional"]) {
       copyEntry(next[key], stores[key], sourceId, targetId);
     }
     for (const key of scopeBackgroundKeys(sourceId, stores.backgrounds)) {
-      next.backgrounds[`${targetId}${key.slice(sourceId.length)}`] = clone4(stores.backgrounds[key]);
+      next.backgrounds[`${targetId}${key.slice(sourceId.length)}`] = clone5(stores.backgrounds[key]);
     }
     if (own(stores.interactive.scopes, sourceId)) {
       next.interactive.scopes[targetId] = remapInteractiveScope(stores.interactive.scopes[sourceId], targetId);
@@ -9529,17 +10001,17 @@ ${entry2.content}` : entry2.content;
     return next;
   }
   function replaceEntry(target, source, key) {
-    if (own(source, key)) target[key] = clone4(source[key]);
+    if (own(source, key)) target[key] = clone5(source[key]);
     else delete target[key];
   }
   function mergeBranchScope(current, desired, targetId) {
-    const next = clone4(normalizeStores(current));
+    const next = clone5(normalizeStores(current));
     const source = normalizeStores(desired);
     for (const key of ["histories", "groupMeta", "pokeConfig", "characterBehavior", "bidirectional"]) {
       replaceEntry(next[key], source[key], targetId);
     }
     for (const key of scopeBackgroundKeys(targetId, next.backgrounds)) delete next.backgrounds[key];
-    for (const key of scopeBackgroundKeys(targetId, source.backgrounds)) next.backgrounds[key] = clone4(source.backgrounds[key]);
+    for (const key of scopeBackgroundKeys(targetId, source.backgrounds)) next.backgrounds[key] = clone5(source.backgrounds[key]);
     for (const key of ["interactive", "phoneUi", "calendar", "occasions", "cycles", "recipes", "outfits"]) {
       replaceEntry(next[key].scopes, source[key].scopes, targetId);
     }
@@ -9571,7 +10043,7 @@ ${entry2.content}` : entry2.content;
     return JSON.stringify(value) === JSON.stringify(other);
   }
   function replaceScope2(store, desired, targetId) {
-    const next = clone4(store || {});
+    const next = clone5(store || {});
     replaceEntry(next, desired || {}, targetId);
     return next;
   }
@@ -9681,7 +10153,7 @@ ${entry2.content}` : entry2.content;
     if (restoring && targetChanged) {
       throw new Error("\u5206\u652F\u7EE7\u627F\u8865\u507F\u53D6\u6D88\uFF1A\u76EE\u6807 scope \u5DF2\u5728\u4E8B\u52A1\u540E\u88AB\u66F4\u65B0 (\u793E\u533A\u9884\u7B97\u914D\u7F6E)");
     }
-    const merged = clone4(current);
+    const merged = clone5(current);
     replaceEntry(merged.communitySceneIdsByStorage, desired.communitySceneIdsByStorage, targetId);
     replaceEntry(merged.communitySelectionsByStorage, desired.communitySelectionsByStorage, targetId);
     try {
@@ -9750,7 +10222,7 @@ ${entry2.content}` : entry2.content;
     if (restoring && own(current.scopes, targetId) && !same(current.scopes[targetId], expected.scopes[targetId])) {
       throw new Error(`\u5206\u652F\u7EE7\u627F\u8865\u507F\u53D6\u6D88\uFF1A\u76EE\u6807 scope \u5DF2\u5728\u4E8B\u52A1\u540E\u88AB\u66F4\u65B0 (${label})`);
     }
-    const merged = clone4(current);
+    const merged = clone5(current);
     replaceEntry(merged.scopes, desired.scopes, targetId);
     return normalize(merged);
   }
@@ -9798,7 +10270,7 @@ ${entry2.content}` : entry2.content;
         if (restoring && own(current.scopes, targetId) && !same(current.scopes[targetId], expected.scopes[targetId])) {
           throw new Error("\u5206\u652F\u7EE7\u627F\u8865\u507F\u53D6\u6D88\uFF1A\u76EE\u6807 scope \u5DF2\u5728\u4E8B\u52A1\u540E\u88AB\u66F4\u65B0 (\u4E92\u52A8\u793E\u533A\u6570\u636E)");
         }
-        const merged = clone4(current);
+        const merged = clone5(current);
         replaceEntry(merged.scopes, desired.scopes, targetId);
         await saveInteractiveScenes(normalizeInteractiveStore(merged), { coordinated: true });
         return merged;
@@ -9823,9 +10295,9 @@ ${entry2.content}` : entry2.content;
         if (restoring && currentKeys.length && !currentMatchesExpected) {
           throw new Error("\u5206\u652F\u7EE7\u627F\u8865\u507F\u53D6\u6D88\uFF1A\u76EE\u6807 scope \u5DF2\u5728\u4E8B\u52A1\u540E\u88AB\u66F4\u65B0 (\u4F1A\u8BDD\u80CC\u666F)");
         }
-        const merged = clone4(current);
+        const merged = clone5(current);
         for (const key of currentKeys) delete merged[key];
-        for (const key of desiredKeys) merged[key] = clone4(desired[key]);
+        for (const key of desiredKeys) merged[key] = clone5(desired[key]);
         return saveBgLocal({ data: merged, coordinated: true });
       });
     } finally {
@@ -9865,10 +10337,10 @@ ${entry2.content}` : entry2.content;
         if (restoring && own(current.scopes, targetId) && !same(current.scopes[targetId], expected.scopes[targetId])) {
           throw new Error("\u5206\u652F\u7EE7\u627F\u8865\u507F\u53D6\u6D88\uFF1A\u76EE\u6807 scope \u5DF2\u5728\u4E8B\u52A1\u540E\u88AB\u66F4\u65B0 (\u4ECA\u65E5\u98CE\u5411)");
         }
-        const merged = clone4(current);
+        const merged = clone5(current);
         replaceEntry(merged.scopes, desired.scopes, targetId);
         const normalized = normalizeTodayTrendStore(merged);
-        await saveTodayTrendStore(normalized);
+        await saveTodayTrendStore(normalized, { scopeId: targetId });
         return normalized;
       });
     } finally {
@@ -9952,7 +10424,7 @@ ${entry2.content}` : entry2.content;
   }
   async function persistProductionStores(next, { branch } = {}) {
     const targetId = branch?.targetId;
-    const previous = clone4(await loadProductionStores());
+    const previous = clone5(await loadProductionStores());
     const apply = async (desired, expected) => {
       if (targetId) {
         globalThis.window.__pmHistories = await commitDirectoryScope("histories", desired.histories, expected.histories, targetId);
@@ -11773,26 +12245,26 @@ ${dataBlock("known_actor_names_data", roster, 1600)}`;
           setStore(snapshot);
           throw error;
         }
-        let failure = null;
+        let failure2 = null;
         try {
           await saveStore2(normalizeInteractiveStore(getStore()));
           await syncStore?.();
           if (isValid && !isValid()) throw cancelled2();
           return result;
         } catch (error) {
-          failure = error;
+          failure2 = error;
         }
         setStore(snapshot);
         try {
           await saveStore2(snapshot);
           await syncStore?.();
         } catch (compensationError) {
-          const combined = new Error(`${failure.message}\uFF1B\u8865\u507F\u6301\u4E45\u5316\u6216\u540C\u6B65\u4E5F\u5931\u8D25\uFF1A${compensationError.message}`);
-          combined.cause = failure;
+          const combined = new Error(`${failure2.message}\uFF1B\u8865\u507F\u6301\u4E45\u5316\u6216\u540C\u6B65\u4E5F\u5931\u8D25\uFF1A${compensationError.message}`);
+          combined.cause = failure2;
           combined.rollbackError = compensationError;
           throw combined;
         }
-        throw failure;
+        throw failure2;
       });
       queue = operation;
       return operation;
@@ -12884,18 +13356,18 @@ ${GAL_BUBBLE_PROMPT}` : "";
       maxDepth: null
     };
   }
-  function structurallyEqual(left, right) {
+  function structurallyEqual3(left, right) {
     if (Object.is(left, right)) return true;
     if (Array.isArray(left) || Array.isArray(right)) {
-      return Array.isArray(left) && Array.isArray(right) && left.length === right.length && left.every((value, index) => structurallyEqual(value, right[index]));
+      return Array.isArray(left) && Array.isArray(right) && left.length === right.length && left.every((value, index) => structurallyEqual3(value, right[index]));
     }
     if (!left || !right || typeof left !== "object" || typeof right !== "object") return false;
     const leftKeys = Object.keys(left).sort();
     const rightKeys = Object.keys(right).sort();
-    return leftKeys.length === rightKeys.length && leftKeys.every((key, index) => key === rightKeys[index] && structurallyEqual(left[key], right[key]));
+    return leftKeys.length === rightKeys.length && leftKeys.every((key, index) => key === rightKeys[index] && structurallyEqual3(left[key], right[key]));
   }
   function hasSameDefinition(script, desired) {
-    return Object.keys(desired).every((key) => structurallyEqual(script[key], desired[key]));
+    return Object.keys(desired).every((key) => structurallyEqual3(script[key], desired[key]));
   }
   function isOwnedScript(script) {
     return Boolean(script) && script.id === GAL_BUBBLE_SCRIPT_ID;
@@ -14437,7 +14909,7 @@ ${antiFluff}`;
 
   // src/auto-poke-config.js
   var DEFAULT_AUTO_POKE = Object.freeze({ enabled: false, probability: 30, counter: 0 });
-  var clone5 = (value) => JSON.parse(JSON.stringify(value));
+  var clone6 = (value) => JSON.parse(JSON.stringify(value));
   var clampProbability = (raw) => {
     const num = Number(raw);
     if (!Number.isFinite(num)) return DEFAULT_AUTO_POKE.probability;
@@ -14466,7 +14938,7 @@ ${antiFluff}`;
     const storageConfig = window.__pmPokeConfig?.[storageId];
     const hadStorage = Boolean(storageConfig);
     const hadTarget = Boolean(storageConfig && Object.prototype.hasOwnProperty.call(storageConfig, targetKey));
-    const snapshot = hadTarget ? clone5(storageConfig[targetKey]) : null;
+    const snapshot = hadTarget ? clone6(storageConfig[targetKey]) : null;
     if (!window.__pmPokeConfig) window.__pmPokeConfig = {};
     if (!window.__pmPokeConfig[storageId]) window.__pmPokeConfig[storageId] = {};
     const previous = window.__pmPokeConfig[storageId][targetKey] || {};
@@ -15399,7 +15871,7 @@ ${antiFluff}`;
   }
 
   // src/phone-context-injection.js
-  var clone6 = (value) => JSON.parse(JSON.stringify(value));
+  var clone7 = (value) => JSON.parse(JSON.stringify(value));
   function injectionFailure2(result, phase) {
     const failedWrites = Number.isInteger(result?.failedWrites) && result.failedWrites > 0 ? result.failedWrites : 0;
     const failedKeys = Array.isArray(result?.failedKeys) ? result.failedKeys : [];
@@ -15433,8 +15905,8 @@ ${antiFluff}`;
         const result = await applyInjection();
         const compensationError = injectionFailure2(result, "\u8865\u507F");
         if (compensationError) throw compensationError;
-      } catch (failure) {
-        rollbackError = failure;
+      } catch (failure2) {
+        rollbackError = failure2;
       }
       if (!rollbackError) throw error;
       const combined = new Error(`${error.message || "\u4E0A\u4E0B\u6587\u6CE8\u5165\u8BBE\u7F6E\u4FDD\u5B58\u5931\u8D25"}\uFF1B\u539F\u914D\u7F6E\u56DE\u6EDA\u4E5F\u5931\u8D25\uFF0C\u8BF7\u52FF\u5237\u65B0\u5E76\u7ACB\u5373\u5BFC\u51FA\u5907\u4EFD\uFF1A${rollbackError.message}`);
@@ -15510,7 +15982,7 @@ ${antiFluff}`;
     };
     const toggleTargetInjection = async (target) => {
       if (!target) return false;
-      const snapshot = clone6(window.__pmBidirectional);
+      const snapshot = clone7(window.__pmBidirectional);
       const selected = new Set(window.__pmBidirectional[target.storageId] || []);
       if (selected.has(target.targetKey)) selected.delete(target.targetKey);
       else selected.add(target.targetKey);
@@ -15597,7 +16069,7 @@ ${antiFluff}`;
       if (injectionSettingsBusy) return false;
       injectionSettingsBusy = true;
       setInjectionSettingsBusy(true, "save");
-      const snapshot = clone6(window.__pmInjectionConfig);
+      const snapshot = clone7(window.__pmInjectionConfig);
       window.__pmInjectionConfig = normalizeInjectionConfig({
         ...snapshot,
         phone: {
@@ -15645,7 +16117,7 @@ ${antiFluff}`;
   }
 
   // src/phone-directory.js
-  var clone7 = (value) => JSON.parse(JSON.stringify(value));
+  var clone8 = (value) => JSON.parse(JSON.stringify(value));
   function injectionFailure3(result, phase, subject = "\u7FA4\u804A\u8BBE\u7F6E") {
     const failedWrites = Number.isInteger(result?.failedWrites) && result.failedWrites > 0 ? result.failedWrites : 0;
     const failedKeys = Array.isArray(result?.failedKeys) ? result.failedKeys : [];
@@ -15660,7 +16132,7 @@ ${antiFluff}`;
     return {
       activeStorageId: state.activeStorageId,
       currentPersona: state.currentPersona,
-      conversationHistory: clone7(state.conversationHistory),
+      conversationHistory: clone8(state.conversationHistory),
       isGroupChat: state.isGroupChat,
       currentGroupKey: state.currentGroupKey,
       groupMembers: state.groupMembers.slice(),
@@ -16317,11 +16789,11 @@ ${antiFluff}`;
         let snapshots = null;
         try {
           snapshots = {
-            groupMeta: clone7(window.__pmGroupMeta),
-            histories: clone7(window.__pmHistories),
-            bidirectional: clone7(window.__pmBidirectional),
-            poke: clone7(window.__pmPokeConfig),
-            backgrounds: clone7(window.__pmBgLocal)
+            groupMeta: clone8(window.__pmGroupMeta),
+            histories: clone8(window.__pmHistories),
+            bidirectional: clone8(window.__pmBidirectional),
+            poke: clone8(window.__pmPokeConfig),
+            backgrounds: clone8(window.__pmBgLocal)
           };
           if (window.__pmGroupMeta[id2]) delete window.__pmGroupMeta[id2][key];
           if (window.__pmHistories[id2]) delete window.__pmHistories[id2][key];
@@ -16381,10 +16853,10 @@ ${antiFluff}`;
         let snapshots = null;
         try {
           snapshots = {
-            histories: clone7(window.__pmHistories),
-            bidirectional: clone7(window.__pmBidirectional),
-            poke: clone7(window.__pmPokeConfig),
-            backgrounds: clone7(window.__pmBgLocal)
+            histories: clone8(window.__pmHistories),
+            bidirectional: clone8(window.__pmBidirectional),
+            poke: clone8(window.__pmPokeConfig),
+            backgrounds: clone8(window.__pmBgLocal)
           };
           if (window.__pmHistories[id2]) delete window.__pmHistories[id2][name];
           const arr = window.__pmBidirectional[id2] || [], idx = arr.indexOf(name);
@@ -19485,7 +19957,7 @@ ${lines}`;
   }
 
   // src/settings-api-controller.js
-  function createApiRequestController({ runtime, normalizeApiUrls: normalizeApiUrls2, fetchWithCorsProxy: fetchWithCorsProxy2, extractAiResponseContent: extractAiResponseContent2, normalizeIndependentApiTemperature: normalizeIndependentApiTemperature2, defaultTemperature, apiDraftMode, clone: clone12, saveProfiles: saveProfiles2, addOrUpdateProfile: addOrUpdateProfile2, addNote, showApi, showModelPicker: showModelPicker2, escapeAttr: escapeAttr2, escapeHtml: escapeHtml2 }) {
+  function createApiRequestController({ runtime, normalizeApiUrls: normalizeApiUrls2, fetchWithCorsProxy: fetchWithCorsProxy2, extractAiResponseContent: extractAiResponseContent2, normalizeIndependentApiTemperature: normalizeIndependentApiTemperature2, defaultTemperature, apiDraftMode, clone: clone13, saveProfiles: saveProfiles2, addOrUpdateProfile: addOrUpdateProfile2, addNote, showApi, showModelPicker: showModelPicker2, escapeAttr: escapeAttr2, escapeHtml: escapeHtml2 }) {
     const setStatus = (message, color) => {
       const status = document.getElementById("pm-api-status");
       if (status) {
@@ -19529,7 +20001,7 @@ ${lines}`;
       }
     };
     const deleteProfile = (idx) => {
-      const previous = clone12(window.__pmProfiles);
+      const previous = clone13(window.__pmProfiles);
       window.__pmProfiles.splice(idx, 1);
       if (!saveProfiles2()) {
         window.__pmProfiles = previous;
@@ -19564,7 +20036,7 @@ ${lines}`;
         return false;
       }
       const temperature = useIndependent ? parsedTemperature : normalizeIndependentApiTemperature2(temperatureText);
-      const previous = clone12(window.__pmConfig), candidate = { apiUrl, apiKey, model, temperature, useIndependent };
+      const previous = clone13(window.__pmConfig), candidate = { apiUrl, apiKey, model, temperature, useIndependent };
       window.__pmConfig = candidate;
       try {
         localStorage.setItem("ST_SMS_CONFIG", JSON.stringify(candidate));
@@ -19675,7 +20147,7 @@ ${lines}`;
   }
 
   // src/settings-appearance-controller.js
-  function createAppearanceController({ THEME_PRESETS: THEME_PRESETS2, applyTheme, clone: clone12, saveTheme: saveTheme2, renderLookSettings: renderLookSettings2, renderSettingsModal: renderSettingsModal2, makeOverlay, escapeAttr: escapeAttr2, safeJS: safeJS2, getCurrentPersona, getStorageId: getStorageId2, backgroundSettings }) {
+  function createAppearanceController({ THEME_PRESETS: THEME_PRESETS2, applyTheme, clone: clone13, saveTheme: saveTheme2, renderLookSettings: renderLookSettings2, renderSettingsModal: renderSettingsModal2, makeOverlay, escapeAttr: escapeAttr2, safeJS: safeJS2, getCurrentPersona, getStorageId: getStorageId2, backgroundSettings }) {
     const syncControls = () => {
       const theme = window.__pmTheme;
       document.querySelectorAll(".pm-theme-chip").forEach((element) => {
@@ -19702,7 +20174,7 @@ ${lines}`;
       if (customAccent) customAccent.value = accent;
     };
     const mutateTheme = (mutate) => {
-      const previous = clone12(window.__pmTheme);
+      const previous = clone13(window.__pmTheme);
       mutate();
       if (saveTheme2()) {
         applyTheme();
@@ -19936,8 +20408,8 @@ ${error.message}`);
           reloadCalendarStore?.();
           reloadTodayTrendStore?.();
           await requireInjectionSuccess(() => applyBidirectionalInjection(), "\u6062\u590D\u539F\u6570\u636E\u540E\u7684\u6CE8\u5165\u5237\u65B0\u5931\u8D25");
-        } catch (failure) {
-          rollbackError = failure;
+        } catch (failure2) {
+          rollbackError = failure2;
         }
         if (rollbackError) alert(`\u6E05\u7406\u5931\u8D25\uFF0C\u539F\u6570\u636E\u56DE\u6EDA\u4E5F\u5931\u8D25\u3002\u8BF7\u52FF\u5237\u65B0\uFF0C\u5E76\u7ACB\u5373\u5BFC\u51FA\u5F53\u524D\u5185\u5B58\u5907\u4EFD\u3002
 ${error.message}\uFF1B${rollbackError.message}`);
@@ -19973,7 +20445,7 @@ ${error.message}`);
     getCurrentPersona,
     getStorageId: getStorageId2,
     loadBgSettings: loadBgSettings2,
-    clone: clone12,
+    clone: clone13,
     openCropper: openCropper2,
     saveBgGlobal: saveBgGlobal2,
     saveBgLocal: saveBgLocal2,
@@ -19987,12 +20459,12 @@ ${error.message}`);
       const operation = backgroundMutation.catch(() => {
       }).then(async () => {
         const persisted = await runBackgroundTransaction({
-          capture: () => isDesktop ? window.__pmDesktopBg || "" : isGlobal ? window.__pmBgGlobal || "" : clone12(window.__pmBgLocal || {}),
+          capture: () => isDesktop ? window.__pmDesktopBg || "" : isGlobal ? window.__pmBgGlobal || "" : clone13(window.__pmBgLocal || {}),
           mutate,
           restore: (snapshot) => {
             if (isDesktop) window.__pmDesktopBg = snapshot;
             else if (isGlobal) window.__pmBgGlobal = snapshot;
-            else window.__pmBgLocal = clone12(snapshot);
+            else window.__pmBgLocal = clone13(snapshot);
           },
           persist: isDesktop ? saveDesktopBg2 : isGlobal ? saveBgGlobal2 : saveBgLocal2
         });
@@ -21004,21 +21476,21 @@ ${error.message}`);
   }
 
   // src/settings-backup.js
-  var clone8 = (value) => JSON.parse(JSON.stringify(value));
-  function structurallyEqual2(left, right) {
+  var clone9 = (value) => JSON.parse(JSON.stringify(value));
+  function structurallyEqual4(left, right) {
     if (Object.is(left, right)) return true;
     if (Array.isArray(left) || Array.isArray(right)) {
       if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) return false;
-      return left.every((value, index) => structurallyEqual2(value, right[index]));
+      return left.every((value, index) => structurallyEqual4(value, right[index]));
     }
     if (!left || !right || typeof left !== "object" || typeof right !== "object") return false;
     const leftKeys = Object.keys(left).sort();
     const rightKeys = Object.keys(right).sort();
     if (leftKeys.length !== rightKeys.length || leftKeys.some((key, index) => key !== rightKeys[index])) return false;
-    return leftKeys.every((key) => structurallyEqual2(left[key], right[key]));
+    return leftKeys.every((key) => structurallyEqual4(left[key], right[key]));
   }
   function assertCanonicalCalendarField(value, normalized, field) {
-    if (!structurallyEqual2(value, normalized)) {
+    if (!structurallyEqual4(value, normalized)) {
       throw new Error(`\u5907\u4EFD\u5B57\u6BB5 ${field} \u5185\u5BB9\u65E0\u6548\u6216\u4E0D\u662F\u89C4\u8303\u683C\u5F0F`);
     }
     return normalized;
@@ -21089,6 +21561,7 @@ ${error.message}`);
       await afterPersist("apply", nextState);
       await complete(nextState, applied);
     } catch (error) {
+      if (error?.partialApplied) applied = { ...applied || {}, ...error.partialApplied };
       let rollbackState;
       try {
         await beforeApply("rollback");
@@ -21112,17 +21585,17 @@ ${error.message}`);
       const interactiveScenes = normalizeInteractiveStore(await loadInteractiveScenes());
       const branchLineage = await loadBranchLineage();
       return {
-        histories: clone8(window.__pmHistories || {}),
-        config: clone8(window.__pmConfig || {}),
-        theme: clone8(window.__pmTheme || {}),
-        profiles: clone8(window.__pmProfiles || []),
-        groupMeta: clone8(window.__pmGroupMeta || {}),
-        pokeConfig: clone8(window.__pmPokeConfig || {}),
-        bidirectional: clone8(window.__pmBidirectional || {}),
+        histories: clone9(window.__pmHistories || {}),
+        config: clone9(window.__pmConfig || {}),
+        theme: clone9(window.__pmTheme || {}),
+        profiles: clone9(window.__pmProfiles || []),
+        groupMeta: clone9(window.__pmGroupMeta || {}),
+        pokeConfig: clone9(window.__pmPokeConfig || {}),
+        bidirectional: clone9(window.__pmBidirectional || {}),
         injectionConfig: normalizeInjectionConfig(window.__pmInjectionConfig),
         budgetConfig: normalizeBudgetConfig(window.__pmBudgetConfig),
         emojis: cloneEmojiLibrary(window.__pmEmojis),
-        characterBehavior: clone8(window.__pmCharacterBehavior || {}),
+        characterBehavior: clone9(window.__pmCharacterBehavior || {}),
         wordyLimit: !!window.__pmWordyLimit,
         galBubbleEnabled: window.__pmGalBubbleEnabled === true,
         worldBookConfig: normalizeWorldBookConfig(window.__pmWorldBookConfig),
@@ -21140,34 +21613,34 @@ ${error.message}`);
         calendarRecipes: loadCalendarRecipes(),
         calendarOutfits: loadCalendarOutfits(),
         todayTrend: normalizeTodayTrendStore(await loadTodayTrendStore()),
-        branchLineage: clone8(branchLineage)
+        branchLineage: clone9(branchLineage)
       };
     };
     const apply = async (state) => {
       const interactiveScenes = normalizeInteractiveStore(state.interactiveScenes);
       const phoneUiState = normalizePhoneUiState(state.phoneUiState, interactiveScenes);
       const ambientStatus = normalizeAmbientStatus(state.ambientStatus ?? { enabled: state.theme?.ambientStatusEnabled });
-      window.__pmHistories = clone8(state.histories || {});
-      window.__pmConfig = clone8(state.config || {});
-      window.__pmTheme = clone8(state.theme || {});
+      window.__pmHistories = clone9(state.histories || {});
+      window.__pmConfig = clone9(state.config || {});
+      window.__pmTheme = clone9(state.theme || {});
       window.__pmTheme.ambientStatusEnabled = ambientStatus.enabled;
-      window.__pmProfiles = clone8(state.profiles || []);
-      window.__pmGroupMeta = clone8(state.groupMeta || {});
-      window.__pmPokeConfig = clone8(state.pokeConfig || {});
-      window.__pmBidirectional = clone8(state.bidirectional || {});
+      window.__pmProfiles = clone9(state.profiles || []);
+      window.__pmGroupMeta = clone9(state.groupMeta || {});
+      window.__pmPokeConfig = clone9(state.pokeConfig || {});
+      window.__pmBidirectional = clone9(state.bidirectional || {});
       window.__pmInjectionConfig = normalizeInjectionConfig(state.injectionConfig);
       window.__pmBudgetConfig = normalizeBudgetConfig(state.budgetConfig);
       window.__pmEmojis = cloneEmojiLibrary(state.emojis);
-      window.__pmCharacterBehavior = clone8(state.characterBehavior || {});
+      window.__pmCharacterBehavior = clone9(state.characterBehavior || {});
       window.__pmWordyLimit = !!state.wordyLimit;
       window.__pmGalBubbleEnabled = state.galBubbleEnabled === true;
       window.__pmDesktopBg = typeof state.desktopBg === "string" ? state.desktopBg : "";
       window.__pmWorldBookConfig = normalizeWorldBookConfig(state.worldBookConfig);
       window.__pmBgGlobal = typeof state.bgGlobal === "string" ? state.bgGlobal : "";
-      window.__pmBgLocal = clone8(state.bgLocal || {});
+      window.__pmBgLocal = clone9(state.bgLocal || {});
       window.__pmPhoneUiState = phoneUiState;
       window.__pmTodayTrend = normalizeTodayTrendStore(state.todayTrend);
-      window.__pmBranchLineage = clone8(state.branchLineage || {});
+      window.__pmBranchLineage = clone9(state.branchLineage || {});
       return {
         ...state,
         interactiveScenes,
@@ -21181,7 +21654,7 @@ ${error.message}`);
         calendarRecipes: normalizeRecipeStore(state.calendarRecipes),
         calendarOutfits: normalizeOutfitStore(state.calendarOutfits),
         todayTrend: normalizeTodayTrendStore(state.todayTrend),
-        branchLineage: clone8(state.branchLineage || {})
+        branchLineage: clone9(state.branchLineage || {})
       };
     };
     const persist = async (state, phase = "apply", applied = null) => {
@@ -21208,16 +21681,34 @@ ${error.message}`);
       if (!saveCalendar(state.calendarStore) || !saveCalendarOccasions(state.calendarOccasions) || !saveCalendarHolidays(state.calendarHolidays) || !saveCalendarWeather(state.calendarWeather) || !saveCalendarCycles(state.calendarCycles) || !saveCalendarRecipes(state.calendarRecipes) || !saveCalendarOutfits(state.calendarOutfits)) {
         throw new Error("\u65E5\u5386\u4E0E\u83DC\u8C31\u6570\u636E\u4FDD\u5B58\u5931\u8D25\uFF1A\u6D4F\u89C8\u5668\u5B58\u50A8\u4E0D\u53EF\u7528");
       }
-      await saveTodayTrendStore(state.todayTrend);
+      let todayTrendReceipt;
+      try {
+        todayTrendReceipt = await (deps.saveTodayTrendStore || saveTodayTrendStore)(state.todayTrend, {
+          allowAuthorityAcquire: true,
+          returnReceipt: true,
+          expectedStoreRevision: phase === "rollback" && Number.isSafeInteger(applied?.todayTrendReceipt?.storeRevision) ? applied.todayTrendReceipt.storeRevision : null
+        });
+      } catch (error) {
+        if (error?.committedReceipt) {
+          error.partialApplied = { ...error.partialApplied || {}, todayTrendReceipt: error.committedReceipt };
+        }
+        throw error;
+      }
       if (phase === "rollback") {
         if (applied?.branchLineageInserted) await rollbackBranchLineageBackup(applied.branchLineageInserted);
         else await saveBranchLineage(state.branchLineage || {});
       } else {
-        const branchLineageInserted = await saveBranchLineageForBackup(state.branchLineage || {});
+        let branchLineageInserted;
+        try {
+          branchLineageInserted = await saveBranchLineageForBackup(state.branchLineage || {});
+        } catch (error) {
+          error.partialApplied = { ...error.partialApplied || {}, todayTrendReceipt };
+          throw error;
+        }
         deps.invalidateInteractiveStore?.();
         deps.reloadCalendarStore?.();
         deps.reloadTodayTrendStore?.();
-        return { branchLineageInserted };
+        return { branchLineageInserted, todayTrendReceipt };
       }
       deps.invalidateInteractiveStore?.();
       deps.reloadCalendarStore?.();
@@ -21230,14 +21721,14 @@ ${error.message}`);
   }
 
   // src/settings-backup-validate.js
-  var clone9 = (value) => JSON.parse(JSON.stringify(value));
+  var clone10 = (value) => JSON.parse(JSON.stringify(value));
   var objectValue = (value, field) => {
     if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`\u5907\u4EFD\u5B57\u6BB5 ${field} \u5FC5\u987B\u662F\u5BF9\u8C61`);
-    return clone9(value);
+    return clone10(value);
   };
   var arrayValue = (value, field) => {
     if (!Array.isArray(value)) throw new Error(`\u5907\u4EFD\u5B57\u6BB5 ${field} \u5FC5\u987B\u662F\u6570\u7EC4`);
-    return clone9(value);
+    return clone10(value);
   };
   var legacyBackupTheme = (value) => {
     const theme = objectValue(value || {}, "theme");
@@ -21489,7 +21980,7 @@ ${error.message}`);
     const version = data.schemaVersion === void 0 ? 1 : data.schemaVersion;
     if (!Number.isInteger(version) || version < 1) throw new Error("\u5907\u4EFD\u7248\u672C\u65E0\u6548");
     if (version > 15) throw new Error(`\u5907\u4EFD\u7248\u672C ${version} \u9AD8\u4E8E\u5F53\u524D\u652F\u6301\u7248\u672C 15`);
-    const result = clone9(current);
+    const result = clone10(current);
     if (Object.hasOwn(data, "histories")) result.histories = objectValue(data.histories, "histories");
     if (Object.hasOwn(data, "config")) result.config = objectValue(data.config, "config");
     if (Object.hasOwn(data, "theme")) {
@@ -21557,7 +22048,7 @@ ${error.message}`);
   }
 
   // src/settings-ui.js
-  var clone10 = (value) => JSON.parse(JSON.stringify(value));
+  var clone11 = (value) => JSON.parse(JSON.stringify(value));
   function installSettingsUi(deps) {
     const { makeOverlay, applyTheme, applyBackground, addNote, getCurrentPersona, getStorageId: getStorageId2, runtime, closePhone, applyBidirectionalInjection, clearBidirectionalInjection } = deps;
     const { capture: captureBackupState, apply: applyBackupState, complete: completeBackupState, persist: persistBackupState } = createBackupStateHandlers(deps);
@@ -21583,7 +22074,7 @@ ${error.message}`);
       normalizeIndependentApiTemperature,
       defaultTemperature: DEFAULT_INDEPENDENT_API_TEMPERATURE,
       apiDraftMode,
-      clone: clone10,
+      clone: clone11,
       saveProfiles,
       addOrUpdateProfile,
       addNote,
@@ -21606,7 +22097,7 @@ ${error.message}`);
       getCurrentPersona,
       getStorageId: getStorageId2,
       loadBgSettings,
-      clone: clone10,
+      clone: clone11,
       openCropper,
       saveBgGlobal,
       saveBgLocal,
@@ -21673,7 +22164,7 @@ ${error.message}`);
     const appearanceSettings = createAppearanceController({
       THEME_PRESETS,
       applyTheme,
-      clone: clone10,
+      clone: clone11,
       saveTheme,
       renderLookSettings,
       renderSettingsModal,
@@ -21748,12 +22239,15 @@ ${error.message}`);
   }
 
   // src/today-trend-commit.js
-  var clone11 = (value) => structuredClone(value);
+  var clone12 = (value) => structuredClone(value);
   function injectionFailure4(result) {
     if (!result) return null;
     const failedWrites = Number.isInteger(result.failedWrites) ? result.failedWrites : 0;
     const failedKeys = Array.isArray(result.failedKeys) ? result.failedKeys.length : 0;
     return failedWrites || failedKeys ? new Error(`\u4ECA\u65E5\u98CE\u5411\u6CE8\u5165\u5237\u65B0\u5931\u8D25\uFF1A${failedWrites + failedKeys} \u9879\u5199\u5165\u6216\u6E05\u7406\u5931\u8D25`) : null;
+  }
+  function savedStore(result, fallback) {
+    return result && typeof result === "object" && Object.hasOwn(result, "store") ? normalizeTodayTrendStore(result.store) : normalizeTodayTrendStore(result ?? fallback);
   }
   function createTodayTrendCommitter({
     runtime = {},
@@ -21766,16 +22260,17 @@ ${error.message}`);
     const invalidateCommits = () => {
       generation += 1;
     };
-    const commitStore = (mutate, task = null, { refresh = true } = {}) => {
+    const commitStore = (mutate, task = null, { refresh = true, scopeId = null } = {}) => {
       if (typeof mutate !== "function") throw new TypeError("\u4ECA\u65E5\u98CE\u5411\u63D0\u4EA4\u53D8\u66F4\u5FC5\u987B\u662F\u51FD\u6570");
       const expectedGeneration = generation;
       return enqueueDirectoryOperation("todayTrend", async () => {
         if (expectedGeneration !== generation || !active(task)) return false;
         const previous = normalizeTodayTrendStore(await load());
-        const candidate = normalizeTodayTrendStore(await mutate(clone11(previous)));
+        const candidate = normalizeTodayTrendStore(await mutate(clone12(previous)));
         if (expectedGeneration !== generation || !active(task)) return false;
-        await save(candidate);
-        runtime.store = candidate;
+        const saved = await save(candidate, { scopeId, returnReceipt: true });
+        const committedCandidate = savedStore(saved, candidate);
+        runtime.store = committedCandidate;
         if (!refresh) return candidate;
         let refreshError = null;
         try {
@@ -21785,8 +22280,11 @@ ${error.message}`);
         }
         if (!refreshError && expectedGeneration === generation && active(task)) return candidate;
         try {
-          await save(previous);
-          runtime.store = previous;
+          const rollbackOptions = { scopeId, returnReceipt: true };
+          if (Number.isSafeInteger(saved?.storeRevision)) rollbackOptions.expectedStoreRevision = saved.storeRevision;
+          const rolledBack = await save(previous, rollbackOptions);
+          const restored = savedStore(rolledBack, previous);
+          runtime.store = restored;
           const rollbackError = injectionFailure4(await refreshInjection?.(previous));
           if (rollbackError) throw rollbackError;
         } catch (rollbackError) {
@@ -21800,13 +22298,13 @@ ${error.message}`);
         return false;
       });
     };
-    const commitScope = (storageId, mutate, task = null, options2) => commitStore(async (store) => {
+    const commitScope = (storageId, mutate, task = null, options2 = {}) => commitStore(async (store) => {
       if (typeof storageId !== "string" || !storageId) throw new TypeError("\u4ECA\u65E5\u98CE\u5411\u89D2\u8272\u8D44\u6599 ID \u5FC5\u987B\u662F\u975E\u7A7A\u5B57\u7B26\u4E32");
-      const scope = await mutate(clone11(store.scopes[storageId]));
+      const scope = await mutate(clone12(store.scopes[storageId]));
       if (scope === null) delete store.scopes[storageId];
       else store.scopes[storageId] = scope;
       return store;
-    }, task, options2);
+    }, task, { ...options2, scopeId: storageId });
     return { commitStore, commitScope, invalidateCommits };
   }
 
