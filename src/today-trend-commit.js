@@ -1,13 +1,25 @@
 import { enqueueDirectoryOperation } from './directory-save-coordinator.js';
-import { getTodayTrendStorageStatus, loadTodayTrendStore, saveTodayTrendStore, todayTrendJournal } from './today-trend-storage.js';
+import {
+    getTodayTrendStorageStatus, loadTodayTrendStore, loadTodayTrendV2Store, saveTodayTrendStore, todayTrendJournal,
+} from './today-trend-storage.js';
 import { normalizeTodayTrendStore } from './today-trend-model.js';
 import { todayTrendStoreDigest } from './today-trend-journal.js';
+import { buildReadOnlyShadow, normalizeTodayTrendV2Candidate } from './today-trend-v2-model.js';
 
 const clone = value => structuredClone(value);
 
+const scopeEntries = value => value?.version === 2
+    ? value.globalEnvelope?.payload?.scopes || {}
+    : value?.scopes || {};
+const scopeValue = entry => entry?.payload ?? entry;
 const changedScopeIds = (previous, candidate) => [...new Set([
-    ...Object.keys(previous.scopes || {}), ...Object.keys(candidate.scopes || {}),
-])].filter(id => JSON.stringify(previous.scopes?.[id]) !== JSON.stringify(candidate.scopes?.[id])).sort();
+    ...Object.keys(scopeEntries(previous)), ...Object.keys(scopeEntries(candidate)),
+])].filter(id => JSON.stringify(scopeValue(scopeEntries(previous)[id]))
+    !== JSON.stringify(scopeValue(scopeEntries(candidate)[id]))).sort();
+
+const isV2Store = value => value?.version === 2 && Object.hasOwn(value, 'globalEnvelope');
+const facadeStore = value => isV2Store(value) ? buildReadOnlyShadow(value) : normalizeTodayTrendStore(value);
+const canonicalStore = (value, current = null) => normalizeTodayTrendV2Candidate(value, current);
 
 function injectionFailure(result) {
     if (!result) return null;
@@ -24,10 +36,12 @@ function savedStore(result, fallback) {
 
 export function createTodayTrendCommitter({
     runtime = {}, load = loadTodayTrendStore, save = saveTodayTrendStore, refreshInjection, prepareInjection,
-    storageStatus = getTodayTrendStorageStatus, journal: journalOption,
+    storageStatus = getTodayTrendStorageStatus, loadCanonical: loadCanonicalOption, journal: journalOption,
 } = {}) {
     const journal = journalOption === undefined && load === loadTodayTrendStore && save === saveTodayTrendStore
         ? todayTrendJournal : journalOption;
+    const loadCanonical = loadCanonicalOption === undefined && load === loadTodayTrendStore && save === saveTodayTrendStore
+        ? loadTodayTrendV2Store : loadCanonicalOption;
     let generation = 0;
     let recoveryPromise = null;
     const active = task => !task || task.active?.() !== false;
@@ -60,9 +74,10 @@ export function createTodayTrendCommitter({
                 returnReceipt: true,
             });
             entry = journal.acceptAtomicTransition(compensation.value);
-            runtime.pendingInjectionStore = previous;
-            runtime.store = savedStore(rolledBack, previous);
-            await refresh(previous);
+            const previousFacade = facadeStore(previous);
+            runtime.pendingInjectionStore = previousFacade;
+            runtime.store = savedStore(rolledBack, previousFacade);
+            await refresh(previousFacade);
             delete runtime.pendingInjectionStore;
             await journal.complete(entry, 'rejected', {
                 lastErrorCode: String(original?.code || original?.name || 'TT_REJECTED'),
@@ -80,13 +95,14 @@ export function createTodayTrendCommitter({
     const recoverEntry = async entry => {
         if (entry.phase === 'blocked') return false;
         const status = await storageStatus();
-        const current = normalizeTodayTrendStore(await load());
+        const current = loadCanonical ? canonicalStore(await loadCanonical()) : normalizeTodayTrendStore(await load());
+        const currentFacade = facadeStore(current);
         const revision = status.authority?.storeRevision;
-        const digest = todayTrendStoreDigest(current);
+        const digestFor = journalValue => todayTrendStoreDigest(isV2Store(journalValue) ? current : currentFacade);
         if (entry.phase === 'pending' || entry.phase === 'prepared') {
-            if (revision === entry.baseStoreRevision && digest === entry.previousDigest) {
+            if (revision === entry.baseStoreRevision && digestFor(entry.previous) === entry.previousDigest) {
                 await journal.complete(entry, 'rejected');
-                runtime.store = current;
+                runtime.store = currentFacade;
                 return true;
             }
             const error = Object.assign(new Error('Today Trend prepared journal 与权威 store 不一致'), { code: 'TT_RECOVERY_SPLIT_BRAIN' });
@@ -97,14 +113,15 @@ export function createTodayTrendCommitter({
             return block(entry, error);
         }
         if (entry.phase === 'compensation-store-written') {
-            if (revision !== entry.compensationStoreRevision || digest !== entry.previousDigest) {
+            if (revision !== entry.compensationStoreRevision || digestFor(entry.previous) !== entry.previousDigest) {
                 const error = Object.assign(new Error('Today Trend 补偿 journal 与权威 store 不一致'), { code: 'TT_RECOVERY_SPLIT_BRAIN' });
                 return block(entry, error);
             }
-            runtime.pendingInjectionStore = entry.previous;
-            runtime.store = current;
+            const previousFacade = facadeStore(entry.previous);
+            runtime.pendingInjectionStore = previousFacade;
+            runtime.store = currentFacade;
             try {
-                await refresh(entry.previous);
+                await refresh(previousFacade);
                 delete runtime.pendingInjectionStore;
                 await journal.complete(entry, 'rejected');
                 return true;
@@ -112,11 +129,11 @@ export function createTodayTrendCommitter({
                 return block(entry, error);
             }
         }
-        if (revision !== entry.candidateStoreRevision || digest !== entry.candidateDigest) {
+        if (revision !== entry.candidateStoreRevision || digestFor(entry.candidate) !== entry.candidateDigest) {
             const error = Object.assign(new Error('Today Trend candidate journal 与权威 store 不一致'), { code: 'TT_RECOVERY_SPLIT_BRAIN' });
             return block(entry, error);
         }
-        runtime.store = current;
+        runtime.store = currentFacade;
         if (entry.phase === 'compensation-requested') {
             const original = Object.assign(new Error('Today Trend 恢复未完成的补偿事务'), {
                 code: entry.lastErrorCode || 'TT_COMPENSATION_REQUIRED',
@@ -131,9 +148,10 @@ export function createTodayTrendCommitter({
             const error = Object.assign(new Error(`Today Trend journal phase 无法恢复：${entry.phase}`), { code: 'TT_RECOVERY_PHASE_INVALID' });
             return block(entry, error);
         }
-        runtime.pendingInjectionStore = entry.candidate;
+        const candidateFacade = facadeStore(entry.candidate);
+        runtime.pendingInjectionStore = candidateFacade;
         try {
-            await refresh(entry.candidate);
+            await refresh(candidateFacade);
             delete runtime.pendingInjectionStore;
             const injected = await journal.transition(entry, 'injection-written');
             await journal.complete(injected, 'accepted');
@@ -168,10 +186,10 @@ export function createTodayTrendCommitter({
         return recoveryPromise;
     };
 
-    const sagaCommit = async ({ previous, candidate, task, expectedGeneration, scopeId }) => {
+    const sagaCommit = async ({ previous, candidate, previousFacade, candidateFacade, task, expectedGeneration, scopeId }) => {
         const status = await storageStatus();
         if (!status.available || !status.owned || status.authority?.writeV2 !== true) return null;
-        await prepareInjection?.(candidate);
+        await prepareInjection?.(candidateFacade);
         let entry = await journal.begin({
             scopeId, affectedScopeIds: changedScopeIds(previous, candidate),
             baseStoreRevision: status.authority.storeRevision, previous, candidate,
@@ -189,16 +207,16 @@ export function createTodayTrendCommitter({
             await journal.complete(entry, 'rejected', { lastErrorCode: String(error?.code || error?.name || 'TT_STORE_WRITE_FAILED') });
             throw error;
         }
-        runtime.pendingInjectionStore = candidate;
+        runtime.pendingInjectionStore = candidateFacade;
         let refreshError = null;
-        try { await refresh(candidate); }
+        try { await refresh(candidateFacade); }
         catch (error) { refreshError = error; }
         if (!refreshError && expectedGeneration === generation && active(task)) {
-            runtime.store = savedStore(saved, candidate);
+            runtime.store = savedStore(saved, candidateFacade);
             delete runtime.pendingInjectionStore;
             const injected = await journal.transition(entry, 'injection-written');
             await journal.complete(injected, 'accepted');
-            return candidate;
+            return candidateFacade;
         }
         const original = refreshError || Object.assign(new Error('今日风向提交在任务取消后需要回滚'), { name: 'AbortError' });
         entry = await journal.transition(entry, 'compensation-requested', { lastErrorCode: String(original.code || original.name || 'TT_COMPENSATION_REQUIRED') });
@@ -212,33 +230,41 @@ export function createTodayTrendCommitter({
         const scopeId = options.scopeId ?? null;
         const refreshEnabled = Object.hasOwn(options, 'refreshInjection')
             ? options.refreshInjection !== false : options.refresh !== false;
+        if (options.canonical !== undefined && typeof options.canonical !== 'boolean') throw new TypeError('canonical 必须是布尔值');
         const expectedGeneration = generation;
         return enqueueDirectoryOperation('todayTrend', async () => {
             await recover();
             journal?.assertWritable(null);
             if (expectedGeneration !== generation || !active(task)) return false;
-            const previous = normalizeTodayTrendStore(await load());
-            const candidate = normalizeTodayTrendStore(await mutate(clone(previous)));
+            const previous = loadCanonical ? canonicalStore(await loadCanonical()) : normalizeTodayTrendStore(await load());
+            const previousFacade = facadeStore(previous);
+            if (options.canonical && !loadCanonical) throw new TypeError('canonical mutation 需要 loadCanonical');
+            const mutated = await mutate(clone(options.canonical ? previous : previousFacade));
+            const candidate = options.canonical ? canonicalStore(mutated)
+                : loadCanonical ? canonicalStore(mutated, previous) : normalizeTodayTrendStore(mutated);
+            const candidateFacade = facadeStore(candidate);
             if (expectedGeneration !== generation || !active(task)) return false;
             if (journal && refreshEnabled) {
-                const sagaResult = await sagaCommit({ previous, candidate, task, expectedGeneration, scopeId });
+                const sagaResult = await sagaCommit({
+                    previous, candidate, previousFacade, candidateFacade, task, expectedGeneration, scopeId,
+                });
                 if (sagaResult !== null) return sagaResult;
             }
             const saved = await save(candidate, { scopeId, returnReceipt: true });
-            const committedCandidate = savedStore(saved, candidate);
+            const committedCandidate = savedStore(saved, candidateFacade);
             runtime.store = committedCandidate;
-            if (!refreshEnabled) return candidate;
+            if (!refreshEnabled) return candidateFacade;
             let refreshError = null;
-            try { refreshError = injectionFailure(await refreshInjection?.(candidate)); }
+            try { refreshError = injectionFailure(await refreshInjection?.(candidateFacade)); }
             catch (error) { refreshError = error; }
-            if (!refreshError && expectedGeneration === generation && active(task)) return candidate;
+            if (!refreshError && expectedGeneration === generation && active(task)) return candidateFacade;
             try {
                 const rollbackOptions = { scopeId, returnReceipt: true };
                 if (Number.isSafeInteger(saved?.storeRevision)) rollbackOptions.expectedStoreRevision = saved.storeRevision;
                 const rolledBack = await save(previous, rollbackOptions);
-                const restored = savedStore(rolledBack, previous);
+                const restored = savedStore(rolledBack, previousFacade);
                 runtime.store = restored;
-                const rollbackError = injectionFailure(await refreshInjection?.(previous));
+                const rollbackError = injectionFailure(await refreshInjection?.(previousFacade));
                 if (rollbackError) throw rollbackError;
             } catch (rollbackError) {
                 const original = refreshError || new Error('今日风向提交在任务取消后需要回滚');
@@ -254,6 +280,17 @@ export function createTodayTrendCommitter({
 
     const commitScope = (storageId, mutate, task = null, options = {}) => commitStore(async store => {
         if (typeof storageId !== 'string' || !storageId) throw new TypeError('今日风向角色资料 ID 必须是非空字符串');
+        if (options.canonical) {
+            const scopes = store.globalEnvelope.payload.scopes;
+            const envelope = scopes[storageId];
+            const payload = await mutate(clone(envelope?.payload));
+            if (payload === null) delete scopes[storageId];
+            else {
+                if (!envelope) throw new Error('canonical scope 不存在，必须通过整树 mutation 创建');
+                scopes[storageId] = { ...envelope, payload };
+            }
+            return store;
+        }
         const scope = await mutate(clone(store.scopes[storageId]));
         if (scope === null) delete store.scopes[storageId];
         else store.scopes[storageId] = scope;

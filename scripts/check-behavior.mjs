@@ -3,13 +3,15 @@ import { readFileSync } from 'node:fs';
 import {
     CALENDAR_CYCLE_STORAGE_KEY, CALENDAR_HOLIDAY_STORAGE_KEY, CALENDAR_OCCASION_STORAGE_KEY,
     CALENDAR_OUTFIT_STORAGE_KEY, CALENDAR_STORAGE_KEY, CALENDAR_WEATHER_STORAGE_KEY, EXTENSION_PROMPT_POSITIONS, MAX_INJECTION_DEPTH,
+    TODAY_TREND_V2_JOURNAL_PREFIX,
 } from '../src/constants.js';
 import {
     getGalBubbleAssistantText, getGalBubblePrompt, getGalBubbleScriptDefinition,
     installGalBubble, parseGalBubbleMessages, reconcileGalBubble, uninstallGalBubble,
 } from '../src/gal-bubble.js';
 import { createDefaultTodayTrendDynamicsSettings, createEmptyTodayTrendStore, normalizeTodayTrendStore } from '../src/today-trend-model.js';
-import { createTodayTrendStorage, todayTrendV2Authority } from '../src/today-trend-storage.js';
+import { createTodayTrendStorage, todayTrendJournal, todayTrendV2Authority } from '../src/today-trend-storage.js';
+import { createTodayTrendCommitter } from '../src/today-trend-commit.js';
 import { migrateTodayTrendStoreToV2 } from '../src/today-trend-v2-model.js';
 import { normalizeThemePreset, THEME_PRESETS } from '../src/config.js';
 import { createWorldBookEntryKey, getCurrentChatWorldBooks, getEnabledWorldBookNames, getReadableWorldBookNames, getTavernDbColumn, isMemberPrivateWorldBookEntryAllowed, isWorldBookEntryAllowed, normalizeWorldBookConfig } from '../src/worldbook-config.js';
@@ -2883,7 +2885,10 @@ try {
     window.__pmBudgetConfig = undefined;
     window.__pmEmojis = [];
     try {
+        const branchCommitStore = async () => {};
+        const branchCommitScope = async () => {};
         const officialBranchCalls = [];
+        const officialBranchOptions = [];
         let officialBranchFailure = null;
         const injectionDeps = {
             runtime: createRuntimeState(),
@@ -2891,9 +2896,11 @@ try {
             getStorageId: () => 'story',
             getUserPersona: () => ({ name: '用户' }),
             getInteractiveStore: () => interactiveStoreReady,
-            beginBranchInheritance: async context => {
+            commitTodayTrendStore: branchCommitStore,
+            commitTodayTrendScope: branchCommitScope,
+            beginBranchInheritance: async (context, options) => {
                 if (officialBranchFailure) throw officialBranchFailure;
-                officialBranchCalls.push(context); return { status: 'cloned' };
+                officialBranchCalls.push(context); officialBranchOptions.push(options); return { status: 'cloned' };
             },
         };
         installPhoneFoundation({ phoneWindow: null, phoneActive: false, conversationHistory: [] }, injectionDeps);
@@ -2919,6 +2926,10 @@ try {
         await branchEventResult;
         assert.deepEqual(officialBranchCalls, [injectionContext],
             '官方分支 CHAT_CHANGED 必须把含 main_chat 的最新 getContext 快照交给继承入口');
+        assert.equal(officialBranchOptions[0].commitTodayTrendStore, branchCommitStore,
+            '官方分支继承必须透传已安装的 Today Trend 统一 store 提交器');
+        assert.equal(officialBranchOptions[0].commitTodayTrendScope, branchCommitScope,
+            '官方分支继承必须透传已安装的 Today Trend 统一 scope 提交器');
         assert.deepEqual(injectionDeps.runtime.lastBranchInheritance, {
             status: 'cloned', reason: null, sourceId: null, targetId: null, sourcePresence: null, targetPresence: null,
         }, '宿主监听器必须记录真实继承入口返回的可诊断状态');
@@ -8464,6 +8475,13 @@ try {
 }
 
 const previousBranchWindow = globalThis.window;
+let productionTrendSnapshot = null;
+let productionTrendHarnessActive = false;
+let previousProductionBeforeUnloadRegistration;
+let previousProductionWindowAddEventListener;
+let previousProductionDocument;
+let previousProductionEnd;
+let productionEnvironmentPrepared = false;
 try {
     globalThis.window = { ...(previousBranchWindow || {}) };
     const branchContext = {
@@ -8858,9 +8876,11 @@ try {
     await pmIDBDel(BRANCH_LINEAGE_STORE_KEY);
     const productionTargetId = getStorageIdFor('alice.png', 'production-branch');
     const productionContext = { ...branchContext, chatId: 'production-branch' };
-    const previousProductionBeforeUnloadRegistration = window.__pmBeforeUnloadRegistered;
-    const previousProductionWindowAddEventListener = window.addEventListener;
-    const previousProductionDocument = globalThis.document;
+    previousProductionBeforeUnloadRegistration = window.__pmBeforeUnloadRegistered;
+    previousProductionWindowAddEventListener = window.addEventListener;
+    previousProductionDocument = globalThis.document;
+    previousProductionEnd = window.__pmEnd;
+    productionEnvironmentPrepared = true;
     globalThis.document = {
         visibilityState: 'visible',
         addEventListener() {},
@@ -8871,8 +8891,24 @@ try {
     window.addEventListener = () => {};
     window.__pmBeforeUnloadRegistered = false;
     const productionListeners = new Map();
-    const previousProductionEnd = window.__pmEnd;
     const productionCleanupCalls = [];
+    productionTrendSnapshot = new Map([...idbValues.entries()]
+        .filter(([key]) => key.startsWith('ST_SMS_TODAY_TREND')).map(([key, value]) => [key, structuredClone(value)]));
+    for (const key of [...idbValues.keys()]) if (key.startsWith('ST_SMS_TODAY_TREND')) idbValues.delete(key);
+    await todayTrendJournal.reload();
+    await todayTrendV2Authority.acquire({
+        readV2: true, writeV2: true, serveV2: false, initialStore: todayTrendBranchStore(),
+    });
+    productionTrendHarnessActive = true;
+    let productionTrendRefreshes = 0;
+    const productionTrendCommitter = createTodayTrendCommitter({
+        runtime: {}, journal: todayTrendJournal,
+        refreshInjection: async () => {
+            productionTrendRefreshes += 1;
+            return { failedWrites: 0, failedKeys: [] };
+        },
+    });
+    await productionTrendCommitter.ready();
     const productionFoundationState = { phoneWindow: null, phoneActive: true, conversationHistory: [] };
     const productionEventContext = {
         ...productionContext,
@@ -8896,6 +8932,8 @@ try {
     const productionFoundationDeps = {
         runtime: createRuntimeState(), getCtx: () => currentProductionEventContext,
         getStorageId: () => productionTargetId, getUserPersona: () => ({ name: '用户' }),
+        commitTodayTrendStore: productionTrendCommitter.commitStore,
+        commitTodayTrendScope: productionTrendCommitter.commitScope,
         cancelCommunityGeneration: reason => productionCleanupCalls.push(['community', reason]),
         cancelCalendarTasks: reason => productionCleanupCalls.push(['calendar', reason]),
     };
@@ -8930,6 +8968,7 @@ try {
         communitySceneIdsByStorage: { [branchIds.source]: ['scene-source'] },
         communitySelectionsByStorage: { [branchIds.source]: { 'scene-source': { mode: 'all' } } },
     }));
+    const productionTrendStatusBefore = await todayTrendV2Authority.status();
     const lineageCommitBlocker = blockIDBOperation('put', BRANCH_LINEAGE_STORE_KEY);
     const productionBranch = productionListeners.get('production_chat_changed')[0](productionTargetId);
     let productionFailure = null;
@@ -8983,6 +9022,23 @@ try {
         await productionBranch.catch(() => {});
     }
     assert.equal((await productionBranch).status, 'cloned');
+    const productionTrendStatusAfter = await todayTrendV2Authority.status();
+    assert.equal(productionTrendStatusAfter.authority.storeRevision,
+        productionTrendStatusBefore.authority.storeRevision + 1,
+        '真实分支新增必须通过统一 committer 只递增一次 Today Trend store revision');
+    assert.equal(productionTrendStatusAfter.authority.scopeRevisionByStorageId[productionTargetId], 1,
+        '真实分支新增必须只递增一次目标 Today Trend scope revision');
+    assert.ok((await todayTrendV2Authority.load()).store.scopes[productionTargetId],
+        '真实分支新增必须把目标 Today Trend scope 持久化到 v2 authority');
+    assert.equal([...idbValues.keys()].some(key => key.startsWith(TODAY_TREND_V2_JOURNAL_PREFIX)), false,
+        '真实分支新增 accepted 后不得遗留开放 journal');
+    assert.equal(productionTrendRefreshes, 1,
+        '真实分支新增必须经统一 committer 只刷新一次 Today Trend 注入');
+    const successfulProductionLineage = await loadBranchLineage();
+    assert.equal(successfulProductionLineage[productionTargetId]?.sourceId, branchIds.source,
+        '真实分支新增成功后必须直接持久化正确的 lineage sourceId');
+    assert.equal(successfulProductionLineage[productionTargetId]?.targetChatId, 'production-branch',
+        '真实分支新增成功后必须直接持久化正确的 lineage targetChatId');
     assert.equal(productionFoundationDeps.runtime.lastBranchInheritance?.status, 'cloned',
         '真实 CHAT_CHANGED 链路必须记录已完成的生产继承结果');
     assert.equal(productionFoundationDeps.runtime.lastBranchInheritance?.targetId, productionTargetId,
@@ -9017,6 +9073,7 @@ try {
     ], '继承跳过完成后也必须恰好执行一次聊天切换清理');
 
     const failedProductionTargetId = getStorageIdFor('alice.png', 'production-failed-branch');
+    const failedTrendStatusBefore = await todayTrendV2Authority.status();
     currentProductionEventContext = { ...productionEventContext, chatId: 'production-failed-branch' };
     productionFoundationState.phoneActive = true;
     const failedLineageBlocker = blockIDBOperation('put', BRANCH_LINEAGE_STORE_KEY);
@@ -9052,16 +9109,50 @@ try {
     }
     assert.equal(Object.hasOwn(JSON.parse(localValues.get('ST_SMS_POKE_CONFIG')), failedProductionTargetId), false,
         'lineage 失败后必须补偿移除真实生产保存器已写入的 target scope');
+    const failedTrendStatusAfter = await todayTrendV2Authority.status();
+    assert.equal(failedTrendStatusAfter.authority.storeRevision,
+        failedTrendStatusBefore.authority.storeRevision + 2,
+        'lineage 失败必须只产生 candidate 与 compensation 两次受控 Today Trend 提交');
+    assert.equal((await todayTrendV2Authority.load()).store.scopes[failedProductionTargetId], undefined,
+        'lineage 失败后的统一 committer 补偿必须移除目标 Today Trend scope');
+    assert.equal([...idbValues.keys()].some(key => key.startsWith(TODAY_TREND_V2_JOURNAL_PREFIX)), false,
+        'lineage 失败完成补偿后不得遗留 prepared、store-written 或 blocked journal');
+    assert.equal(productionTrendRefreshes, 3,
+        '成功新增、失败 candidate 与外层 compensation 必须各刷新一次，不能重复提交补偿');
+    const failedProductionLineage = await loadBranchLineage();
+    assert.equal(failedProductionLineage[failedProductionTargetId], undefined,
+        'lineage 写入失败并补偿后不得遗留阻断重试的伪 marker');
+    assert.equal(failedProductionLineage[productionTargetId]?.sourceId, branchIds.source,
+        '失败分支事务不得破坏此前成功提交的 lineage marker');
     assert.deepEqual(productionCleanupCalls.slice(-3), [
         ['community', 'host-chat-changed'], ['calendar', 'host-chat-changed'], ['end-phone', true],
     ], '继承失败完成后也必须恰好执行一次聊天切换清理');
-    window.__pmEnd = previousProductionEnd;
-    window.addEventListener = previousProductionWindowAddEventListener;
-    window.__pmBeforeUnloadRegistered = previousProductionBeforeUnloadRegistration;
-    globalThis.document = previousProductionDocument;
 } finally {
+    let cleanupError = null;
+    if (productionTrendHarnessActive) {
+        try {
+            assert.equal(await todayTrendV2Authority.release({ readV2: true, serveV2: false }), true,
+                '生产分支夹具必须显式确认 Today Trend authority 释放成功');
+            assert.equal((await todayTrendV2Authority.status()).authority?.ownerTabId, null,
+                '生产分支夹具结束后不得遗留 Today Trend authority owner');
+        } catch (error) { cleanupError = error; }
+    }
+    if (productionTrendSnapshot) {
+        try {
+            for (const key of [...idbValues.keys()]) if (key.startsWith('ST_SMS_TODAY_TREND')) idbValues.delete(key);
+            for (const [key, value] of productionTrendSnapshot) idbValues.set(key, structuredClone(value));
+            await todayTrendJournal.reload();
+        } catch (error) { cleanupError ||= error; }
+    }
+    if (productionEnvironmentPrepared) {
+        try { window.__pmEnd = previousProductionEnd; } catch (error) { cleanupError ||= error; }
+        try { window.addEventListener = previousProductionWindowAddEventListener; } catch (error) { cleanupError ||= error; }
+        try { window.__pmBeforeUnloadRegistered = previousProductionBeforeUnloadRegistration; } catch (error) { cleanupError ||= error; }
+        try { globalThis.document = previousProductionDocument; } catch (error) { cleanupError ||= error; }
+    }
     if (previousBranchWindow === undefined) delete globalThis.window;
     else globalThis.window = previousBranchWindow;
+    if (cleanupError) throw cleanupError;
 }
 
 const quoteTimers = new Map();

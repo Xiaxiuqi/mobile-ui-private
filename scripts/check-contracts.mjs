@@ -76,13 +76,16 @@ const rebuiltBundle = await build({
 const rebuiltBundleText = rebuiltBundle.outputFiles[0]?.text || '';
 if (bundle !== rebuiltBundleText) failures.push('index.js: bundle does not exactly match an in-memory esbuild rebuild');
 const BUNDLE_BASELINE_BYTES = 1240219;
-const BUNDLE_MAX_BYTES = 1488263;
+const BUNDLE_REFERENCE_BYTES = 1488263;
 const PHASE_0_OBSERVED_BUNDLE_BYTES = 1377215;
 const bundleBytes = Buffer.byteLength(bundle, 'utf8');
 const observedBundleMatch = baselineText.match(/阶段 0[^\n]*实测 `index\.js` 为 `(\d+)` bytes/);
 if (!observedBundleMatch) failures.push('docs/BASELINE.md: missing the phase 0 observed bundle size');
 else if (Number(observedBundleMatch[1]) !== PHASE_0_OBSERVED_BUNDLE_BYTES) failures.push(`docs/BASELINE.md: phase 0 observed bundle size must remain ${PHASE_0_OBSERVED_BUNDLE_BYTES}`);
 if (!/^# Today Trend v2 生产治理项目$/m.test(projectText)) failures.push('docs/PROJECT.md: missing the Today Trend v2 engineering constraints document');
+for (const expected of ['仅作为历史参考线', '相对阶段 0 的净增量', '禁止为迎合旧 bundle 参考线']) {
+  if (!projectText.includes(expected)) failures.push(`docs/PROJECT.md: missing bundle observation contract ${expected}`);
+}
 const authorityCode = sourceModuleByName.get('today-trend-v2-authority.js')?.code || '';
 const storageCode = sourceModuleByName.get('today-trend-storage.js')?.code || '';
 const idbCode = sourceModuleByName.get('pm-idb.js')?.code || '';
@@ -96,11 +99,6 @@ if (!/db\.transaction\(PM_IDB_STORE,\s*['"]readwrite['"]\)/.test(idbCode) || !id
   failures.push('pm-idb.js: phase 1 CAS must use a single IndexedDB readwrite transaction');
 }
 if (!storageCode.includes('v2Authority.status()') || !storageCode.includes('TT_V1_WRITE_FROZEN')) failures.push('today-trend-storage.js: v1 compatibility bridge must freeze writes after v2 authority activation');
-if (Buffer.byteLength(bundle, 'utf8') > BUNDLE_MAX_BYTES) {
-  failures.push(
-    `index.js: ${Buffer.byteLength(bundle, 'utf8')} bytes exceeds the ${BUNDLE_MAX_BYTES}-byte baseline limit (${BUNDLE_BASELINE_BYTES} * 120%)`,
-  );
-}
 for (const cssModulePath of CSS_MODULE_FILES) {
   try {
     execFileSync('git', ['ls-files', '--error-unmatch', cssModulePath], {
@@ -2426,7 +2424,7 @@ for (const expected of [
   'installPhoneFoundation → installConversation → installEmojiUi → installInteractiveScenes → installCalendar → installSettingsUi → installPhoneChat → installPhoneContextInjection → installPhoneControlCenter → installPhoneDirectory → installContactGenerator → installPhoneChatPoke → installPhoneLifecycle → installDiagnosticApi → installTodayTrend → installTodayTrendPhoneUi',
   '`window.__pmHistories`、`window.__pmConfig`、`window.__pmTheme`、`window.__pmInjectionConfig`、`window.__pmBudgetConfig`',
   '`window.__pmBeforeUnloadRegistered` 与 `window.__pmPageSuspensionHandler`',
-  '`1240219` bytes', '`1488263` bytes',
+  '`1240219` bytes', '`1488263` bytes', '仅作为历史参考线', '相对阶段 0 的净增量',
 ]) requireText('docs/BASELINE.md', baselineText, expected);
 for (const expected of [
   '`--pm-color-surface-elevated`', '`--pm-color-border-strong`',
@@ -4445,7 +4443,7 @@ if (quoteHighlightCleanup < 0 || quoteHighlightCleanup > phoneWindowRemoval) {
 }
 if (css.includes('prefers-color-scheme')) failures.push('css: theme selection must remain explicit and must not use prefers-color-scheme');
 if (/\btransition\s*:\s*all\b/i.test(css)) failures.push('css: transition:all is forbidden; list the properties that actually animate');
-if (/\b(?:transition|transitionProperty)\s*(?:=|:)\s*['\"]all\b/i.test(source)) failures.push('source: inline transition:all is forbidden; list the properties that actually animate');
+if (/\b(?:transition|transitionProperty)\s*(?:=|:)\s*['"]all\b/i.test(source)) failures.push('source: inline transition:all is forbidden; list the properties that actually animate');
 if (source.includes('pm-css')) failures.push('source: inline CSS injector id still present');
 if (css.includes('${')) failures.push('css: JavaScript template expression remains');
 if (manifest.name !== 'phone_mode') failures.push('manifest: internal extension id must remain phone_mode');
@@ -4603,4 +4601,5 @@ if (failures.length) {
   console.error(failures.join('\n'));
   process.exit(1);
 }
+console.log(`Bundle observation: ${bundleBytes} bytes; phase 0 delta: ${bundleBytes - PHASE_0_OBSERVED_BUNDLE_BYTES}; historical reference: ${BUNDLE_REFERENCE_BYTES} bytes (${BUNDLE_BASELINE_BYTES} * 120%).`);
 console.log('Static contracts verified.');

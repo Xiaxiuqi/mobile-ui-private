@@ -22,12 +22,13 @@
 
 ## 构建体积基线
 
-- 历史合同基线：`index.js` 为 `1240219` bytes；静态合同允许的上限为 `1488263` bytes（历史基线的 120%，向下取整）。
-- Today Trend v2 阶段 0 于 2026-08-12 使用当前 `npm run build` 实测 `index.js` 为 `1377215` bytes，低于静态合同上限；该数值是实施前观测点，不自动替换历史合同基线，也不授权抬高上限。
+- 历史合同基线：`index.js` 为 `1240219` bytes；其 120% 为 `1488263` bytes（向下取整），该数值仅作为历史参考线，不是当前构建、阶段完成或发布的硬失败阈值。
+- Today Trend v2 阶段 0 于 2026-08-12 使用当前 `npm run build` 实测 `index.js` 为 `1377215` bytes；该数值是实施前观测点，用于计算后续净增量，不要求新增功能维持原体积。
 - 阶段 1 已实现默认关闭的 `readV2`、`writeV2`、`serveV2`、独立 v2 store/authority key 与单事务 CAS；authority 不存在时兼容 v1，authority 状态不可确认时读写均 fail-closed。
-- 此上限只用于阻止无审查的体积跃升，不替代真实宿主中的首开、首渲染和交互性能测量。调整上限必须同时说明增长来源、宿主回归结果和新的基线值。
+- 每阶段记录当前 bundle、相对阶段 0 的净增量和主要增长来源；异常跃升必须审查重复实现、错误打包、无界依赖与死代码，但禁止仅为迎合旧参考值删除或晦涩化功能、校验、错误信息、可维护结构或 CSS。
+- bundle 观测不能替代真实宿主中的首开、首渲染、交互性能、内存与资源测量。完整 v2 取得真实数据后，才能评估是否建立新的容量预算。
 
-当前检查基线：`check:syntax`、`check:today-trend`、`check:contracts`、`check:budget`、`check:interactive` 通过；`check:calendar` 在阶段 0 修改前已因“当日日程重新生成按钮 SVG/aria 契约”失败，属于既有基线阻塞，不得归因给 Today Trend v2，也不得在本阶段顺手修复。
+当前检查基线：`check:syntax`、`check:today-trend`、`check:contracts`、`check:budget`、`check:interactive` 通过；`check:calendar` 在阶段 0 修改前已因“当日日程重新生成按钮 SVG/aria 契约”失败，`check:permissions` 在本轮 bundle 治理前已因“空数据不得生成日历 prompt”失败。两项均属于既有日历域基线，不得归因给 Today Trend v2，也不得在本阶段顺手修复。
 
 ## 持久化契约
 

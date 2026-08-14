@@ -4,7 +4,8 @@ import {
 } from './constants.js';
 import { normalizeTodayTrendStore } from './today-trend-model.js';
 import {
-    buildReadOnlyShadow, diffReadOnlyShadow, migrateTodayTrendStoreToV2, normalizeTodayTrendV2Store, rebaseTodayTrendV2Store,
+    buildReadOnlyShadow, diffReadOnlyShadow, migrateTodayTrendStoreToV2, normalizeTodayTrendV2Candidate,
+    normalizeTodayTrendV2Store, rebaseTodayTrendV2Store, validateTodayTrendV2Transition,
 } from './today-trend-v2-model.js';
 import { pmIDBCompareAndSwap, pmIDBReadEntry } from './pm-idb.js';
 
@@ -353,20 +354,24 @@ export function createTodayTrendV2Authority({
         broadcast(next);
         return clone(next);
     };
-    const changedScopes = async (value, declaredScopeIds) => {
+    const prepareCandidate = async (value, declaredScopeIds) => {
         if (declaredScopeIds !== undefined && !Array.isArray(declaredScopeIds)) throw new TypeError('changedScopeIds 必须是字符串数组');
         const declared = declaredScopeIds === undefined ? null : [...new Set(declaredScopeIds)];
         if (declared?.some(storageId => typeof storageId !== 'string' || !storageId)) throw new TypeError('changedScopeIds 必须只包含非空字符串');
         const entry = await readEntry(TODAY_TREND_V2_STORAGE_KEY);
         if (!entry?.ok || entry.value === undefined) throw failure('TT_V2_IDB_UNAVAILABLE', '无法读取当前 v2 store 以计算 scope revision');
-        const current = buildReadOnlyShadow(normalizeTodayTrendV2Envelope(entry.value).payload);
-        const candidate = normalizeTodayTrendStore(value);
-        const ids = new Set([...Object.keys(current.scopes), ...Object.keys(candidate.scopes)]);
-        const actual = [...ids].filter(storageId => !structurallyEqual(current.scopes[storageId], candidate.scopes[storageId])).sort();
+        const current = normalizeTodayTrendV2Envelope(entry.value).payload;
+        const candidate = validateTodayTrendV2Transition(current, normalizeTodayTrendV2Candidate(value, current));
+        const currentScopes = current.globalEnvelope.payload.scopes;
+        const candidateScopes = candidate.globalEnvelope.payload.scopes;
+        const ids = new Set([...Object.keys(currentScopes), ...Object.keys(candidateScopes)]);
+        const actual = [...ids].filter(storageId => !structurallyEqual(
+            currentScopes[storageId]?.payload, candidateScopes[storageId]?.payload,
+        )).sort();
         if (declared && !structurallyEqual([...declared].sort(), actual)) {
             throw failure('TT_SCOPE_REVISION_MISMATCH', '声明的 scope 变更范围与实际 candidate 不一致');
         }
-        return actual;
+        return { candidate, affectedScopeIds: actual };
     };
     const saveInternal = async (value, { scopeId = null, changedScopeIds, expectedStoreRevision = null, journalWrite = null } = {}) => {
         if (closed) throw failure('TT_AUTHORITY_CLOSED', 'v2 authority owner 已关闭');
@@ -382,14 +387,16 @@ export function createTodayTrendV2Authority({
         if (expectedStoreRevision !== null && expectedStoreRevision !== previous.storeRevision) {
             throw failure('TT_STORE_REVISION_CONFLICT', 'v2 store 已在当前提交后发生变化，拒绝覆盖');
         }
-        const affectedScopeIds = await changedScopes(value, changedScopeIds === undefined && scopeId !== null ? [scopeId] : changedScopeIds);
+        const prepared = await prepareCandidate(value, changedScopeIds === undefined && scopeId !== null ? [scopeId] : changedScopeIds);
+        const { candidate, affectedScopeIds } = prepared;
         const scopeRevisions = { ...previous.scopeRevisionByStorageId };
         for (const storageId of affectedScopeIds) scopeRevisions[storageId] = (scopeRevisions[storageId] || 0) + 1;
         const next = normalizeTodayTrendV2Authority({
             ...previous, authorityRevision: previous.authorityRevision + 1, storeRevision: previous.storeRevision + 1,
             scopeRevisionByStorageId: scopeRevisions,
         });
-        const envelope = createTodayTrendV2Envelope(value, next.storeRevision, next.scopeRevisionByStorageId);
+        const rebased = rebaseTodayTrendV2Store(candidate, next.storeRevision, next.scopeRevisionByStorageId);
+        const envelope = createTodayTrendV2Envelope(rebased, next.storeRevision, next.scopeRevisionByStorageId);
         const writes = [
             { key: TODAY_TREND_V2_STORAGE_KEY, value: envelope },
             { key: TODAY_TREND_V2_AUTHORITY_KEY, value: next },

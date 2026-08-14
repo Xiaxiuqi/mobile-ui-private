@@ -19,7 +19,9 @@ import {
     normalizeTodayTrendV2Authority, normalizeTodayTrendV2Envelope,
 } from '../src/today-trend-v2-authority.js';
 import {
-    buildReadOnlyShadow, diffReadOnlyShadow, extractArchivedFixedCore, migrateTodayTrendStoreToV2, normalizeTodayTrendV2Store,
+    buildReadOnlyShadow, diffReadOnlyShadow, extractArchivedFixedCore, migrateTodayTrendStoreToV2,
+    normalizeTodayTrendStageProjection, normalizeTodayTrendV2Candidate, normalizeTodayTrendV2Store,
+    resolveTodayTrendV2LatestStage, validateTodayTrendV2Transition,
 } from '../src/today-trend-v2-model.js';
 import { createTodayTrendCommitter } from '../src/today-trend-commit.js';
 import { createTodayTrendJournal, normalizeTodayTrendJournal, todayTrendStoreDigest } from '../src/today-trend-journal.js';
@@ -80,6 +82,8 @@ const createTodayTrendScheduler = options => createTodayTrendSchedulerBase({ com
 assert.equal(TODAY_TREND_VERSION, 1);
 for (const contract of [
     installTodayTrend, normalizeTodayTrendStore, createTodayTrendStorage, createTodayTrendV2Authority, createTodayTrendCommitter,
+    normalizeTodayTrendStageProjection, normalizeTodayTrendV2Candidate, resolveTodayTrendV2LatestStage,
+    validateTodayTrendV2Transition,
     gatherTodayTrendContext, buildTodayTrendInitializationEnvelope, buildTodayTrendGenerationEnvelope,
     createTodayTrendGenerationController, createTodayTrendScheduler, renderTodayTrendInjection,
     renderTodayTrendApp, renderTodayTrendWorldView, renderTodayTrendReputationView,
@@ -1961,6 +1965,33 @@ assert.deepEqual(await sagaStorage.load(), compensationCrashPrevious,
     'compensation-store-written 重启恢复不得改写已补偿的 previous store');
 await sagaJournal.reload();
 
+const splitBrainPrevious = structuredClone(await sagaStorage.load());
+const splitBrainStatus = await sagaStorage.status();
+const splitBrainEntry = await sagaJournal.begin({
+    scopeId: 'chat', affectedScopeIds: ['chat'], baseStoreRevision: splitBrainStatus.authority.storeRevision,
+    previous: splitBrainPrevious, candidate: structuredClone(splitBrainPrevious),
+});
+const splitBrainStoredEnvelope = structuredClone(sagaHarness.records.get(TODAY_TREND_V2_STORAGE_KEY));
+const splitBrainTamperedEnvelope = structuredClone(splitBrainStoredEnvelope);
+splitBrainTamperedEnvelope.payload.globalEnvelope.payload.scopes.chat.payload.operation.lastSuccessfulRunAt += 1;
+sagaHarness.records.set(TODAY_TREND_V2_STORAGE_KEY, splitBrainTamperedEnvelope);
+let splitBrainRefreshes = 0;
+const splitBrainJournal = createSagaJournal();
+const splitBrainCommitter = createTodayTrendCommitter({
+    runtime: {}, load: sagaStorage.load, loadCanonical: sagaStorage.loadCanonical, save: sagaStorage.save,
+    storageStatus: sagaStorage.status, journal: splitBrainJournal,
+    refreshInjection: async () => { splitBrainRefreshes += 1; return { failedWrites: 0, failedKeys: [] }; },
+});
+await assert.rejects(() => splitBrainCommitter.ready(), error => error?.code === 'TT_RECOVERY_SPLIT_BRAIN',
+    'prepared journal 的 revision 即使相同，当前权威 store digest 漂移也必须 blocked');
+assert.equal(splitBrainRefreshes, 0, 'split-brain 恢复不得刷新任何 previous 或 candidate 注入');
+assert.equal(splitBrainCommitter.isBlocked(), true, '权威 store digest 漂移必须持久化 blocked journal');
+assert.deepEqual(sagaHarness.records.get(TODAY_TREND_V2_STORAGE_KEY), splitBrainTamperedEnvelope,
+    'split-brain 检测不得用 journal 快照覆盖当前权威 store');
+sagaHarness.records.set(TODAY_TREND_V2_STORAGE_KEY, splitBrainStoredEnvelope);
+sagaHarness.records.delete([...sagaHarness.records.keys()].find(key => key.includes(splitBrainEntry.transactionId)));
+await sagaJournal.reload();
+
 const blockedStatus = await sagaStorage.status();
 const blockedEntry = await sagaJournal.begin({
     scopeId: 'chat', affectedScopeIds: ['chat'], baseStoreRevision: blockedStatus.authority.storeRevision,
@@ -3408,5 +3439,362 @@ const [phoneCode, scenePhoneCode, sceneCode] = await Promise.all(['today-trend-p
 assert.match(phoneCode, /persistPhoneUiSnapshot\?\.\(\)/, '展示今日风向后必须保存页面状态');
 assert.match(scenePhoneCode, /PHONE_UI_PAGES\.includes\(page\)/, '页面状态保存必须复用统一页面白名单');
 assert.match(sceneCode, /lastPage === 'today-trend'[\s\S]*showTodayTrendPage/, '页面恢复必须覆盖今日风向');
+
+const phase4EventId = 'service';
+const phase4ProjectionFixtures = {
+    legacy: {
+        id: 'legacy:service:0001', kind: 'legacy-stage', text: '旧阶段', legacyIndex: 0,
+        sourceStageStart: 1, sourceStageEnd: 1, revision: 1,
+    },
+    live: {
+        id: 'live:service:2', kind: 'live-stage', storyDate: '2025-04-14', time: '08:10', timeLabel: null,
+        text: '开始修复仓门', sourceStageStart: 2, sourceStageEnd: 2, sourceFloorStart: 44, sourceFloorEnd: 44, revision: 1,
+    },
+    undated: {
+        id: 'undated:service:1', kind: 'undated-stage', storyDate: null, time: null, timeLabel: '清晨', text: '继续巡查',
+        undatedSequence: 1, sourceStageStart: 3, sourceStageEnd: 3, sourceFloorStart: null, sourceFloorEnd: null, revision: 1,
+    },
+    day: {
+        id: 'day:service:2025-04-15', kind: 'day-summary', status: 'closed', storyDate: '2025-04-15',
+        timeRange: { start: '07:20', end: '22:40', label: null }, summary: '完成仓门修复', keyStages: ['完成加固'],
+        detailRefs: ['detail:service:4'], detailCount: 2, sourceStageStart: 4, sourceStageEnd: 5,
+        sourceFloorStart: 45, sourceFloorEnd: 46, revision: 1,
+    },
+    period: {
+        id: 'period:service:1', kind: 'period-summary', periodSequence: 1, startDate: '2025-04-15', startTime: '07:20',
+        endDate: '2025-04-16', endTime: '22:40', summary: '完成初期修复', childSummaryRefs: ['day:service:2025-04-15'],
+        childSummaryCount: 1, historicalDetailCount: 2, sourceStageStart: 6, sourceStageEnd: 7, revision: 1,
+    },
+    span: {
+        id: 'span:service:8', kind: 'span-stage', startDate: '2025-04-17', startTime: null,
+        endDate: '2025-04-18', endTime: null, summary: '连续两日整备', sourceStageStart: 8, sourceStageEnd: 8,
+        sourceFloorStart: 47, sourceFloorEnd: 48, revision: 1,
+    },
+};
+for (const projection of Object.values(phase4ProjectionFixtures)) {
+    assert.deepEqual(normalizeTodayTrendStageProjection(projection, phase4EventId), projection,
+        `StageProjection ${projection.kind} 必须通过 closed-set schema`);
+}
+assert.throws(() => normalizeTodayTrendStageProjection({ ...phase4ProjectionFixtures.live, kind: 'future-stage' }, phase4EventId),
+    error => error?.code === 'TT_V2_SCHEMA_INVALID', '未知 StageProjection kind 必须 fail-closed');
+assert.throws(() => normalizeTodayTrendStageProjection({ ...phase4ProjectionFixtures.live, debug: true }, phase4EventId),
+    error => {
+        assert.equal(error instanceof Error, true, 'schema helper 必须继续抛出原生 Error');
+        assert.equal(error.name, 'Error', 'schema helper 不得改变错误类型名称');
+        assert.equal(error?.code, 'TT_V2_SCHEMA_INVALID', 'schema helper 必须保留 TT_V2_SCHEMA_INVALID 错误码');
+        assert.equal(error?.message, 'live-stage 字段集合无效', 'schema helper 必须保留原字段级诊断消息');
+        return true;
+    }, 'StageProjection 额外字段必须被 exactKeys 拒绝');
+assert.throws(() => normalizeTodayTrendStageProjection({ ...phase4ProjectionFixtures.period, id: 'period:service:2' }, phase4EventId),
+    error => error?.code === 'TT_V2_SCHEMA_INVALID', '稳定 period ID 与 sequence 不一致时必须拒绝');
+assert.throws(() => normalizeTodayTrendStageProjection({ ...phase4ProjectionFixtures.span, revision: 2 }, phase4EventId),
+    error => error?.code === 'TT_V2_SCHEMA_INVALID', 'StageProjection 未知 revision 必须拒绝');
+assert.equal(resolveTodayTrendV2LatestStage({
+    stages: [phase4ProjectionFixtures.span, phase4ProjectionFixtures.legacy],
+}), phase4ProjectionFixtures.span.summary, 'v2 latestStage resolver 必须按最大 source 区间而不是数组物理末项解析');
+assert.equal(valid.scopes.chat.dynamics.active[0].latestStage, valid.scopes.chat.dynamics.active[0].stages.at(-1),
+    'v1 normalizer 必须继续保持 latestStage 等于字符串 stages 末项');
+
+const phase4Available = structuredClone(migratedValidV2);
+const phase4AvailablePayload = phase4Available.globalEnvelope.payload.scopes.chat.payload;
+const phase4AvailableEvent = phase4AvailablePayload.dynamics.active[0];
+phase4AvailableEvent.stages = [structuredClone(phase4ProjectionFixtures.day)];
+phase4AvailableEvent.latestStage = phase4ProjectionFixtures.day.summary;
+phase4AvailablePayload.stageDetailsByEvent.service = [{
+    id: 'detail:service:4', sourceStageSequence: 4, text: '完成北侧仓门加固', storyDate: '2025-04-15',
+}];
+const availableDetailState = {
+    entityType: 'detail', entityId: 'detail:service:4', eventId: 'service', state: 'available',
+    removalReason: null, removedAtAssistantCount: null, policyRevision: 1,
+};
+const availableDayState = {
+    entityType: 'day-summary', entityId: phase4ProjectionFixtures.day.id, eventId: 'service', state: 'available',
+    removalReason: null, removedAtAssistantCount: null, policyRevision: 1,
+};
+phase4AvailablePayload.removableEntityStateById = {
+    [availableDetailState.entityId]: availableDetailState,
+    [availableDayState.entityId]: availableDayState,
+};
+const normalizedPhase4Available = normalizeTodayTrendV2Candidate(phase4Available);
+assert.equal(normalizedPhase4Available.globalEnvelope.payload.scopes.chat.payload.dynamics.active[0].lifecycle, 'active',
+    'event lifecycle 必须独立保持 active/archived 语义');
+assert.equal(normalizedPhase4Available.globalEnvelope.payload.scopes.chat.payload.removableEntityStateById['detail:service:4'].state, 'available',
+    'removable entity lifecycle 必须独立接受 available 正文闭环');
+const phase4IsolationInput = structuredClone(phase4Available);
+const phase4IsolationResult = normalizeTodayTrendV2Candidate(phase4IsolationInput);
+phase4IsolationInput.globalEnvelope.payload.scopes.chat.payload.stageDetailsByEvent.service[0].text = '归一化后篡改输入 detail';
+phase4IsolationInput.globalEnvelope.payload.scopes.chat.payload.dynamics.active[0].stages[0].summary = '归一化后篡改输入 day summary';
+assert.equal(phase4IsolationResult.globalEnvelope.payload.scopes.chat.payload.stageDetailsByEvent.service[0].text,
+    '完成北侧仓门加固', 'v2 candidate 归一化结果中的 detail 必须与调用方输入隔离');
+assert.equal(phase4IsolationResult.globalEnvelope.payload.scopes.chat.payload.dynamics.active[0].stages[0].summary,
+    '完成仓门修复', 'v2 candidate 归一化结果中的 day-summary 不得被调用方后续修改污染');
+const phase4DetailExtra = structuredClone(phase4Available);
+phase4DetailExtra.globalEnvelope.payload.scopes.chat.payload.stageDetailsByEvent.service[0].debug = true;
+assert.throws(() => normalizeTodayTrendV2Candidate(phase4DetailExtra), error => error?.code === 'TT_V2_SCHEMA_INVALID',
+    'stage detail 额外字段必须被 closed-set 拒绝');
+const phase4DetailMissing = structuredClone(phase4Available);
+delete phase4DetailMissing.globalEnvelope.payload.scopes.chat.payload.stageDetailsByEvent.service[0].text;
+assert.throws(() => normalizeTodayTrendV2Candidate(phase4DetailMissing), error => error?.code === 'TT_V2_SCHEMA_INVALID',
+    'stage detail 缺少正文必须被拒绝');
+const phase4DetailWrongType = structuredClone(phase4Available);
+phase4DetailWrongType.globalEnvelope.payload.scopes.chat.payload.stageDetailsByEvent.service[0].storyDate = 20250415;
+assert.throws(() => normalizeTodayTrendV2Candidate(phase4DetailWrongType), error => error?.code === 'TT_V2_SCHEMA_INVALID',
+    'stage detail storyDate 类型错误必须被拒绝');
+
+const phase4Manifest = structuredClone(migratedValidV2);
+const phase4ManifestPayload = phase4Manifest.globalEnvelope.payload.scopes.chat.payload;
+const manifestId = 'manifest:rumor:1';
+const availableManifestState = {
+    entityType: 'manifest', entityId: manifestId, eventId: 'rumor', state: 'available',
+    removalReason: null, removedAtAssistantCount: null, policyRevision: 1,
+};
+phase4ManifestPayload.archivedRemovableDataByEvent.rumor = {
+    daySummariesById: {}, manifestsById: { [manifestId]: { id: manifestId } },
+};
+phase4ManifestPayload.removableEntityStateById = { [manifestId]: availableManifestState };
+const normalizedPhase4Manifest = normalizeTodayTrendV2Candidate(phase4Manifest);
+assert.deepEqual(normalizedPhase4Manifest.globalEnvelope.payload.scopes.chat.payload
+    .archivedRemovableDataByEvent.rumor.manifestsById[manifestId], { id: manifestId },
+    'manifest 最小 closed-set 与 available lifecycle 必须形成正文闭环');
+const phase4ManifestIsolationInput = structuredClone(phase4Manifest);
+const phase4ManifestIsolationResult = normalizeTodayTrendV2Candidate(phase4ManifestIsolationInput);
+phase4ManifestIsolationInput.globalEnvelope.payload.scopes.chat.payload.archivedRemovableDataByEvent
+    .rumor.manifestsById[manifestId].id = 'manifest:rumor:2';
+assert.equal(phase4ManifestIsolationResult.globalEnvelope.payload.scopes.chat.payload.archivedRemovableDataByEvent
+    .rumor.manifestsById[manifestId].id, manifestId,
+    'v2 candidate 归一化结果中的 manifest 必须与调用方输入隔离');
+const phase4ManifestExtra = structuredClone(phase4Manifest);
+phase4ManifestExtra.globalEnvelope.payload.scopes.chat.payload.archivedRemovableDataByEvent
+    .rumor.manifestsById[manifestId].debug = true;
+assert.throws(() => normalizeTodayTrendV2Candidate(phase4ManifestExtra), error => error?.code === 'TT_V2_SCHEMA_INVALID',
+    'manifest 额外字段必须被 closed-set 拒绝');
+const phase4ManifestMissing = structuredClone(phase4Manifest);
+delete phase4ManifestMissing.globalEnvelope.payload.scopes.chat.payload.archivedRemovableDataByEvent
+    .rumor.manifestsById[manifestId].id;
+assert.throws(() => normalizeTodayTrendV2Candidate(phase4ManifestMissing), error => error?.code === 'TT_V2_SCHEMA_INVALID',
+    'manifest 缺少 id 必须被拒绝');
+const phase4ManifestBadRevision = structuredClone(phase4Manifest);
+const invalidManifestId = 'manifest:rumor:0';
+phase4ManifestBadRevision.globalEnvelope.payload.scopes.chat.payload.archivedRemovableDataByEvent
+    .rumor.manifestsById = { [invalidManifestId]: { id: invalidManifestId } };
+phase4ManifestBadRevision.globalEnvelope.payload.scopes.chat.payload.removableEntityStateById = {
+    [invalidManifestId]: { ...availableManifestState, entityId: invalidManifestId },
+};
+assert.throws(() => normalizeTodayTrendV2Candidate(phase4ManifestBadRevision), error => error?.code === 'TT_V2_SCHEMA_INVALID',
+    'manifest snapshot revision 必须是大于等于 1 的安全整数');
+
+const phase4Removed = structuredClone(migratedValidV2);
+const phase4RemovedPayload = phase4Removed.globalEnvelope.payload.scopes.chat.payload;
+const phase4RemovedEvent = phase4RemovedPayload.dynamics.active[0];
+const removedDayId = 'day:service:2025-04-15';
+const removedDayState = {
+    entityType: 'day-summary', entityId: removedDayId, eventId: 'service', state: 'removed',
+    removalReason: 'archived-retention', removedAtAssistantCount: 52, policyRevision: 1,
+};
+phase4RemovedEvent.stages = [
+    ...phase4RemovedEvent.stages,
+    { ...phase4ProjectionFixtures.period, childSummaryRefs: [removedDayId], sourceStageStart: 3, sourceStageEnd: 4 },
+];
+phase4RemovedEvent.latestStage = phase4ProjectionFixtures.period.summary;
+phase4RemovedPayload.removableEntityStateById = { [removedDayId]: removedDayState };
+phase4RemovedPayload.removableEntityTombstonesById = { [removedDayId]: structuredClone(removedDayState) };
+const normalizedPhase4Removed = normalizeTodayTrendV2Candidate(phase4Removed);
+assert.equal(normalizedPhase4Removed.globalEnvelope.payload.scopes.chat.payload.removableEntityStateById[removedDayId].state, 'removed',
+    'soft ref 指向 removed state/tombstone 时必须是合法闭环');
+
+const phase4Unknown = structuredClone(phase4Removed);
+const phase4UnknownPayload = phase4Unknown.globalEnvelope.payload.scopes.chat.payload;
+phase4UnknownPayload.dynamics.active[0].stages.at(-1).childSummaryRefs = ['day:service:unknown'];
+assert.throws(() => normalizeTodayTrendV2Candidate(phase4Unknown), error => error?.code === 'TT_DANGLING_REF_UNKNOWN',
+    'soft ref 无正文、state 和 tombstone 时必须抛 TT_DANGLING_REF_UNKNOWN');
+const phase4WrongTypeRef = structuredClone(phase4Available);
+const phase4WrongTypeEvent = phase4WrongTypeRef.globalEnvelope.payload.scopes.chat.payload.dynamics.active[0];
+phase4WrongTypeEvent.stages.push({
+    ...phase4ProjectionFixtures.period, childSummaryRefs: ['detail:service:4'], sourceStageStart: 6, sourceStageEnd: 7,
+});
+phase4WrongTypeEvent.latestStage = phase4ProjectionFixtures.period.summary;
+assert.throws(() => normalizeTodayTrendV2Candidate(phase4WrongTypeRef), error => error?.code === 'TT_V2_SCHEMA_INVALID',
+    'period childSummaryRefs 指向 detail 时必须拒绝类型串线');
+const phase4CrossEventRef = structuredClone(phase4Removed);
+const phase4CrossEventPayload = phase4CrossEventRef.globalEnvelope.payload.scopes.chat.payload;
+const crossEventDayId = 'day:rumor:2025-04-15';
+const crossEventRemovedState = {
+    entityType: 'day-summary', entityId: crossEventDayId, eventId: 'rumor', state: 'removed',
+    removalReason: 'archived-retention', removedAtAssistantCount: 53, policyRevision: 1,
+};
+phase4CrossEventPayload.removableEntityStateById = { [crossEventDayId]: crossEventRemovedState };
+phase4CrossEventPayload.removableEntityTombstonesById = { [crossEventDayId]: structuredClone(crossEventRemovedState) };
+phase4CrossEventPayload.dynamics.active[0].stages.at(-1).childSummaryRefs = [crossEventDayId];
+assert.throws(() => normalizeTodayTrendV2Candidate(phase4CrossEventRef), error => error?.code === 'TT_V2_SCHEMA_INVALID',
+    'soft ref 指向其他 event 的合法实体时也必须拒绝跨事件串线');
+const phase4InvalidRecordIdentity = structuredClone(phase4Removed);
+phase4InvalidRecordIdentity.globalEnvelope.payload.scopes.chat.payload.removableEntityStateById[removedDayId].eventId = 'rumor';
+phase4InvalidRecordIdentity.globalEnvelope.payload.scopes.chat.payload.removableEntityTombstonesById[removedDayId].eventId = 'rumor';
+assert.throws(() => normalizeTodayTrendV2Candidate(phase4InvalidRecordIdentity), error => error?.code === 'TT_V2_SCHEMA_INVALID',
+    'removable record 的 ID namespace、entityType 与 eventId 必须一致');
+const phase4OrphanRemoved = structuredClone(phase4Removed);
+const orphanRemovedId = 'day:missing-event:2025-04-16';
+const orphanRemovedState = {
+    entityType: 'day-summary', entityId: orphanRemovedId, eventId: 'missing-event', state: 'removed',
+    removalReason: 'archived-retention', removedAtAssistantCount: 54, policyRevision: 1,
+};
+phase4OrphanRemoved.globalEnvelope.payload.scopes.chat.payload.removableEntityStateById = { [orphanRemovedId]: orphanRemovedState };
+phase4OrphanRemoved.globalEnvelope.payload.scopes.chat.payload.removableEntityTombstonesById = { [orphanRemovedId]: structuredClone(orphanRemovedState) };
+assert.throws(() => normalizeTodayTrendV2Candidate(phase4OrphanRemoved), error => error?.code === 'TT_V2_SCHEMA_INVALID',
+    'removed state 与 tombstone 即使彼此一致，也不得指向当前 scope 不存在的 event');
+const phase4ConflictingBody = structuredClone(phase4Available);
+phase4ConflictingBody.globalEnvelope.payload.scopes.chat.payload.stageDetailsByEvent.service.push({
+    ...phase4ConflictingBody.globalEnvelope.payload.scopes.chat.payload.stageDetailsByEvent.service[0], text: '同 ID 的冲突正文',
+});
+assert.throws(() => normalizeTodayTrendV2Candidate(phase4ConflictingBody), error => error?.code === 'TT_V2_SCHEMA_INVALID',
+    '同一 removable entity ID 的不同正文必须拒绝');
+const phase4ReorderedBody = structuredClone(phase4Available);
+const originalDetail = phase4ReorderedBody.globalEnvelope.payload.scopes.chat.payload.stageDetailsByEvent.service[0];
+phase4ReorderedBody.globalEnvelope.payload.scopes.chat.payload.stageDetailsByEvent.service.push({
+    storyDate: originalDetail.storyDate, text: originalDetail.text,
+    sourceStageSequence: originalDetail.sourceStageSequence, id: originalDetail.id,
+});
+assert.doesNotThrow(() => normalizeTodayTrendV2Candidate(phase4ReorderedBody),
+    '同一 removable entity ID 的语义相同正文不得因属性插入顺序不同被误判为冲突');
+const phase4Overlapping = structuredClone(migratedValidV2);
+const phase4OverlappingEvent = phase4Overlapping.globalEnvelope.payload.scopes.chat.payload.dynamics.active[0];
+phase4OverlappingEvent.stages[1].sourceStageStart = 1;
+assert.throws(() => normalizeTodayTrendV2Candidate(phase4Overlapping), error => error?.code === 'TT_V2_SCHEMA_INVALID',
+    'StageProjection source 区间重叠必须拒绝');
+const phase4LifecycleCollision = structuredClone(migratedValidV2);
+phase4LifecycleCollision.globalEnvelope.payload.scopes.chat.payload.dynamics.active[0].lifecycle = 'available';
+assert.throws(() => normalizeTodayTrendV2Candidate(phase4LifecycleCollision), error => error?.code === 'TT_V2_SCHEMA_INVALID',
+    'removable lifecycle 名称不得污染 event lifecycle');
+
+const phase4RewrittenBody = structuredClone(normalizedPhase4Available);
+phase4RewrittenBody.globalEnvelope.payload.scopes.chat.payload.stageDetailsByEvent.service[0].text = '改写稳定 ID 正文';
+assert.throws(() => validateTodayTrendV2Transition(normalizedPhase4Available, phase4RewrittenBody),
+    error => error?.code === 'TT_V2_SCHEMA_INVALID', '跨 candidate 改写稳定 removable entity ID 内容必须拒绝');
+const phase4RewrittenProjection = structuredClone(migratedValidV2);
+phase4RewrittenProjection.globalEnvelope.payload.scopes.chat.payload.dynamics.active[0].stages[0].text = '同 ID 改写后的投影正文';
+assert.throws(() => validateTodayTrendV2Transition(migratedValidV2, phase4RewrittenProjection),
+    error => error?.code === 'TT_V2_SCHEMA_INVALID', '跨 candidate 改写任意稳定 StageProjection ID 内容必须拒绝');
+const phase4ReorderedProjection = structuredClone(migratedValidV2);
+const originalProjection = phase4ReorderedProjection.globalEnvelope.payload.scopes.chat.payload.dynamics.active[0].stages[0];
+phase4ReorderedProjection.globalEnvelope.payload.scopes.chat.payload.dynamics.active[0].stages[0] = {
+    revision: originalProjection.revision, sourceStageEnd: originalProjection.sourceStageEnd,
+    sourceStageStart: originalProjection.sourceStageStart, legacyIndex: originalProjection.legacyIndex,
+    text: originalProjection.text, kind: originalProjection.kind, id: originalProjection.id,
+};
+assert.doesNotThrow(() => validateTodayTrendV2Transition(migratedValidV2, phase4ReorderedProjection),
+    '跨 candidate 的语义相同 projection 不得因属性插入顺序不同被误判为改写');
+const phase4ChangedFacade = buildReadOnlyShadow(normalizedPhase4Available);
+phase4ChangedFacade.scopes.chat.dynamics.active[0].title = '同 ID 的新业务事件';
+const phase4ChangedEventCandidate = normalizeTodayTrendV2Candidate(phase4ChangedFacade, normalizedPhase4Available);
+const phase4ChangedEventPayload = phase4ChangedEventCandidate.globalEnvelope.payload.scopes.chat.payload;
+assert.equal(phase4ChangedEventPayload.stageDetailsByEvent.service, undefined,
+    '同 ID 事件的 v1 可见语义变化后不得继承旧 detail 正文');
+assert.equal(phase4ChangedEventPayload.removableEntityStateById['detail:service:4'], undefined,
+    '同 ID 事件的 v1 可见语义变化后不得继承旧 removable state');
+assert.equal(phase4ChangedEventPayload.dynamics.active[0].stages[0].kind, 'legacy-stage',
+    '同 ID 事件语义变化后必须按新 facade 重建 projection，不能伪装历史连续');
+const phase4DeletedRemovedScope = structuredClone(normalizedPhase4Removed);
+delete phase4DeletedRemovedScope.globalEnvelope.payload.scopes.chat;
+assert.throws(() => validateTodayTrendV2Transition(normalizedPhase4Removed, phase4DeletedRemovedScope),
+    error => error?.code === 'TT_V2_SCHEMA_INVALID', '包含 removed lifecycle 的 scope 不得通过整 scope 删除绕过不可逆门禁');
+const phase4Revived = structuredClone(normalizedPhase4Removed);
+const phase4RevivedPayload = phase4Revived.globalEnvelope.payload.scopes.chat.payload;
+phase4RevivedPayload.dynamics.active[0].stages = [structuredClone(phase4ProjectionFixtures.day), {
+    ...phase4ProjectionFixtures.period, childSummaryRefs: [removedDayId], sourceStageStart: 3, sourceStageEnd: 4,
+}];
+phase4RevivedPayload.dynamics.active[0].latestStage = phase4ProjectionFixtures.period.summary;
+phase4RevivedPayload.removableEntityStateById[removedDayId] = structuredClone(availableDayState);
+delete phase4RevivedPayload.removableEntityTombstonesById[removedDayId];
+assert.throws(() => validateTodayTrendV2Transition(normalizedPhase4Removed, phase4Revived),
+    error => error?.code === 'TT_V2_SCHEMA_INVALID', 'removed lifecycle 不得恢复为 available 或删除审计状态');
+
+assert.equal(todayTrendStoreDigest(valid), 'fnv1a32:4a013617:4710', 'v1 digest 必须保持阶段 4 前的稳定基线');
+const phase4RevisionVariant = structuredClone(migratedValidV2);
+phase4RevisionVariant.globalEnvelope.revision += 100;
+for (const envelope of Object.values(phase4RevisionVariant.globalEnvelope.payload.scopes)) envelope.revision += 200;
+assert.equal(todayTrendStoreDigest(phase4RevisionVariant), todayTrendStoreDigest(migratedValidV2),
+    'v2 digest 必须忽略 global/scope envelope revision');
+const phase4BusinessVariant = structuredClone(migratedValidV2);
+phase4BusinessVariant.globalEnvelope.payload.scopes.chat.payload.historyRetentionState.detailPoolRevision += 1;
+assert.notEqual(todayTrendStoreDigest(phase4BusinessVariant), todayTrendStoreDigest(migratedValidV2),
+    'v2 digest 必须感知 v2-only 业务字段变化');
+
+const phase4Harness = createAuthorityHarness();
+const phase4CasWrites = [];
+const phase4Authority = createTodayTrendV2Authority({
+    readEntry: phase4Harness.readEntry,
+    compareAndSwap: async request => {
+        phase4CasWrites.push(request.writes.map(entry => entry.key));
+        return phase4Harness.compareAndSwap(request);
+    },
+    tabId: 'phase-4-owner', BroadcastChannelImpl: undefined,
+});
+await phase4Authority.acquire({ readV2: true, writeV2: true, initialStore: valid });
+let phase4Now = 8000;
+const phase4Journal = createTodayTrendJournal({
+    listKeys: async () => [...phase4Harness.records.keys()], readEntry: phase4Harness.readEntry,
+    writeEntry: async (key, value) => { phase4Harness.records.set(key, structuredClone(value)); return true; },
+    deleteEntry: async key => phase4Harness.records.delete(key), now: () => ++phase4Now,
+    transactionId: () => `phase-4-${phase4Now}`,
+});
+const phase4Storage = createTodayTrendStorage({ v2Authority: phase4Authority, journal: phase4Journal, storage: memoryStorage() });
+const phase4Runtime = {};
+const phase4Refreshes = [];
+const phase4Committer = createTodayTrendCommitter({
+    runtime: phase4Runtime, load: phase4Storage.load, loadCanonical: phase4Storage.loadCanonical,
+    save: phase4Storage.save, storageStatus: phase4Storage.status, journal: phase4Journal,
+    refreshInjection: async store => { phase4Refreshes.push(structuredClone(store)); return { failedWrites: 0, failedKeys: [] }; },
+});
+const phase4BeforeUnknownStatus = await phase4Authority.status();
+const phase4JournalKeysBeforeUnknown = [...phase4Harness.records.keys()].filter(key => key.startsWith(TODAY_TREND_V2_JOURNAL_PREFIX));
+await assert.rejects(() => phase4Committer.commitScope('chat', payload => {
+    const candidate = structuredClone(payload);
+    const event = candidate.dynamics.active[0];
+    event.stages.push({ ...phase4ProjectionFixtures.period, childSummaryRefs: ['day:service:unknown'], sourceStageStart: 3, sourceStageEnd: 4 });
+    event.latestStage = phase4ProjectionFixtures.period.summary;
+    return candidate;
+}, null, { canonical: true }), error => error?.code === 'TT_DANGLING_REF_UNKNOWN',
+    'unknown ref 必须经真实 canonical commitScope 在 journal.begin 与 CAS 前阻断');
+const phase4AfterUnknownStatus = await phase4Authority.status();
+assert.equal(phase4AfterUnknownStatus.authority.storeRevision, phase4BeforeUnknownStatus.authority.storeRevision,
+    'unknown ref 阻断不得递增 committed store revision');
+assert.deepEqual(phase4AfterUnknownStatus.authority.scopeRevisionByStorageId,
+    phase4BeforeUnknownStatus.authority.scopeRevisionByStorageId, 'unknown ref 阻断不得递增 scope revision');
+assert.deepEqual([...phase4Harness.records.keys()].filter(key => key.startsWith(TODAY_TREND_V2_JOURNAL_PREFIX)),
+    phase4JournalKeysBeforeUnknown, 'unknown ref 阻断不得留下 prepared journal');
+assert.equal(phase4Runtime.store, undefined, 'unknown ref 阻断不得污染 runtime facade');
+
+const phase4CasCountBeforeCommit = phase4CasWrites.length;
+const phase4Committed = await phase4Committer.commitScope('chat', payload => {
+    const candidate = structuredClone(payload);
+    const event = candidate.dynamics.active[0];
+    event.stages.push({ ...phase4ProjectionFixtures.period, childSummaryRefs: [removedDayId], sourceStageStart: 3, sourceStageEnd: 4 });
+    event.latestStage = phase4ProjectionFixtures.period.summary;
+    candidate.removableEntityStateById[removedDayId] = structuredClone(removedDayState);
+    candidate.removableEntityTombstonesById[removedDayId] = structuredClone(removedDayState);
+    return candidate;
+}, null, { canonical: true });
+const phase4CommittedStatus = await phase4Authority.status();
+assert.equal(phase4CommittedStatus.authority.storeRevision, phase4BeforeUnknownStatus.authority.storeRevision + 1,
+    '合法 canonical ref/state/tombstone candidate 必须只递增一次 store revision');
+assert.equal(phase4CommittedStatus.authority.scopeRevisionByStorageId.chat,
+    (phase4BeforeUnknownStatus.authority.scopeRevisionByStorageId.chat || 0) + 1, '合法 canonical scope 提交必须只递增一次对应 scope revision');
+assert.ok(phase4CasWrites.slice(phase4CasCountBeforeCommit).some(keys =>
+    keys.length === 3 && keys.includes(TODAY_TREND_V2_STORAGE_KEY) && keys.includes(TODAY_TREND_V2_AUTHORITY_KEY)
+        && keys.some(key => key.startsWith(TODAY_TREND_V2_JOURNAL_PREFIX))),
+    '合法 canonical candidate、authority 与 store-written journal 必须进入同一 CAS writes');
+assert.equal([...phase4Harness.records.keys()].some(key => key.startsWith(TODAY_TREND_V2_JOURNAL_PREFIX)), false,
+    '合法 canonical 提交 accepted 后必须清理终态 journal');
+assert.equal(phase4Committed.version, 1, 'canonical commitScope 对调用方必须返回 v1 facade');
+assert.equal(phase4Runtime.store.version, 1, 'runtime.store 必须保持 v1 facade，不能泄漏 canonical envelope');
+assert.equal(phase4Refreshes.length, 1, '合法 canonical 提交只能刷新一次 facade 注入');
+const phase4Persisted = (await phase4Authority.load()).v2Store.globalEnvelope.payload.scopes.chat.payload;
+assert.deepEqual(phase4Persisted.removableEntityStateById[removedDayId], removedDayState,
+    '合法 removed state 必须随 canonical candidate 持久化');
+assert.deepEqual(phase4Persisted.removableEntityTombstonesById[removedDayId], removedDayState,
+    '合法 tombstone 必须与 state 在同一 canonical candidate 持久化');
+assert.equal(await phase4Authority.release({ readV2: true, serveV2: false }), true,
+    '阶段 4 authority harness 必须显式释放 owner');
+phase4Authority.close();
 
 console.log('Today trend contracts verified.');

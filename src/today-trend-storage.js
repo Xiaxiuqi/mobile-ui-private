@@ -3,6 +3,7 @@ import { createEmptyTodayTrendStore, migrateTodayTrendStore, normalizeTodayTrend
 import { pmIDBGet, pmIDBSet } from './pm-idb.js';
 import { todayTrendJournal } from './today-trend-journal.js';
 import { createTodayTrendV2Authority } from './today-trend-v2-authority.js';
+import { buildReadOnlyShadow, normalizeTodayTrendV2Candidate } from './today-trend-v2-model.js';
 
 export const TODAY_TREND_STORAGE_KEYS = Object.freeze({ primary: TODAY_TREND_STORAGE_KEY, fallback: TODAY_TREND_FALLBACK_KEY });
 
@@ -60,6 +61,12 @@ export function createTodayTrendStorage({
         }
         return source.store;
     };
+    const loadCanonical = async () => {
+        const v2 = await v2Authority.load();
+        if (v2.active) return v2.v2Store;
+        const source = await readV1Source();
+        return normalizeTodayTrendV2Candidate(source.store);
+    };
     const migrateToV2 = async () => {
         if (typeof v2Authority.migrate !== 'function') throw new TypeError('v2 authority 不支持迁移');
         const source = await readV1Source();
@@ -68,7 +75,9 @@ export function createTodayTrendStorage({
 
     const save = async (value, options = {}) => {
         if (journal) { await journal.ready(); journal.assertWritable(options.transactionId ?? null); }
-        const normalized = normalizeTodayTrendStore(value);
+        const v2Candidate = value?.version === 2 && Object.hasOwn(value, 'globalEnvelope');
+        const normalizedV2 = v2Candidate ? normalizeTodayTrendV2Candidate(value) : null;
+        const normalized = v2Candidate ? buildReadOnlyShadow(normalizedV2) : normalizeTodayTrendStore(value);
         const v2 = await v2Authority.status();
         if (!v2.available) {
             const error = new Error('无法确认 v2 authority 状态，拒绝降级写入 v1');
@@ -93,7 +102,7 @@ export function createTodayTrendStorage({
             let result;
             let operationError = null;
             try {
-                result = await v2Authority.save(normalized, options);
+                result = await v2Authority.save(normalizedV2 || normalized, options);
             } catch (error) {
                 operationError = error;
             }
@@ -120,6 +129,11 @@ export function createTodayTrendStorage({
                 throw error;
             }
             return options.returnReceipt ? result : result.store;
+        }
+        if (v2Candidate) {
+            const error = new Error('v2 canonical candidate 禁止降级写入 v1 或 localStorage');
+            error.code = 'TT_V2_CANONICAL_REQUIRES_AUTHORITY';
+            throw error;
         }
         if (v2.authority && (v2.authority.readV2 || v2.authority.storeRevision > 0)) {
             const error = new Error('v2 authority 已冻结 v1 写入');
@@ -159,11 +173,12 @@ export function createTodayTrendStorage({
         if (typeof v2Authority.restoreBackup !== 'function') throw new TypeError('v2 authority 不支持备份恢复');
         return v2Authority.restoreBackup(value, options);
     };
-    return { load, save, status, migrateToV2, readMigrationBackup, captureV2Backup, restoreV2Backup, v2Authority, journal };
+    return { load, loadCanonical, save, status, migrateToV2, readMigrationBackup, captureV2Backup, restoreV2Backup, v2Authority, journal };
 }
 
 const defaultStorage = createTodayTrendStorage({ journal: todayTrendJournal });
 export const loadTodayTrendStore = () => defaultStorage.load();
+export const loadTodayTrendV2Store = () => defaultStorage.loadCanonical();
 export const saveTodayTrendStore = (value, options) => defaultStorage.save(value, options);
 export const getTodayTrendStorageStatus = () => defaultStorage.status();
 export const migrateTodayTrendStorageToV2 = () => defaultStorage.migrateToV2();

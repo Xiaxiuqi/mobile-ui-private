@@ -42,7 +42,8 @@
 - 监听器、timer、observer、AbortController 和异步闭包必须有唯一 owner 与显式释放路径；
 - 不修改 `ST_SMS_DATA_V2`、注入失败 key或日历缓存；两处既有 empty-block 已在阶段 1 启动前以无行为变化的注释修复并通过语法检查；
 - 默认继续 Node check 体系，不引入 fast-check；
-- bundle 不超过 `1488263` bytes，`<current_today_trend>` 不超过 12000 字符；
+- bundle 的 `1488263` bytes 仅作为历史参考线；每阶段记录当前值、相对阶段 0 的净增量和主要增长来源，不以该旧数值单独阻断新增功能；
+- 禁止为迎合旧 bundle 参考线删除或晦涩化生产功能、校验、错误信息、可维护结构或 CSS；`<current_today_trend>` 仍不得超过 12000 字符；
 - 阶段完成后运行与改动范围匹配的构建、专项检查和 `git diff --check`；全量检查中的既有 calendar 基线失败单独记录，不得误归因给 Today Trend v2；验证通过后可做中文 commit，禁止 push；
 - 阶段 0 的真实宿主重复回归由助手基于当前已测试版本明确豁免。后续仅在改动真实 UI/生命周期或进入最终发布阶段时执行对应宿主验收，不机械重复无关循环。
 

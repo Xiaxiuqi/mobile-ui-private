@@ -9494,8 +9494,17 @@ ${entry2.content}` : entry2.content;
     if (value && typeof value === "object") return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonical(value[key])}`).join(",")}}`;
     return JSON.stringify(value);
   }
+  function digestValue(value) {
+    if (value?.version !== 2 || !value.globalEnvelope?.payload?.scopes) return value;
+    const normalized = clone3(value);
+    normalized.globalEnvelope.revision = 0;
+    for (const envelope of Object.values(normalized.globalEnvelope.payload.scopes)) {
+      if (envelope && typeof envelope === "object") envelope.revision = 0;
+    }
+    return normalized;
+  }
   function todayTrendStoreDigest(value) {
-    const text8 = canonical(value);
+    const text8 = canonical(digestValue(value));
     let hash = 2166136261;
     for (let index = 0; index < text8.length; index += 1) {
       hash ^= text8.charCodeAt(index);
@@ -9700,25 +9709,60 @@ ${entry2.content}` : entry2.content;
   var TODAY_TREND_V2_STORE_VERSION = 2;
   var GLOBAL_ENVELOPE_VERSION = 1;
   var SCOPE_ENVELOPE_VERSION = 1;
+  var PROJECTION_KINDS = /* @__PURE__ */ new Set([
+    "live-stage",
+    "undated-stage",
+    "legacy-stage",
+    "day-summary",
+    "period-summary",
+    "span-stage"
+  ]);
+  var REMOVABLE_PREFIXES = { detail: "detail", "day-summary": "day", manifest: "manifest" };
+  var REMOVAL_REASONS = /* @__PURE__ */ new Set(["detail-pool-capacity", "archived-retention"]);
   var LEGACY_STAGE_KIND = "legacy-stage";
   var clone4 = (value) => structuredClone(value);
   var plainRecord9 = (value) => value && typeof value === "object" && !Array.isArray(value);
+  var same = (left, right) => {
+    if (left === right) return true;
+    if (Array.isArray(left) || Array.isArray(right)) {
+      return Array.isArray(left) && Array.isArray(right) && left.length === right.length && left.every((item, index) => same(item, right[index]));
+    }
+    if (!plainRecord9(left) || !plainRecord9(right)) return false;
+    const leftKeys = Object.keys(left);
+    const rightKeys = Object.keys(right);
+    if (leftKeys.length !== rightKeys.length) return false;
+    return leftKeys.every((key) => Object.hasOwn(right, key) && same(left[key], right[key]));
+  };
   function failure2(code, message) {
     const error = new Error(message);
     error.code = code;
     throw error;
   }
+  var invalid = (message) => failure2("TT_V2_SCHEMA_INVALID", message);
   function safeInteger2(value, field, minimum = 0) {
-    if (!Number.isSafeInteger(value) || value < minimum) failure2("TT_V2_SCHEMA_INVALID", `${field} \u5FC5\u987B\u662F\u5927\u4E8E\u7B49\u4E8E ${minimum} \u7684\u5B89\u5168\u6574\u6570`);
+    if (!Number.isSafeInteger(value) || value < minimum) invalid(`${field} \u5FC5\u987B\u662F\u5927\u4E8E\u7B49\u4E8E ${minimum} \u7684\u5B89\u5168\u6574\u6570`);
     return value;
   }
-  function exactKeys3(value, keys, field) {
-    if (!plainRecord9(value)) failure2("TT_V2_SCHEMA_INVALID", `${field} \u5FC5\u987B\u662F\u5BF9\u8C61`);
-    const actual = Object.keys(value).sort();
-    const expected = [...keys].sort();
-    if (actual.length !== expected.length || actual.some((key, index) => key !== expected[index])) {
-      failure2("TT_V2_SCHEMA_INVALID", `${field} \u5B57\u6BB5\u96C6\u5408\u65E0\u6548`);
+  function exact(value, keys, field) {
+    if (!plainRecord9(value)) invalid(`${field} \u5FC5\u987B\u662F\u5BF9\u8C61`);
+    if (Object.keys(value).length !== keys.length || keys.some((key) => !Object.hasOwn(value, key))) {
+      invalid(`${field} \u5B57\u6BB5\u96C6\u5408\u65E0\u6548`);
     }
+  }
+  function nonEmptyString(value, field) {
+    if (typeof value !== "string" || !value) invalid(`${field} \u5FC5\u987B\u662F\u975E\u7A7A\u5B57\u7B26\u4E32`);
+  }
+  function nullableString(value, field) {
+    if (value !== null && typeof value !== "string") invalid(`${field} \u5FC5\u987B\u662F\u5B57\u7B26\u4E32\u6216 null`);
+  }
+  function nullableInteger(value, field) {
+    if (value !== null) safeInteger2(value, field);
+  }
+  function stringArray(value, field) {
+    if (!Array.isArray(value) || value.some((item) => typeof item !== "string" || !item)) {
+      invalid(`${field} \u5FC5\u987B\u662F\u975E\u7A7A\u5B57\u7B26\u4E32\u6570\u7EC4`);
+    }
+    if (new Set(value).size !== value.length) invalid(`${field} \u4E0D\u5F97\u91CD\u590D`);
   }
   function legacyStageId(eventId, index) {
     return `legacy:${eventId}:${String(index + 1).padStart(4, "0")}`;
@@ -9734,10 +9778,108 @@ ${entry2.content}` : entry2.content;
       revision: 1
     };
   }
-  function normalizeLegacyStage(value, eventId, index) {
-    exactKeys3(value, ["id", "kind", "text", "legacyIndex", "sourceStageStart", "sourceStageEnd", "revision"], "legacy-stage");
-    if (value.id !== legacyStageId(eventId, index) || value.kind !== LEGACY_STAGE_KIND || value.legacyIndex !== index || value.sourceStageStart !== index + 1 || value.sourceStageEnd !== index + 1 || value.revision !== 1 || typeof value.text !== "string" || !value.text) failure2("TT_V2_SCHEMA_INVALID", "legacy-stage \u5185\u5BB9\u65E0\u6548");
+  function normalizeLegacyStage(value, eventId) {
+    exact(value, ["id", "kind", "text", "legacyIndex", "sourceStageStart", "sourceStageEnd", "revision"], "legacy-stage");
+    safeInteger2(value.legacyIndex, "legacy-stage.legacyIndex");
+    if (value.id !== legacyStageId(eventId, value.legacyIndex) || value.kind !== LEGACY_STAGE_KIND || value.sourceStageStart !== value.legacyIndex + 1 || value.sourceStageEnd !== value.legacyIndex + 1 || value.revision !== 1 || typeof value.text !== "string" || !value.text) invalid("legacy-stage \u5185\u5BB9\u65E0\u6548");
     return { ...value };
+  }
+  function normalizeFloorRange(value, field) {
+    nullableInteger(value.sourceFloorStart, `${field}.sourceFloorStart`);
+    nullableInteger(value.sourceFloorEnd, `${field}.sourceFloorEnd`);
+    if (value.sourceFloorStart === null !== (value.sourceFloorEnd === null) || value.sourceFloorStart !== null && value.sourceFloorStart > value.sourceFloorEnd) {
+      invalid(`${field} \u697C\u5C42\u533A\u95F4\u65E0\u6548`);
+    }
+  }
+  function normalizeSourceRange(value, field) {
+    safeInteger2(value.sourceStageStart, `${field}.sourceStageStart`, 1);
+    safeInteger2(value.sourceStageEnd, `${field}.sourceStageEnd`, 1);
+    if (value.sourceStageStart > value.sourceStageEnd) invalid(`${field} source \u533A\u95F4\u65E0\u6548`);
+    if (value.revision !== 1) invalid(`${field}.revision \u65E0\u6548`);
+  }
+  function normalizeLiveStage(value, eventId) {
+    exact(value, ["id", "kind", "storyDate", "time", "timeLabel", "text", "sourceStageStart", "sourceStageEnd", "sourceFloorStart", "sourceFloorEnd", "revision"], "live-stage");
+    normalizeSourceRange(value, "live-stage");
+    normalizeFloorRange(value, "live-stage");
+    if (!String(value.id).startsWith(`live:${eventId}:`) || value.kind !== "live-stage") invalid("live-stage ID \u6216 kind \u65E0\u6548");
+    nonEmptyString(value.storyDate, "live-stage.storyDate");
+    nullableString(value.time, "live-stage.time");
+    nullableString(value.timeLabel, "live-stage.timeLabel");
+    nonEmptyString(value.text, "live-stage.text");
+    return clone4(value);
+  }
+  function normalizeUndatedStage(value, eventId) {
+    exact(value, ["id", "kind", "storyDate", "time", "timeLabel", "text", "undatedSequence", "sourceStageStart", "sourceStageEnd", "sourceFloorStart", "sourceFloorEnd", "revision"], "undated-stage");
+    normalizeSourceRange(value, "undated-stage");
+    normalizeFloorRange(value, "undated-stage");
+    safeInteger2(value.undatedSequence, "undated-stage.undatedSequence", 1);
+    if (value.id !== `undated:${eventId}:${value.undatedSequence}` || value.kind !== "undated-stage" || value.storyDate !== null) {
+      invalid("undated-stage ID\u3001kind \u6216 storyDate \u65E0\u6548");
+    }
+    nullableString(value.time, "undated-stage.time");
+    nullableString(value.timeLabel, "undated-stage.timeLabel");
+    nonEmptyString(value.text, "undated-stage.text");
+    return clone4(value);
+  }
+  function normalizeTimeRange(value, field) {
+    exact(value, ["start", "end", "label"], field);
+    nullableString(value.start, `${field}.start`);
+    nullableString(value.end, `${field}.end`);
+    nullableString(value.label, `${field}.label`);
+  }
+  function normalizeDaySummary(value, eventId) {
+    exact(value, ["id", "kind", "status", "storyDate", "timeRange", "summary", "keyStages", "detailRefs", "detailCount", "sourceStageStart", "sourceStageEnd", "sourceFloorStart", "sourceFloorEnd", "revision"], "day-summary");
+    normalizeSourceRange(value, "day-summary");
+    normalizeFloorRange(value, "day-summary");
+    if (value.id !== `day:${eventId}:${value.storyDate}` || value.kind !== "day-summary" || value.status !== "closed") invalid("day-summary ID\u3001kind \u6216 status \u65E0\u6548");
+    nonEmptyString(value.storyDate, "day-summary.storyDate");
+    normalizeTimeRange(value.timeRange, "day-summary.timeRange");
+    nonEmptyString(value.summary, "day-summary.summary");
+    stringArray(value.keyStages, "day-summary.keyStages");
+    stringArray(value.detailRefs, "day-summary.detailRefs");
+    safeInteger2(value.detailCount, "day-summary.detailCount");
+    return clone4(value);
+  }
+  function normalizePeriodSummary(value, eventId) {
+    exact(value, ["id", "kind", "periodSequence", "startDate", "startTime", "endDate", "endTime", "summary", "childSummaryRefs", "childSummaryCount", "historicalDetailCount", "sourceStageStart", "sourceStageEnd", "revision"], "period-summary");
+    normalizeSourceRange(value, "period-summary");
+    safeInteger2(value.periodSequence, "period-summary.periodSequence", 1);
+    if (value.id !== `period:${eventId}:${value.periodSequence}` || value.kind !== "period-summary") invalid("period-summary ID \u6216 kind \u65E0\u6548");
+    nonEmptyString(value.startDate, "period-summary.startDate");
+    nullableString(value.startTime, "period-summary.startTime");
+    nonEmptyString(value.endDate, "period-summary.endDate");
+    nullableString(value.endTime, "period-summary.endTime");
+    nonEmptyString(value.summary, "period-summary.summary");
+    stringArray(value.childSummaryRefs, "period-summary.childSummaryRefs");
+    safeInteger2(value.childSummaryCount, "period-summary.childSummaryCount");
+    safeInteger2(value.historicalDetailCount, "period-summary.historicalDetailCount");
+    return clone4(value);
+  }
+  function normalizeSpanStage(value, eventId) {
+    exact(value, ["id", "kind", "startDate", "startTime", "endDate", "endTime", "summary", "sourceStageStart", "sourceStageEnd", "sourceFloorStart", "sourceFloorEnd", "revision"], "span-stage");
+    normalizeSourceRange(value, "span-stage");
+    normalizeFloorRange(value, "span-stage");
+    if (!String(value.id).startsWith(`span:${eventId}:`) || value.kind !== "span-stage") invalid("span-stage ID \u6216 kind \u65E0\u6548");
+    nonEmptyString(value.startDate, "span-stage.startDate");
+    nullableString(value.startTime, "span-stage.startTime");
+    nonEmptyString(value.endDate, "span-stage.endDate");
+    nullableString(value.endTime, "span-stage.endTime");
+    nonEmptyString(value.summary, "span-stage.summary");
+    return clone4(value);
+  }
+  function normalizeTodayTrendStageProjection(value, eventId) {
+    if (!plainRecord9(value) || !PROJECTION_KINDS.has(value.kind)) invalid("StageProjection kind \u65E0\u6548");
+    if (value.kind === "legacy-stage") return normalizeLegacyStage(value, eventId);
+    if (value.kind === "live-stage") return normalizeLiveStage(value, eventId);
+    if (value.kind === "undated-stage") return normalizeUndatedStage(value, eventId);
+    if (value.kind === "day-summary") return normalizeDaySummary(value, eventId);
+    if (value.kind === "period-summary") return normalizePeriodSummary(value, eventId);
+    return normalizeSpanStage(value, eventId);
+  }
+  function resolveTodayTrendV2LatestStage(event) {
+    if (!plainRecord9(event) || !Array.isArray(event.stages) || event.stages.length === 0) invalid("v2 event stages \u4E0D\u80FD\u4E3A\u7A7A");
+    const latest = event.stages.reduce((selected, stage) => !selected || stage.sourceStageEnd > selected.sourceStageEnd || stage.sourceStageEnd === selected.sourceStageEnd && stage.sourceStageStart > selected.sourceStageStart || stage.sourceStageEnd === selected.sourceStageEnd && stage.sourceStageStart === selected.sourceStageStart && stage.id > selected.id ? stage : selected, null);
+    return projectionText(latest);
   }
   function migrateEvent(event, archivedSequence = null) {
     const stages = event.stages.map((text8, index) => migrateLegacyStage(event.id, text8, index));
@@ -9748,6 +9890,9 @@ ${entry2.content}` : entry2.content;
       ...event.lifecycle === "archived" ? { archivedAtAssistantCount: null, archivedSequence } : {}
     };
   }
+  function projectionText(stage) {
+    return ["day-summary", "period-summary", "span-stage"].includes(stage.kind) ? stage.summary : stage.text;
+  }
   function projectEventToV1(event) {
     return {
       id: event.id,
@@ -9756,12 +9901,12 @@ ${entry2.content}` : entry2.content;
       title: event.title,
       stageLabel: event.stageLabel,
       origin: event.origin,
-      participants: clone4(event.participants),
-      stages: event.stages.map((stage) => stage.text),
+      participants: event.participants,
+      stages: event.stages.map(projectionText),
       latestStage: event.latestStage,
       outcome: event.outcome,
       finalResult: event.finalResult,
-      relatedEventIds: clone4(event.relatedEventIds),
+      relatedEventIds: event.relatedEventIds,
       createdAt: event.createdAt,
       updatedAt: event.updatedAt
     };
@@ -9779,7 +9924,7 @@ ${entry2.content}` : entry2.content;
     };
   }
   function extractArchivedFixedCore(event) {
-    if (event?.lifecycle !== "archived") failure2("TT_V2_SCHEMA_INVALID", "fixed core \u53EA\u80FD\u4ECE archived event \u63D0\u53D6");
+    if (event?.lifecycle !== "archived") invalid("fixed core \u53EA\u80FD\u4ECE archived event \u63D0\u53D6");
     return clone4({
       id: event.id,
       type: event.type,
@@ -9799,6 +9944,20 @@ ${entry2.content}` : entry2.content;
       updatedAt: event.updatedAt
     });
   }
+  function scopeFacadeFields(scope) {
+    return {
+      storageId: scope.storageId,
+      characterId: scope.characterId,
+      characterName: scope.characterName,
+      presetId: scope.presetId,
+      operation: scope.operation,
+      injection: scope.injection,
+      world: scope.world,
+      reputation: scope.reputation,
+      factions: scope.factions,
+      dynamicsSettings: scope.dynamicsSettings
+    };
+  }
   function createScopePayload(scope) {
     const dynamics = migrateDynamics(scope.dynamics);
     const generationSnapshots = scope.generationSnapshots.map((snapshot) => ({
@@ -9808,16 +9967,7 @@ ${entry2.content}` : entry2.content;
     const fixedCoreBaselineByEvent = {};
     for (const event of dynamics.archived) fixedCoreBaselineByEvent[event.id] = extractArchivedFixedCore(event);
     return {
-      storageId: scope.storageId,
-      characterId: scope.characterId,
-      characterName: scope.characterName,
-      presetId: scope.presetId,
-      operation: clone4(scope.operation),
-      injection: clone4(scope.injection),
-      world: clone4(scope.world),
-      reputation: clone4(scope.reputation),
-      factions: clone4(scope.factions),
-      dynamicsSettings: clone4(scope.dynamicsSettings),
+      ...scopeFacadeFields(scope),
       dynamics,
       generationSnapshots,
       historyRetentionSettings: { archivedDetailLatestEventCount: 2, archivedDetailRetentionFloors: 20, revision: 1 },
@@ -9832,55 +9982,261 @@ ${entry2.content}` : entry2.content;
   }
   function projectScopePayloadToV1(scope) {
     return {
-      storageId: scope.storageId,
-      characterId: scope.characterId,
-      characterName: scope.characterName,
-      presetId: scope.presetId,
-      operation: clone4(scope.operation),
-      injection: clone4(scope.injection),
-      world: clone4(scope.world),
-      reputation: clone4(scope.reputation),
-      factions: clone4(scope.factions),
-      dynamicsSettings: clone4(scope.dynamicsSettings),
+      ...scopeFacadeFields(scope),
       dynamics: projectDynamicsToV1(scope.dynamics),
       generationSnapshots: scope.generationSnapshots.map((snapshot) => ({ ...clone4(snapshot), dynamics: projectDynamicsToV1(snapshot.dynamics) }))
     };
   }
-  function normalizeEventProjection(event, lifecycle, archivedSequence) {
+  function normalizeEventProjection(event, lifecycle) {
     if (!plainRecord9(event) || event.lifecycle !== lifecycle || !Array.isArray(event.stages) || event.stages.length > 40) {
-      failure2("TT_V2_SCHEMA_INVALID", "v2 event projection \u65E0\u6548");
+      invalid("v2 event projection \u65E0\u6548");
     }
+    const keys = ["id", "type", "lifecycle", "title", "stageLabel", "origin", "participants", "stages", "latestStage", "outcome", "finalResult", "relatedEventIds", "createdAt", "updatedAt", "capacityCompatibilityPending"];
+    if (lifecycle === "archived") keys.push("archivedAtAssistantCount", "archivedSequence");
+    exact(event, keys, "v2 event");
     const normalized = clone4(event);
-    normalized.stages = event.stages.map((stage, index) => normalizeLegacyStage(stage, event.id, index));
-    if (event.capacityCompatibilityPending !== (event.stages.length === 40)) failure2("TT_V2_SCHEMA_INVALID", "capacityCompatibilityPending \u4E0E stages \u6570\u91CF\u4E0D\u4E00\u81F4");
+    normalized.stages = event.stages.map((stage) => normalizeTodayTrendStageProjection(stage, event.id));
+    const stageIds = /* @__PURE__ */ new Set();
+    let previous = null;
+    for (const stage of normalized.stages) {
+      if (stageIds.has(stage.id)) invalid("StageProjection ID \u91CD\u590D");
+      stageIds.add(stage.id);
+      if (previous) {
+        const order = stage.sourceStageStart - previous.sourceStageStart || stage.sourceStageEnd - previous.sourceStageEnd || stage.id.localeCompare(previous.id);
+        if (order <= 0) invalid("StageProjection \u6392\u5E8F\u4E0D\u7A33\u5B9A");
+        if (stage.sourceStageStart <= previous.sourceStageEnd) invalid("StageProjection source \u533A\u95F4\u91CD\u53E0");
+      }
+      previous = stage;
+    }
+    if (normalized.latestStage !== resolveTodayTrendV2LatestStage(normalized)) invalid("v2 latestStage \u4E0E\u6700\u65B0 source \u533A\u95F4\u4E0D\u4E00\u81F4");
+    if (event.capacityCompatibilityPending !== (event.stages.length === 40)) invalid("capacityCompatibilityPending \u4E0E stages \u6570\u91CF\u4E0D\u4E00\u81F4");
     if (lifecycle === "active") {
-      if (Object.hasOwn(event, "archivedSequence") || Object.hasOwn(event, "archivedAtAssistantCount")) failure2("TT_V2_SCHEMA_INVALID", "active event \u4E0D\u5F97\u643A\u5E26\u5F52\u6863\u5B57\u6BB5");
-    } else if (event.archivedSequence !== archivedSequence || event.archivedAtAssistantCount !== null) {
-      failure2("TT_V2_SCHEMA_INVALID", "\u5F52\u6863 sequence \u6216\u697C\u5C42\u65E0\u6548");
+      if (Object.hasOwn(event, "archivedSequence") || Object.hasOwn(event, "archivedAtAssistantCount")) invalid("active event \u4E0D\u5F97\u643A\u5E26\u5F52\u6863\u5B57\u6BB5");
+    } else {
+      safeInteger2(event.archivedSequence, "archivedSequence", 1);
+      nullableInteger(event.archivedAtAssistantCount, "archivedAtAssistantCount");
     }
     return normalized;
   }
+  function normalizeRetentionSettings(value) {
+    exact(value, ["archivedDetailLatestEventCount", "archivedDetailRetentionFloors", "revision"], "historyRetentionSettings");
+    safeInteger2(value.archivedDetailLatestEventCount, "archivedDetailLatestEventCount");
+    safeInteger2(value.archivedDetailRetentionFloors, "archivedDetailRetentionFloors");
+    if (value.revision !== 1) invalid("historyRetentionSettings.revision \u65E0\u6548");
+    return clone4(value);
+  }
+  function normalizeRetentionState(value) {
+    exact(value, ["highWaterAssistantCount", "nextArchivedSequence", "detailPoolRevision", "retentionPolicyRevision"], "historyRetentionState");
+    nullableInteger(value.highWaterAssistantCount, "highWaterAssistantCount");
+    safeInteger2(value.nextArchivedSequence, "nextArchivedSequence", 1);
+    safeInteger2(value.detailPoolRevision, "detailPoolRevision");
+    safeInteger2(value.retentionPolicyRevision, "retentionPolicyRevision", 1);
+    return clone4(value);
+  }
+  function normalizeRemovableRecord(value, field) {
+    exact(value, ["entityType", "entityId", "eventId", "state", "removalReason", "removedAtAssistantCount", "policyRevision"], field);
+    const prefix = REMOVABLE_PREFIXES[value.entityType];
+    if (!prefix) invalid(`${field}.entityType \u65E0\u6548`);
+    nonEmptyString(value.entityId, `${field}.entityId`);
+    nonEmptyString(value.eventId, `${field}.eventId`);
+    safeInteger2(value.policyRevision, `${field}.policyRevision`, 1);
+    nullableInteger(value.removedAtAssistantCount, `${field}.removedAtAssistantCount`);
+    if (value.state === "available") {
+      if (value.removalReason !== null || value.removedAtAssistantCount !== null) invalid(`${field} available \u72B6\u6001\u4E0D\u5F97\u643A\u5E26\u5220\u9664\u4FE1\u606F`);
+    } else if (value.state === "removed") {
+      if (!REMOVAL_REASONS.has(value.removalReason)) invalid(`${field}.removalReason \u65E0\u6548`);
+    } else invalid(`${field}.state \u65E0\u6548`);
+    if (!value.entityId.startsWith(`${prefix}:${value.eventId}:`)) invalid(`${field} identity \u65E0\u6548`);
+    return clone4(value);
+  }
+  function normalizeRemovableContainers(payload, eventIds, archivedEventIds) {
+    if (!plainRecord9(payload.stageDetailsByEvent) || !plainRecord9(payload.archivedRemovableDataByEvent) || !plainRecord9(payload.removableEntityStateById) || !plainRecord9(payload.removableEntityTombstonesById)) {
+      invalid("removable entity \u5BB9\u5668\u65E0\u6548");
+    }
+    const bodies = /* @__PURE__ */ new Map();
+    const refs = [];
+    const addRefs = (values, prefix) => refs.push(...values.map((ref) => {
+      if (!ref.startsWith(prefix)) invalid("soft ref \u7C7B\u578B\u6216 event \u4E0D\u4E00\u81F4");
+      return ref;
+    }));
+    const registerBody = (id2, body, type, eventId) => {
+      nonEmptyString(id2, `${type} ID`);
+      if (!eventIds.has(eventId)) invalid(`${type} \u6307\u5411\u672A\u77E5 event`);
+      const existing = bodies.get(id2);
+      const normalized = clone4(body);
+      if (existing && !same(existing.body, normalized)) invalid("\u540C\u4E00 removable entity ID \u5185\u5BB9\u51B2\u7A81");
+      bodies.set(id2, { body: normalized, type, eventId });
+      return normalized;
+    };
+    const stageDetailsByEvent = {};
+    for (const [eventId, details] of Object.entries(payload.stageDetailsByEvent)) {
+      if (!eventIds.has(eventId) || !Array.isArray(details)) invalid("stageDetailsByEvent \u65E0\u6548");
+      stageDetailsByEvent[eventId] = details.map((detail) => {
+        exact(detail, ["id", "sourceStageSequence", "text", "storyDate"], "stage detail");
+        safeInteger2(detail.sourceStageSequence, "stage detail sourceStageSequence", 1);
+        nonEmptyString(detail.text, "stage detail text");
+        nullableString(detail.storyDate, "stage detail storyDate");
+        if (detail.id !== `detail:${eventId}:${detail.sourceStageSequence}`) invalid("stage detail ID \u65E0\u6548");
+        return registerBody(detail.id, detail, "detail", eventId);
+      });
+    }
+    const archivedRemovableDataByEvent = {};
+    for (const [eventId, container] of Object.entries(payload.archivedRemovableDataByEvent)) {
+      if (!archivedEventIds.has(eventId)) invalid("archived removable data \u53EA\u80FD\u5C5E\u4E8E archived event");
+      exact(container, ["daySummariesById", "manifestsById"], "archived removable data");
+      if (!plainRecord9(container.daySummariesById) || !plainRecord9(container.manifestsById)) invalid("archived removable data \u96C6\u5408\u65E0\u6548");
+      const daySummariesById = {};
+      for (const [id2, summary] of Object.entries(container.daySummariesById)) {
+        if (summary.id !== id2) invalid("day summary key \u4E0E ID \u4E0D\u4E00\u81F4");
+        const normalized = normalizeDaySummary(summary, eventId);
+        daySummariesById[id2] = registerBody(id2, normalized, "day-summary", eventId);
+        addRefs(normalized.detailRefs, `detail:${eventId}:`);
+      }
+      const manifestsById = {};
+      for (const [id2, manifest] of Object.entries(container.manifestsById)) {
+        exact(manifest, ["id"], "manifest");
+        const prefix = `manifest:${eventId}:`;
+        const revision = +id2.slice(prefix.length);
+        if (manifest.id !== id2 || `${prefix}${revision}` !== id2) invalid("manifest ID \u65E0\u6548");
+        safeInteger2(revision, "manifest snapshotRevision", 1);
+        manifestsById[id2] = registerBody(id2, manifest, "manifest", eventId);
+      }
+      archivedRemovableDataByEvent[eventId] = { daySummariesById, manifestsById };
+    }
+    for (const event of [...payload.dynamics.active, ...payload.dynamics.archived]) {
+      for (const stage of event.stages) {
+        if (stage.kind === "day-summary") {
+          registerBody(stage.id, stage, "day-summary", event.id);
+          addRefs(stage.detailRefs, `detail:${event.id}:`);
+        } else if (stage.kind === "period-summary") addRefs(stage.childSummaryRefs, `day:${event.id}:`);
+      }
+    }
+    const removableEntityStateById = {};
+    for (const [id2, record] of Object.entries(payload.removableEntityStateById)) {
+      const normalized = normalizeRemovableRecord(record, `removableEntityStateById.${id2}`);
+      if (normalized.entityId !== id2) invalid("removable state key \u4E0E entityId \u4E0D\u4E00\u81F4");
+      if (!eventIds.has(normalized.eventId)) invalid("removable state \u6307\u5411\u672A\u77E5 event");
+      removableEntityStateById[id2] = normalized;
+    }
+    const removableEntityTombstonesById = {};
+    for (const [id2, record] of Object.entries(payload.removableEntityTombstonesById)) {
+      const normalized = normalizeRemovableRecord(record, `removableEntityTombstonesById.${id2}`);
+      if (normalized.entityId !== id2 || normalized.state !== "removed") invalid("tombstone \u5FC5\u987B\u662F removed \u5BA1\u8BA1\u526F\u672C");
+      if (!eventIds.has(normalized.eventId)) invalid("tombstone \u6307\u5411\u672A\u77E5 event");
+      removableEntityTombstonesById[id2] = normalized;
+    }
+    for (const [id2, body] of bodies) {
+      const state = removableEntityStateById[id2];
+      if (!state || state.state !== "available" || state.entityType !== body.type || state.eventId !== body.eventId) {
+        invalid("removable \u6B63\u6587\u4E0E available state \u4E0D\u4E00\u81F4");
+      }
+      if (removableEntityTombstonesById[id2]) invalid("available \u6B63\u6587\u4E0D\u5F97\u5B58\u5728 tombstone");
+    }
+    for (const [id2, state] of Object.entries(removableEntityStateById)) {
+      if (state.state === "available" && !bodies.has(id2)) invalid("available state \u7F3A\u5C11\u6B63\u6587");
+      if (state.state === "removed") {
+        if (bodies.has(id2)) invalid("removed state \u4E0D\u5F97\u4FDD\u7559\u6B63\u6587");
+        if (!same(removableEntityTombstonesById[id2], state)) invalid("removed state \u4E0E tombstone \u4E0D\u4E00\u81F4");
+      }
+    }
+    for (const id2 of Object.keys(removableEntityTombstonesById)) {
+      if (removableEntityStateById[id2]?.state !== "removed") invalid("tombstone \u7F3A\u5C11 removed state");
+    }
+    for (const ref of refs) {
+      if (!bodies.has(ref) && !removableEntityStateById[ref] && !removableEntityTombstonesById[ref]) {
+        failure2("TT_DANGLING_REF_UNKNOWN", `soft ref \u6307\u5411\u672A\u77E5 removable entity\uFF1A${ref}`);
+      }
+    }
+    return { stageDetailsByEvent, archivedRemovableDataByEvent, removableEntityStateById, removableEntityTombstonesById };
+  }
+  function entityIndex(payload) {
+    const result = /* @__PURE__ */ new Map();
+    const add = (value) => result.set(value.id, value);
+    for (const details of Object.values(payload.stageDetailsByEvent)) for (const detail of details) add(detail);
+    for (const container of Object.values(payload.archivedRemovableDataByEvent)) {
+      for (const summary of Object.values(container.daySummariesById)) add(summary);
+      for (const manifest of Object.values(container.manifestsById)) add(manifest);
+    }
+    for (const event of [...payload.dynamics.active, ...payload.dynamics.archived]) {
+      for (const stage of event.stages) result.set(stage.id, stage);
+    }
+    return result;
+  }
+  function validateTodayTrendV2Transition(previousValue, candidateValue) {
+    const previous = normalizeTodayTrendV2Store(previousValue);
+    const candidate = normalizeTodayTrendV2Store(candidateValue);
+    for (const [storageId, previousEnvelope] of Object.entries(previous.globalEnvelope.payload.scopes)) {
+      const nextPayload = candidate.globalEnvelope.payload.scopes[storageId]?.payload;
+      const previousPayload = previousEnvelope.payload;
+      if (!nextPayload) {
+        if (Object.values(previousPayload.removableEntityStateById).some((item) => item.state === "removed")) invalid("\u5305\u542B removed lifecycle \u7684 scope \u4E0D\u5F97\u76F4\u63A5\u5220\u9664");
+        continue;
+      }
+      const oldEntities = entityIndex(previousPayload);
+      const newEntities = entityIndex(nextPayload);
+      for (const [id2, state] of Object.entries(previousPayload.removableEntityStateById)) {
+        const nextState = nextPayload.removableEntityStateById[id2];
+        if (state.state === "removed" && !same(nextState, state)) invalid("removed lifecycle \u4E0D\u53EF\u9006\u6216\u5220\u9664");
+      }
+      for (const [id2, entity] of oldEntities) {
+        if (newEntities.has(id2) && !same(newEntities.get(id2), entity)) invalid("\u7A33\u5B9A ID \u4E0D\u5F97\u6539\u5199");
+      }
+    }
+    return candidate;
+  }
   function normalizeScopeEnvelope(value, presets) {
-    exactKeys3(value, ["schemaVersion", "revision", "payload"], "scope envelope");
-    if (value.schemaVersion !== SCOPE_ENVELOPE_VERSION) failure2("TT_V2_SCHEMA_INVALID", "scope envelope \u7248\u672C\u65E0\u6548");
+    exact(value, ["schemaVersion", "revision", "payload"], "scope envelope");
+    if (value.schemaVersion !== SCOPE_ENVELOPE_VERSION) invalid("scope envelope \u7248\u672C\u65E0\u6548");
     safeInteger2(value.revision, "scope envelope revision");
     const payload = clone4(value.payload);
-    if (!plainRecord9(payload) || !plainRecord9(payload.dynamics) || !Array.isArray(payload.generationSnapshots)) failure2("TT_V2_SCHEMA_INVALID", "scope payload \u65E0\u6548");
+    exact(payload, ["storageId", "characterId", "characterName", "presetId", "operation", "injection", "world", "reputation", "factions", "dynamicsSettings", "dynamics", "generationSnapshots", "historyRetentionSettings", "historyRetentionState", "stageDetailsByEvent", "archivedRemovableDataByEvent", "removableEntityStateById", "removableEntityTombstonesById", "fixedCoreBaselineByEvent", "commitJournal"], "scope payload");
+    if (!plainRecord9(payload.dynamics) || !Array.isArray(payload.generationSnapshots)) invalid("scope payload \u65E0\u6548");
     payload.dynamics = {
-      active: payload.dynamics.active.map((event) => normalizeEventProjection(event, "active", null)),
-      archived: payload.dynamics.archived.map((event, index) => normalizeEventProjection(event, "archived", index + 1))
+      active: payload.dynamics.active.map((event) => normalizeEventProjection(event, "active")),
+      archived: payload.dynamics.archived.map((event) => normalizeEventProjection(event, "archived"))
     };
+    const eventIds = /* @__PURE__ */ new Set();
+    const archivedEventIds = /* @__PURE__ */ new Set();
+    const archivedSequences = /* @__PURE__ */ new Set();
+    for (const event of [...payload.dynamics.active, ...payload.dynamics.archived]) {
+      if (eventIds.has(event.id)) invalid("v2 event ID \u91CD\u590D");
+      eventIds.add(event.id);
+      if (event.lifecycle === "archived") {
+        if (archivedSequences.has(event.archivedSequence)) invalid("archivedSequence \u91CD\u590D");
+        archivedSequences.add(event.archivedSequence);
+        archivedEventIds.add(event.id);
+      }
+    }
     payload.generationSnapshots = payload.generationSnapshots.map((snapshot) => ({
       ...clone4(snapshot),
       dynamics: {
-        active: snapshot.dynamics.active.map((event) => normalizeEventProjection(event, "active", null)),
-        archived: snapshot.dynamics.archived.map((event, index) => normalizeEventProjection(event, "archived", index + 1))
+        active: snapshot.dynamics.active.map((event) => normalizeEventProjection(event, "active")),
+        archived: snapshot.dynamics.archived.map((event) => normalizeEventProjection(event, "archived"))
       }
     }));
     const v1Store = normalizeTodayTrendStore({ version: 1, presets, scopes: { [payload.storageId]: projectScopePayloadToV1(payload) } });
-    const canonical2 = createScopePayload(v1Store.scopes[payload.storageId]);
-    if (JSON.stringify(payload) !== JSON.stringify(canonical2)) failure2("TT_V2_SCHEMA_INVALID", "scope payload \u4E0D\u662F\u89C4\u8303 v2 \u8FC1\u79FB\u7ED3\u6784");
-    return { schemaVersion: SCOPE_ENVELOPE_VERSION, revision: value.revision, payload: canonical2 };
+    const facade = v1Store.scopes[payload.storageId];
+    payload.operation = clone4(facade.operation);
+    payload.injection = clone4(facade.injection);
+    payload.world = clone4(facade.world);
+    payload.reputation = clone4(facade.reputation);
+    payload.factions = clone4(facade.factions);
+    payload.dynamicsSettings = clone4(facade.dynamicsSettings);
+    payload.historyRetentionSettings = normalizeRetentionSettings(payload.historyRetentionSettings);
+    payload.historyRetentionState = normalizeRetentionState(payload.historyRetentionState);
+    const removable = normalizeRemovableContainers(payload, eventIds, archivedEventIds);
+    Object.assign(payload, removable);
+    if (!plainRecord9(payload.fixedCoreBaselineByEvent)) invalid("fixedCoreBaselineByEvent \u5FC5\u987B\u662F\u5BF9\u8C61");
+    const fixedCoreBaselineByEvent = {};
+    for (const event of payload.dynamics.archived) {
+      const baseline = payload.fixedCoreBaselineByEvent[event.id];
+      if (!baseline || !same(baseline, extractArchivedFixedCore(event))) invalid("archived fixed core baseline \u4E0D\u4E00\u81F4");
+      fixedCoreBaselineByEvent[event.id] = clone4(baseline);
+    }
+    if (Object.keys(payload.fixedCoreBaselineByEvent).some((id2) => !archivedEventIds.has(id2))) invalid("fixed core baseline \u5B58\u5728\u5B64\u513F\u8BB0\u5F55");
+    payload.fixedCoreBaselineByEvent = fixedCoreBaselineByEvent;
+    if (payload.commitJournal !== null) invalid("scope payload commitJournal \u5FC5\u987B\u4E3A null");
+    return { schemaVersion: SCOPE_ENVELOPE_VERSION, revision: value.revision, payload };
   }
   function migrateTodayTrendStoreToV2(value, { globalRevision = 1, scopeRevisionByStorageId = {} } = {}) {
     if (value?.version === TODAY_TREND_V2_STORE_VERSION && Object.hasOwn(value, "globalEnvelope")) {
@@ -9908,22 +10264,22 @@ ${entry2.content}` : entry2.content;
     };
   }
   function normalizeTodayTrendV2Store(value) {
-    if (!plainRecord9(value)) failure2("TT_V2_SCHEMA_INVALID", "v2 store \u5FC5\u987B\u662F\u5BF9\u8C61");
+    if (!plainRecord9(value)) invalid("v2 store \u5FC5\u987B\u662F\u5BF9\u8C61");
     if (value.version > TODAY_TREND_V2_STORE_VERSION) failure2("TT_V2_FUTURE_VERSION", `v2 store \u7248\u672C ${value.version} \u9AD8\u4E8E\u5F53\u524D\u652F\u6301\u7248\u672C ${TODAY_TREND_V2_STORE_VERSION}`);
-    exactKeys3(value, ["version", "globalEnvelope"], "v2 store");
-    if (value.version !== TODAY_TREND_V2_STORE_VERSION) failure2("TT_V2_SCHEMA_INVALID", "v2 store \u7248\u672C\u65E0\u6548");
+    exact(value, ["version", "globalEnvelope"], "v2 store");
+    if (value.version !== TODAY_TREND_V2_STORE_VERSION) invalid("v2 store \u7248\u672C\u65E0\u6548");
     const envelope = value.globalEnvelope;
-    exactKeys3(envelope, ["schemaVersion", "revision", "payload"], "global envelope");
+    exact(envelope, ["schemaVersion", "revision", "payload"], "global envelope");
     if (envelope.schemaVersion > GLOBAL_ENVELOPE_VERSION) failure2("TT_V2_FUTURE_VERSION", "global envelope \u7248\u672C\u9AD8\u4E8E\u5F53\u524D\u652F\u6301\u7248\u672C");
-    if (envelope.schemaVersion !== GLOBAL_ENVELOPE_VERSION) failure2("TT_V2_SCHEMA_INVALID", "global envelope \u7248\u672C\u65E0\u6548");
+    if (envelope.schemaVersion !== GLOBAL_ENVELOPE_VERSION) invalid("global envelope \u7248\u672C\u65E0\u6548");
     safeInteger2(envelope.revision, "global envelope revision");
-    exactKeys3(envelope.payload, ["presets", "scopes"], "global envelope payload");
-    if (!plainRecord9(envelope.payload.presets) || !plainRecord9(envelope.payload.scopes)) failure2("TT_V2_SCHEMA_INVALID", "global envelope \u96C6\u5408\u65E0\u6548");
+    exact(envelope.payload, ["presets", "scopes"], "global envelope payload");
+    if (!plainRecord9(envelope.payload.presets) || !plainRecord9(envelope.payload.scopes)) invalid("global envelope \u96C6\u5408\u65E0\u6548");
     const presets = clone4(envelope.payload.presets);
     const scopes = {};
     for (const [storageId, scopeEnvelope] of Object.entries(envelope.payload.scopes)) {
       const normalized = normalizeScopeEnvelope(scopeEnvelope, presets);
-      if (normalized.payload.storageId !== storageId) failure2("TT_V2_SCHEMA_INVALID", "scope envelope key \u4E0E storageId \u4E0D\u4E00\u81F4");
+      if (normalized.payload.storageId !== storageId) invalid("scope envelope key \u4E0E storageId \u4E0D\u4E00\u81F4");
       scopes[storageId] = normalized;
     }
     return {
@@ -9935,12 +10291,79 @@ ${entry2.content}` : entry2.content;
       }
     };
   }
-  function rebaseTodayTrendV2Store(value, globalRevision) {
+  function eventMap(dynamics) {
+    return new Map([...dynamics.active, ...dynamics.archived].map((event) => [event.id, event]));
+  }
+  function preserveUnchangedEvents(previousPayload, nextPayload) {
+    const previous = eventMap(previousPayload.dynamics);
+    const continuous = /* @__PURE__ */ new Set();
+    for (const bucket of ["active", "archived"]) {
+      nextPayload.dynamics[bucket] = nextPayload.dynamics[bucket].map((event) => {
+        const existing = previous.get(event.id);
+        if (!existing || !same(projectEventToV1(existing), projectEventToV1(event))) return event;
+        continuous.add(event.id);
+        return clone4(existing);
+      });
+    }
+    return continuous;
+  }
+  function preserveUnchangedSnapshots(previousPayload, nextPayload) {
+    nextPayload.generationSnapshots = nextPayload.generationSnapshots.map((snapshot, index) => {
+      const existing = previousPayload.generationSnapshots[index];
+      if (!existing) return snapshot;
+      const previousV1 = { ...clone4(existing), dynamics: projectDynamicsToV1(existing.dynamics) };
+      const nextV1 = { ...clone4(snapshot), dynamics: projectDynamicsToV1(snapshot.dynamics) };
+      return same(previousV1, nextV1) ? clone4(existing) : snapshot;
+    });
+  }
+  function preserveScopeMetadata(previousPayload, nextPayload, continuous) {
+    const previousEvents = eventMap(previousPayload.dynamics);
+    const archivedIds = new Set(nextPayload.dynamics.archived.filter((event) => continuous.has(event.id)).map((event) => event.id));
+    const preserve = (source, accept) => Object.fromEntries(Object.entries(source).filter(accept).map(([id2, value]) => [id2, clone4(value)]));
+    nextPayload.historyRetentionSettings = clone4(previousPayload.historyRetentionSettings);
+    nextPayload.historyRetentionState = clone4(previousPayload.historyRetentionState);
+    nextPayload.stageDetailsByEvent = preserve(previousPayload.stageDetailsByEvent, ([id2]) => continuous.has(id2));
+    nextPayload.archivedRemovableDataByEvent = preserve(previousPayload.archivedRemovableDataByEvent, ([id2]) => archivedIds.has(id2));
+    const eventRecord = ([, value]) => continuous.has(value.eventId);
+    nextPayload.removableEntityStateById = preserve(previousPayload.removableEntityStateById, eventRecord);
+    nextPayload.removableEntityTombstonesById = preserve(previousPayload.removableEntityTombstonesById, eventRecord);
+    nextPayload.fixedCoreBaselineByEvent = Object.fromEntries(nextPayload.dynamics.archived.map((event) => {
+      const existing = previousEvents.get(event.id);
+      const baseline = existing && same(projectEventToV1(existing), projectEventToV1(event)) ? previousPayload.fixedCoreBaselineByEvent[event.id] : extractArchivedFixedCore(event);
+      return [event.id, clone4(baseline)];
+    }));
+  }
+  function mergeTodayTrendV1StoreIntoV2(currentValue, facadeValue) {
+    const current = normalizeTodayTrendV2Store(currentValue);
+    const facade = normalizeTodayTrendStore(facadeValue);
+    const revisions2 = Object.fromEntries(Object.entries(current.globalEnvelope.payload.scopes).map(([storageId, envelope]) => [storageId, envelope.revision]));
+    const migrated = migrateTodayTrendStoreToV2(facade, {
+      globalRevision: current.globalEnvelope.revision,
+      scopeRevisionByStorageId: revisions2
+    }).store;
+    for (const [storageId, nextEnvelope] of Object.entries(migrated.globalEnvelope.payload.scopes)) {
+      const previousEnvelope = current.globalEnvelope.payload.scopes[storageId];
+      if (!previousEnvelope) continue;
+      const continuousEventIds = preserveUnchangedEvents(previousEnvelope.payload, nextEnvelope.payload);
+      preserveUnchangedSnapshots(previousEnvelope.payload, nextEnvelope.payload);
+      preserveScopeMetadata(previousEnvelope.payload, nextEnvelope.payload, continuousEventIds);
+    }
+    return normalizeTodayTrendV2Store(migrated);
+  }
+  function normalizeTodayTrendV2Candidate(value, currentValue = null) {
+    if (value?.version === TODAY_TREND_V2_STORE_VERSION && Object.hasOwn(value, "globalEnvelope")) {
+      return normalizeTodayTrendV2Store(value);
+    }
+    if (currentValue) return mergeTodayTrendV1StoreIntoV2(currentValue, value);
+    return migrateTodayTrendStoreToV2(value).store;
+  }
+  function rebaseTodayTrendV2Store(value, globalRevision, scopeRevisionByStorageId = null) {
     const store = normalizeTodayTrendV2Store(value);
     const revision = safeInteger2(globalRevision, "global revision");
     const scopes = {};
     for (const [storageId, envelope] of Object.entries(store.globalEnvelope.payload.scopes)) {
-      scopes[storageId] = { ...envelope, revision };
+      const scopeRevision = scopeRevisionByStorageId === null ? revision : safeInteger2(scopeRevisionByStorageId[storageId] ?? 0, `scope revision ${storageId}`);
+      scopes[storageId] = { ...envelope, revision: scopeRevision };
     }
     return normalizeTodayTrendV2Store({
       ...store,
@@ -10340,20 +10763,25 @@ ${entry2.content}` : entry2.content;
       broadcast(next);
       return clone5(next);
     };
-    const changedScopes = async (value, declaredScopeIds) => {
+    const prepareCandidate = async (value, declaredScopeIds) => {
       if (declaredScopeIds !== void 0 && !Array.isArray(declaredScopeIds)) throw new TypeError("changedScopeIds \u5FC5\u987B\u662F\u5B57\u7B26\u4E32\u6570\u7EC4");
       const declared = declaredScopeIds === void 0 ? null : [...new Set(declaredScopeIds)];
       if (declared?.some((storageId) => typeof storageId !== "string" || !storageId)) throw new TypeError("changedScopeIds \u5FC5\u987B\u53EA\u5305\u542B\u975E\u7A7A\u5B57\u7B26\u4E32");
       const entry2 = await readEntry(TODAY_TREND_V2_STORAGE_KEY);
       if (!entry2?.ok || entry2.value === void 0) throw failure3("TT_V2_IDB_UNAVAILABLE", "\u65E0\u6CD5\u8BFB\u53D6\u5F53\u524D v2 store \u4EE5\u8BA1\u7B97 scope revision");
-      const current = buildReadOnlyShadow(normalizeTodayTrendV2Envelope(entry2.value).payload);
-      const candidate = normalizeTodayTrendStore(value);
-      const ids = /* @__PURE__ */ new Set([...Object.keys(current.scopes), ...Object.keys(candidate.scopes)]);
-      const actual = [...ids].filter((storageId) => !structurallyEqual2(current.scopes[storageId], candidate.scopes[storageId])).sort();
+      const current = normalizeTodayTrendV2Envelope(entry2.value).payload;
+      const candidate = validateTodayTrendV2Transition(current, normalizeTodayTrendV2Candidate(value, current));
+      const currentScopes = current.globalEnvelope.payload.scopes;
+      const candidateScopes = candidate.globalEnvelope.payload.scopes;
+      const ids = /* @__PURE__ */ new Set([...Object.keys(currentScopes), ...Object.keys(candidateScopes)]);
+      const actual = [...ids].filter((storageId) => !structurallyEqual2(
+        currentScopes[storageId]?.payload,
+        candidateScopes[storageId]?.payload
+      )).sort();
       if (declared && !structurallyEqual2([...declared].sort(), actual)) {
         throw failure3("TT_SCOPE_REVISION_MISMATCH", "\u58F0\u660E\u7684 scope \u53D8\u66F4\u8303\u56F4\u4E0E\u5B9E\u9645 candidate \u4E0D\u4E00\u81F4");
       }
-      return actual;
+      return { candidate, affectedScopeIds: actual };
     };
     const saveInternal = async (value, { scopeId = null, changedScopeIds: changedScopeIds2, expectedStoreRevision = null, journalWrite = null } = {}) => {
       if (closed) throw failure3("TT_AUTHORITY_CLOSED", "v2 authority owner \u5DF2\u5173\u95ED");
@@ -10368,7 +10796,8 @@ ${entry2.content}` : entry2.content;
       if (expectedStoreRevision !== null && expectedStoreRevision !== previous.storeRevision) {
         throw failure3("TT_STORE_REVISION_CONFLICT", "v2 store \u5DF2\u5728\u5F53\u524D\u63D0\u4EA4\u540E\u53D1\u751F\u53D8\u5316\uFF0C\u62D2\u7EDD\u8986\u76D6");
       }
-      const affectedScopeIds = await changedScopes(value, changedScopeIds2 === void 0 && scopeId !== null ? [scopeId] : changedScopeIds2);
+      const prepared = await prepareCandidate(value, changedScopeIds2 === void 0 && scopeId !== null ? [scopeId] : changedScopeIds2);
+      const { candidate, affectedScopeIds } = prepared;
       const scopeRevisions = { ...previous.scopeRevisionByStorageId };
       for (const storageId of affectedScopeIds) scopeRevisions[storageId] = (scopeRevisions[storageId] || 0) + 1;
       const next = normalizeTodayTrendV2Authority({
@@ -10377,7 +10806,8 @@ ${entry2.content}` : entry2.content;
         storeRevision: previous.storeRevision + 1,
         scopeRevisionByStorageId: scopeRevisions
       });
-      const envelope = createTodayTrendV2Envelope(value, next.storeRevision, next.scopeRevisionByStorageId);
+      const rebased = rebaseTodayTrendV2Store(candidate, next.storeRevision, next.scopeRevisionByStorageId);
+      const envelope = createTodayTrendV2Envelope(rebased, next.storeRevision, next.scopeRevisionByStorageId);
       const writes = [
         { key: TODAY_TREND_V2_STORAGE_KEY, value: envelope },
         { key: TODAY_TREND_V2_AUTHORITY_KEY, value: next }
@@ -10527,6 +10957,12 @@ ${entry2.content}` : entry2.content;
       }
       return source.store;
     };
+    const loadCanonical = async () => {
+      const v2 = await v2Authority.load();
+      if (v2.active) return v2.v2Store;
+      const source = await readV1Source();
+      return normalizeTodayTrendV2Candidate(source.store);
+    };
     const migrateToV2 = async () => {
       if (typeof v2Authority.migrate !== "function") throw new TypeError("v2 authority \u4E0D\u652F\u6301\u8FC1\u79FB");
       const source = await readV1Source();
@@ -10537,7 +10973,9 @@ ${entry2.content}` : entry2.content;
         await journal.ready();
         journal.assertWritable(options2.transactionId ?? null);
       }
-      const normalized = normalizeTodayTrendStore(value);
+      const v2Candidate = value?.version === 2 && Object.hasOwn(value, "globalEnvelope");
+      const normalizedV2 = v2Candidate ? normalizeTodayTrendV2Candidate(value) : null;
+      const normalized = v2Candidate ? buildReadOnlyShadow(normalizedV2) : normalizeTodayTrendStore(value);
       const v2 = await v2Authority.status();
       if (!v2.available) {
         const error = new Error("\u65E0\u6CD5\u786E\u8BA4 v2 authority \u72B6\u6001\uFF0C\u62D2\u7EDD\u964D\u7EA7\u5199\u5165 v1");
@@ -10564,7 +11002,7 @@ ${entry2.content}` : entry2.content;
         let result;
         let operationError = null;
         try {
-          result = await v2Authority.save(normalized, options2);
+          result = await v2Authority.save(normalizedV2 || normalized, options2);
         } catch (error) {
           operationError = error;
         }
@@ -10592,6 +11030,11 @@ ${entry2.content}` : entry2.content;
           throw error;
         }
         return options2.returnReceipt ? result : result.store;
+      }
+      if (v2Candidate) {
+        const error = new Error("v2 canonical candidate \u7981\u6B62\u964D\u7EA7\u5199\u5165 v1 \u6216 localStorage");
+        error.code = "TT_V2_CANONICAL_REQUIRES_AUTHORITY";
+        throw error;
       }
       if (v2.authority && (v2.authority.readV2 || v2.authority.storeRevision > 0)) {
         const error = new Error("v2 authority \u5DF2\u51BB\u7ED3 v1 \u5199\u5165");
@@ -10633,10 +11076,11 @@ ${entry2.content}` : entry2.content;
       if (typeof v2Authority.restoreBackup !== "function") throw new TypeError("v2 authority \u4E0D\u652F\u6301\u5907\u4EFD\u6062\u590D");
       return v2Authority.restoreBackup(value, options2);
     };
-    return { load, save, status, migrateToV2, readMigrationBackup, captureV2Backup, restoreV2Backup, v2Authority, journal };
+    return { load, loadCanonical, save, status, migrateToV2, readMigrationBackup, captureV2Backup, restoreV2Backup, v2Authority, journal };
   }
   var defaultStorage = createTodayTrendStorage({ journal: todayTrendJournal });
   var loadTodayTrendStore = () => defaultStorage.load();
+  var loadTodayTrendV2Store = () => defaultStorage.loadCanonical();
   var saveTodayTrendStore = (value, options2) => defaultStorage.save(value, options2);
   var getTodayTrendStorageStatus = () => defaultStorage.status();
   var captureTodayTrendV2Backup = () => defaultStorage.captureV2Backup();
@@ -10789,7 +11233,7 @@ ${entry2.content}` : entry2.content;
       todayTrend: normalizeTodayTrendStore(stores.todayTrend || createEmptyTodayTrendStore())
     };
   }
-  function same(value, other) {
+  function same2(value, other) {
     return JSON.stringify(value) === JSON.stringify(other);
   }
   function replaceScope2(store, desired, targetId) {
@@ -10805,7 +11249,7 @@ ${entry2.content}` : entry2.content;
     if (!restoring && own(current.scopes, targetId)) {
       throw new Error("\u5206\u652F\u7EE7\u627F\u4FDD\u5B58\u5931\u8D25\uFF1A\u76EE\u6807 scope \u5DF2\u88AB\u5E76\u53D1\u5199\u5165 (\u624B\u673A\u9875\u9762\u72B6\u6001)");
     }
-    if (restoring && own(current.scopes, targetId) && !same(current.scopes[targetId], expected.scopes[targetId])) {
+    if (restoring && own(current.scopes, targetId) && !same2(current.scopes[targetId], expected.scopes[targetId])) {
       throw new Error("\u5206\u652F\u7EE7\u627F\u8865\u507F\u53D6\u6D88\uFF1A\u76EE\u6807 scope \u5DF2\u5728\u4E8B\u52A1\u540E\u88AB\u66F4\u65B0 (\u624B\u673A\u9875\u9762\u72B6\u6001)");
     }
     const scopes = replaceScope2(current.scopes, desired.scopes, targetId);
@@ -10896,7 +11340,7 @@ ${entry2.content}` : entry2.content;
   function commitBudgetScope({ desired, expected, targetId }) {
     const current = readBudgetForBranch();
     const restoring = !own(desired.communitySceneIdsByStorage, targetId) && !own(desired.communitySelectionsByStorage, targetId);
-    const targetChanged = !same(current.communitySceneIdsByStorage[targetId], expected.communitySceneIdsByStorage[targetId]) || !same(current.communitySelectionsByStorage[targetId], expected.communitySelectionsByStorage[targetId]);
+    const targetChanged = !same2(current.communitySceneIdsByStorage[targetId], expected.communitySceneIdsByStorage[targetId]) || !same2(current.communitySelectionsByStorage[targetId], expected.communitySelectionsByStorage[targetId]);
     if (!restoring && (own(current.communitySceneIdsByStorage, targetId) || own(current.communitySelectionsByStorage, targetId))) {
       throw new Error("\u5206\u652F\u7EE7\u627F\u4FDD\u5B58\u5931\u8D25\uFF1A\u76EE\u6807 scope \u5DF2\u88AB\u5E76\u53D1\u5199\u5165 (\u793E\u533A\u9884\u7B97\u914D\u7F6E)");
     }
@@ -10919,7 +11363,7 @@ ${entry2.content}` : entry2.content;
     if (!restoring && own(current, targetId)) {
       throw new Error(`\u5206\u652F\u7EE7\u627F\u4FDD\u5B58\u5931\u8D25\uFF1A\u76EE\u6807 scope \u5DF2\u88AB\u5E76\u53D1\u5199\u5165 (${label})`);
     }
-    if (restoring && own(current, targetId) && !same(current[targetId], expected[targetId])) {
+    if (restoring && own(current, targetId) && !same2(current[targetId], expected[targetId])) {
       throw new Error(`\u5206\u652F\u7EE7\u627F\u8865\u507F\u53D6\u6D88\uFF1A\u76EE\u6807 scope \u5DF2\u5728\u4E8B\u52A1\u540E\u88AB\u66F4\u65B0 (${label})`);
     }
     const merged = replaceScope2(current, desired, targetId);
@@ -10969,7 +11413,7 @@ ${entry2.content}` : entry2.content;
     if (!restoring && own(current.scopes, targetId)) {
       throw new Error(`\u5206\u652F\u7EE7\u627F\u4FDD\u5B58\u5931\u8D25\uFF1A\u76EE\u6807 scope \u5DF2\u88AB\u5E76\u53D1\u5199\u5165 (${label})`);
     }
-    if (restoring && own(current.scopes, targetId) && !same(current.scopes[targetId], expected.scopes[targetId])) {
+    if (restoring && own(current.scopes, targetId) && !same2(current.scopes[targetId], expected.scopes[targetId])) {
       throw new Error(`\u5206\u652F\u7EE7\u627F\u8865\u507F\u53D6\u6D88\uFF1A\u76EE\u6807 scope \u5DF2\u5728\u4E8B\u52A1\u540E\u88AB\u66F4\u65B0 (${label})`);
     }
     const merged = clone7(current);
@@ -11017,7 +11461,7 @@ ${entry2.content}` : entry2.content;
         if (!restoring && own(current.scopes, targetId)) {
           throw new Error("\u5206\u652F\u7EE7\u627F\u4FDD\u5B58\u5931\u8D25\uFF1A\u76EE\u6807 scope \u5DF2\u88AB\u5E76\u53D1\u5199\u5165 (\u4E92\u52A8\u793E\u533A\u6570\u636E)");
         }
-        if (restoring && own(current.scopes, targetId) && !same(current.scopes[targetId], expected.scopes[targetId])) {
+        if (restoring && own(current.scopes, targetId) && !same2(current.scopes[targetId], expected.scopes[targetId])) {
           throw new Error("\u5206\u652F\u7EE7\u627F\u8865\u507F\u53D6\u6D88\uFF1A\u76EE\u6807 scope \u5DF2\u5728\u4E8B\u52A1\u540E\u88AB\u66F4\u65B0 (\u4E92\u52A8\u793E\u533A\u6570\u636E)");
         }
         const merged = clone7(current);
@@ -11038,7 +11482,7 @@ ${entry2.content}` : entry2.content;
         const currentKeys = scopeBackgroundKeys(targetId, current);
         const desiredKeys = scopeBackgroundKeys(targetId, desired);
         const restoring = desiredKeys.length === 0;
-        const currentMatchesExpected = currentKeys.length === expectedKeys.length && currentKeys.every((key) => expectedKeys.includes(key) && same(current[key], expected[key]));
+        const currentMatchesExpected = currentKeys.length === expectedKeys.length && currentKeys.every((key) => expectedKeys.includes(key) && same2(current[key], expected[key]));
         if (!restoring && currentKeys.length) {
           throw new Error("\u5206\u652F\u7EE7\u627F\u4FDD\u5B58\u5931\u8D25\uFF1A\u76EE\u6807 scope \u5DF2\u88AB\u5E76\u53D1\u5199\u5165 (\u4F1A\u8BDD\u80CC\u666F)");
         }
@@ -11063,7 +11507,7 @@ ${entry2.content}` : entry2.content;
         if (!restoring && own(current, targetId)) {
           throw new Error(`\u5206\u652F\u7EE7\u627F\u4FDD\u5B58\u5931\u8D25\uFF1A\u76EE\u6807 scope \u5DF2\u88AB\u5E76\u53D1\u5199\u5165 (${store})`);
         }
-        if (restoring && own(current, targetId) && !same(current[targetId], expected[targetId])) {
+        if (restoring && own(current, targetId) && !same2(current[targetId], expected[targetId])) {
           throw new Error(`\u5206\u652F\u7EE7\u627F\u8865\u507F\u53D6\u6D88\uFF1A\u76EE\u6807 scope \u5DF2\u5728\u4E8B\u52A1\u540E\u88AB\u66F4\u65B0 (${store})`);
         }
         const merged = replaceScope2(current, desired, targetId);
@@ -11075,23 +11519,19 @@ ${entry2.content}` : entry2.content;
       completeDirectoryBranchScope(store, token);
     }
   }
-  async function commitTodayTrendScope({ desired, expected, targetId }) {
+  async function commitTodayTrendScope({ desired, expected, targetId, commitScope }) {
+    if (typeof commitScope !== "function") throw new TypeError("\u5206\u652F\u7EE7\u627F\u7F3A\u5C11 Today Trend \u7EDF\u4E00 scope \u63D0\u4EA4\u5668");
     const token = markDirectoryBranchScope("todayTrend", targetId);
     try {
-      return await enqueueDirectoryOperation("todayTrend", async () => {
-        const current = normalizeTodayTrendStore(await loadTodayTrendStore());
+      return await commitScope(targetId, (currentScope) => {
         const restoring = !own(desired.scopes, targetId);
-        if (!restoring && own(current.scopes, targetId)) {
+        if (!restoring && currentScope) {
           throw new Error("\u5206\u652F\u7EE7\u627F\u4FDD\u5B58\u5931\u8D25\uFF1A\u76EE\u6807 scope \u5DF2\u88AB\u5E76\u53D1\u5199\u5165 (\u4ECA\u65E5\u98CE\u5411)");
         }
-        if (restoring && own(current.scopes, targetId) && !same(current.scopes[targetId], expected.scopes[targetId])) {
+        if (restoring && currentScope && !same2(currentScope, expected.scopes[targetId])) {
           throw new Error("\u5206\u652F\u7EE7\u627F\u8865\u507F\u53D6\u6D88\uFF1A\u76EE\u6807 scope \u5DF2\u5728\u4E8B\u52A1\u540E\u88AB\u66F4\u65B0 (\u4ECA\u65E5\u98CE\u5411)");
         }
-        const merged = clone7(current);
-        replaceEntry(merged.scopes, desired.scopes, targetId);
-        const normalized = normalizeTodayTrendStore(merged);
-        await saveTodayTrendStore(normalized, { scopeId: targetId });
-        return normalized;
+        return restoring ? null : clone7(desired.scopes[targetId]);
       });
     } finally {
       completeDirectoryBranchScope("todayTrend", token);
@@ -11172,7 +11612,7 @@ ${entry2.content}` : entry2.content;
       todayTrend: await loadTodayTrendStore()
     });
   }
-  async function persistProductionStores(next, { branch } = {}) {
+  async function persistProductionStores(next, { branch, commitTodayTrendStore, commitTodayTrendScope: commitScope } = {}) {
     const targetId = branch?.targetId;
     const previous = clone7(await loadProductionStores());
     const apply = async (desired, expected) => {
@@ -11255,7 +11695,12 @@ ${entry2.content}` : entry2.content;
           normalize: normalizeOutfitStore,
           label: "\u7A7F\u642D\u6570\u636E"
         });
-        globalThis.window.__pmTodayTrend = await commitTodayTrendScope({ desired: desired.todayTrend, expected: expected.todayTrend, targetId });
+        globalThis.window.__pmTodayTrend = await commitTodayTrendScope({
+          desired: desired.todayTrend,
+          expected: expected.todayTrend,
+          targetId,
+          commitScope
+        });
       } else {
         globalThis.window.__pmBgLocal = await saveBgLocal({ data: desired.backgrounds });
         await saveInteractiveScenes(desired.interactive);
@@ -11263,8 +11708,8 @@ ${entry2.content}` : entry2.content;
         if (!saveCalendar(desired.calendar) || !saveCalendarOccasions(desired.occasions) || !saveCalendarCycles(desired.cycles) || !saveCalendarRecipes(desired.recipes) || !saveCalendarOutfits(desired.outfits)) {
           throw new Error("\u5206\u652F\u7EE7\u627F\u4FDD\u5B58\u5931\u8D25\uFF1A\u65E5\u5386 scope \u4E0D\u53EF\u7528");
         }
-        globalThis.window.__pmTodayTrend = normalizeTodayTrendStore(desired.todayTrend);
-        await saveTodayTrendStore(globalThis.window.__pmTodayTrend);
+        if (typeof commitTodayTrendStore !== "function") throw new TypeError("\u5206\u652F\u7EE7\u627F\u7F3A\u5C11 Today Trend \u7EDF\u4E00 store \u63D0\u4EA4\u5668");
+        globalThis.window.__pmTodayTrend = await commitTodayTrendStore(() => normalizeTodayTrendStore(desired.todayTrend));
       }
     };
     try {
@@ -11282,13 +11727,25 @@ ${entry2.content}` : entry2.content;
       throw error;
     }
   }
-  function beginBranchInheritance(context, { getStorageId: getStorageId2, invalidateInteractiveStore, reloadCalendarStore, reloadTodayTrendStore, force = false } = {}) {
+  function beginBranchInheritance(context, {
+    getStorageId: getStorageId2,
+    invalidateInteractiveStore,
+    reloadCalendarStore,
+    reloadTodayTrendStore,
+    commitTodayTrendStore,
+    commitTodayTrendScope: commitScope,
+    force = false
+  } = {}) {
     const branch = resolveBranchInheritance(context);
     const branchScopeTokens = branch ? ["pokeConfig", "characterBehavior", "bidirectional", "budget", "todayTrend"].map((store) => [store, markDirectoryBranchScope(store, branch.targetId)]) : [];
     const operation = inheritPhoneDataOnBranch({
       context,
       loadStores: loadProductionStores,
-      saveStores: persistProductionStores,
+      saveStores: (stores, options2) => persistProductionStores(stores, {
+        ...options2,
+        commitTodayTrendStore,
+        commitTodayTrendScope: commitScope
+      }),
       loadLineage: loadBranchLineage,
       commitLineage: commitBranchLineage,
       force
@@ -11419,6 +11876,8 @@ ${entry2.content}` : entry2.content;
           invalidateInteractiveStore: deps.invalidateInteractiveStore,
           reloadCalendarStore: deps.reloadCalendarStore,
           reloadTodayTrendStore: deps.reloadTodayTrendStore,
+          commitTodayTrendStore: deps.commitTodayTrendStore,
+          commitTodayTrendScope: deps.commitTodayTrendScope,
           force: true
         }));
       } catch (error) {
@@ -17859,7 +18318,7 @@ ${antiFluff}`;
           const currentContext = getCtx();
           try {
             deps.observeCommunityTurn?.(currentContext?.chat || []);
-          } catch (error) {
+          } catch {
           }
           Promise.resolve(deps.observeCalendarTurn?.()).catch(() => {
           });
@@ -17887,7 +18346,9 @@ ${antiFluff}`;
           getStorageId: getStorageId2,
           invalidateInteractiveStore: deps.invalidateInteractiveStore,
           reloadCalendarStore: deps.reloadCalendarStore,
-          reloadTodayTrendStore: deps.reloadTodayTrendStore
+          reloadTodayTrendStore: deps.reloadTodayTrendStore,
+          commitTodayTrendStore: deps.commitTodayTrendStore,
+          commitTodayTrendScope: deps.commitTodayTrendScope
         }).then((result) => {
           runtime.lastBranchInheritance = { status: result?.status || "unknown", reason: result?.reason || null, sourceId: result?.sourceId || null, targetId: result?.targetId || null, sourcePresence: result?.sourcePresence || null, targetPresence: result?.targetPresence || null };
           runtime.lastBranchInheritanceError = null;
@@ -22606,7 +23067,7 @@ ${error.message}`);
     const sourceVersion = store.version === INTERACTIVE_STORE_VERSION ? INTERACTIVE_STORE_VERSION : 1;
     const scopes = objectValue(store.scopes, "interactiveScenes.scopes");
     const normalizedScopeIds = /* @__PURE__ */ new Set();
-    for (const [scopeId, scopeValue] of Object.entries(scopes)) {
+    for (const [scopeId, scopeValue2] of Object.entries(scopes)) {
       const normalizedScopeId = sourceVersion === INTERACTIVE_STORE_VERSION ? scopeId : normalizeLegacyDictionaryKey(scopeId, "interactiveScenes.scopes", 160);
       if (sourceVersion === INTERACTIVE_STORE_VERSION) {
         assertNormalizedDictionaryKey(scopeId, "interactiveScenes.scopes", 160);
@@ -22614,7 +23075,7 @@ ${error.message}`);
       if (normalizedScopeIds.has(normalizedScopeId)) throw new Error(`\u5907\u4EFD\u5B57\u6BB5 interactiveScenes.scopes \u5F52\u4E00\u5316\u540E\u5305\u542B\u91CD\u590D scope ${normalizedScopeId}`);
       normalizedScopeIds.add(normalizedScopeId);
       const field = `interactiveScenes.scopes.${scopeId}`;
-      const scope = objectValue(scopeValue, field);
+      const scope = objectValue(scopeValue2, field);
       const scopeKeys = sourceVersion === INTERACTIVE_STORE_VERSION ? ["activeSceneId", "sceneOrder", "scenes", "actors"] : ["activeSceneId", "sceneOrder", "scenes"];
       assertAllowedKeys(scope, field, scopeKeys);
       const actorIds = /* @__PURE__ */ new Set();
@@ -23033,10 +23494,15 @@ ${error.message}`);
 
   // src/today-trend-commit.js
   var clone14 = (value) => structuredClone(value);
+  var scopeEntries = (value) => value?.version === 2 ? value.globalEnvelope?.payload?.scopes || {} : value?.scopes || {};
+  var scopeValue = (entry2) => entry2?.payload ?? entry2;
   var changedScopeIds = (previous, candidate) => [.../* @__PURE__ */ new Set([
-    ...Object.keys(previous.scopes || {}),
-    ...Object.keys(candidate.scopes || {})
-  ])].filter((id2) => JSON.stringify(previous.scopes?.[id2]) !== JSON.stringify(candidate.scopes?.[id2])).sort();
+    ...Object.keys(scopeEntries(previous)),
+    ...Object.keys(scopeEntries(candidate))
+  ])].filter((id2) => JSON.stringify(scopeValue(scopeEntries(previous)[id2])) !== JSON.stringify(scopeValue(scopeEntries(candidate)[id2]))).sort();
+  var isV2Store = (value) => value?.version === 2 && Object.hasOwn(value, "globalEnvelope");
+  var facadeStore = (value) => isV2Store(value) ? buildReadOnlyShadow(value) : normalizeTodayTrendStore(value);
+  var canonicalStore = (value, current = null) => normalizeTodayTrendV2Candidate(value, current);
   function injectionFailure4(result) {
     if (!result) return null;
     const failedWrites = Number.isInteger(result.failedWrites) ? result.failedWrites : 0;
@@ -23053,9 +23519,11 @@ ${error.message}`);
     refreshInjection,
     prepareInjection,
     storageStatus = getTodayTrendStorageStatus,
+    loadCanonical: loadCanonicalOption,
     journal: journalOption
   } = {}) {
     const journal = journalOption === void 0 && load === loadTodayTrendStore && save === saveTodayTrendStore ? todayTrendJournal : journalOption;
+    const loadCanonical = loadCanonicalOption === void 0 && load === loadTodayTrendStore && save === saveTodayTrendStore ? loadTodayTrendV2Store : loadCanonicalOption;
     let generation = 0;
     let recoveryPromise = null;
     const active = (task) => !task || task.active?.() !== false;
@@ -23091,9 +23559,10 @@ ${error.message}`);
           returnReceipt: true
         });
         entry2 = journal.acceptAtomicTransition(compensation.value);
-        runtime.pendingInjectionStore = previous;
-        runtime.store = savedStore(rolledBack, previous);
-        await refresh(previous);
+        const previousFacade = facadeStore(previous);
+        runtime.pendingInjectionStore = previousFacade;
+        runtime.store = savedStore(rolledBack, previousFacade);
+        await refresh(previousFacade);
         delete runtime.pendingInjectionStore;
         await journal.complete(entry2, "rejected", {
           lastErrorCode: String(original?.code || original?.name || "TT_REJECTED")
@@ -23110,13 +23579,14 @@ ${error.message}`);
     const recoverEntry = async (entry2) => {
       if (entry2.phase === "blocked") return false;
       const status = await storageStatus();
-      const current = normalizeTodayTrendStore(await load());
+      const current = loadCanonical ? canonicalStore(await loadCanonical()) : normalizeTodayTrendStore(await load());
+      const currentFacade = facadeStore(current);
       const revision = status.authority?.storeRevision;
-      const digest = todayTrendStoreDigest(current);
+      const digestFor = (journalValue) => todayTrendStoreDigest(isV2Store(journalValue) ? current : currentFacade);
       if (entry2.phase === "pending" || entry2.phase === "prepared") {
-        if (revision === entry2.baseStoreRevision && digest === entry2.previousDigest) {
+        if (revision === entry2.baseStoreRevision && digestFor(entry2.previous) === entry2.previousDigest) {
           await journal.complete(entry2, "rejected");
-          runtime.store = current;
+          runtime.store = currentFacade;
           return true;
         }
         const error = Object.assign(new Error("Today Trend prepared journal \u4E0E\u6743\u5A01 store \u4E0D\u4E00\u81F4"), { code: "TT_RECOVERY_SPLIT_BRAIN" });
@@ -23127,14 +23597,15 @@ ${error.message}`);
         return block2(entry2, error);
       }
       if (entry2.phase === "compensation-store-written") {
-        if (revision !== entry2.compensationStoreRevision || digest !== entry2.previousDigest) {
+        if (revision !== entry2.compensationStoreRevision || digestFor(entry2.previous) !== entry2.previousDigest) {
           const error = Object.assign(new Error("Today Trend \u8865\u507F journal \u4E0E\u6743\u5A01 store \u4E0D\u4E00\u81F4"), { code: "TT_RECOVERY_SPLIT_BRAIN" });
           return block2(entry2, error);
         }
-        runtime.pendingInjectionStore = entry2.previous;
-        runtime.store = current;
+        const previousFacade = facadeStore(entry2.previous);
+        runtime.pendingInjectionStore = previousFacade;
+        runtime.store = currentFacade;
         try {
-          await refresh(entry2.previous);
+          await refresh(previousFacade);
           delete runtime.pendingInjectionStore;
           await journal.complete(entry2, "rejected");
           return true;
@@ -23142,11 +23613,11 @@ ${error.message}`);
           return block2(entry2, error);
         }
       }
-      if (revision !== entry2.candidateStoreRevision || digest !== entry2.candidateDigest) {
+      if (revision !== entry2.candidateStoreRevision || digestFor(entry2.candidate) !== entry2.candidateDigest) {
         const error = Object.assign(new Error("Today Trend candidate journal \u4E0E\u6743\u5A01 store \u4E0D\u4E00\u81F4"), { code: "TT_RECOVERY_SPLIT_BRAIN" });
         return block2(entry2, error);
       }
-      runtime.store = current;
+      runtime.store = currentFacade;
       if (entry2.phase === "compensation-requested") {
         const original = Object.assign(new Error("Today Trend \u6062\u590D\u672A\u5B8C\u6210\u7684\u8865\u507F\u4E8B\u52A1"), {
           code: entry2.lastErrorCode || "TT_COMPENSATION_REQUIRED"
@@ -23161,9 +23632,10 @@ ${error.message}`);
         const error = Object.assign(new Error(`Today Trend journal phase \u65E0\u6CD5\u6062\u590D\uFF1A${entry2.phase}`), { code: "TT_RECOVERY_PHASE_INVALID" });
         return block2(entry2, error);
       }
-      runtime.pendingInjectionStore = entry2.candidate;
+      const candidateFacade = facadeStore(entry2.candidate);
+      runtime.pendingInjectionStore = candidateFacade;
       try {
-        await refresh(entry2.candidate);
+        await refresh(candidateFacade);
         delete runtime.pendingInjectionStore;
         const injected = await journal.transition(entry2, "injection-written");
         await journal.complete(injected, "accepted");
@@ -23196,10 +23668,10 @@ ${error.message}`);
       });
       return recoveryPromise;
     };
-    const sagaCommit = async ({ previous, candidate, task, expectedGeneration, scopeId }) => {
+    const sagaCommit = async ({ previous, candidate, previousFacade, candidateFacade, task, expectedGeneration, scopeId }) => {
       const status = await storageStatus();
       if (!status.available || !status.owned || status.authority?.writeV2 !== true) return null;
-      await prepareInjection?.(candidate);
+      await prepareInjection?.(candidateFacade);
       let entry2 = await journal.begin({
         scopeId,
         affectedScopeIds: changedScopeIds(previous, candidate),
@@ -23224,19 +23696,19 @@ ${error.message}`);
         await journal.complete(entry2, "rejected", { lastErrorCode: String(error?.code || error?.name || "TT_STORE_WRITE_FAILED") });
         throw error;
       }
-      runtime.pendingInjectionStore = candidate;
+      runtime.pendingInjectionStore = candidateFacade;
       let refreshError = null;
       try {
-        await refresh(candidate);
+        await refresh(candidateFacade);
       } catch (error) {
         refreshError = error;
       }
       if (!refreshError && expectedGeneration === generation && active(task)) {
-        runtime.store = savedStore(saved, candidate);
+        runtime.store = savedStore(saved, candidateFacade);
         delete runtime.pendingInjectionStore;
         const injected = await journal.transition(entry2, "injection-written");
         await journal.complete(injected, "accepted");
-        return candidate;
+        return candidateFacade;
       }
       const original = refreshError || Object.assign(new Error("\u4ECA\u65E5\u98CE\u5411\u63D0\u4EA4\u5728\u4EFB\u52A1\u53D6\u6D88\u540E\u9700\u8981\u56DE\u6EDA"), { name: "AbortError" });
       entry2 = await journal.transition(entry2, "compensation-requested", { lastErrorCode: String(original.code || original.name || "TT_COMPENSATION_REQUIRED") });
@@ -23248,36 +23720,49 @@ ${error.message}`);
       if (typeof mutate !== "function") throw new TypeError("\u4ECA\u65E5\u98CE\u5411\u63D0\u4EA4\u53D8\u66F4\u5FC5\u987B\u662F\u51FD\u6570");
       const scopeId = options2.scopeId ?? null;
       const refreshEnabled = Object.hasOwn(options2, "refreshInjection") ? options2.refreshInjection !== false : options2.refresh !== false;
+      if (options2.canonical !== void 0 && typeof options2.canonical !== "boolean") throw new TypeError("canonical \u5FC5\u987B\u662F\u5E03\u5C14\u503C");
       const expectedGeneration = generation;
       return enqueueDirectoryOperation("todayTrend", async () => {
         await recover();
         journal?.assertWritable(null);
         if (expectedGeneration !== generation || !active(task)) return false;
-        const previous = normalizeTodayTrendStore(await load());
-        const candidate = normalizeTodayTrendStore(await mutate(clone14(previous)));
+        const previous = loadCanonical ? canonicalStore(await loadCanonical()) : normalizeTodayTrendStore(await load());
+        const previousFacade = facadeStore(previous);
+        if (options2.canonical && !loadCanonical) throw new TypeError("canonical mutation \u9700\u8981 loadCanonical");
+        const mutated = await mutate(clone14(options2.canonical ? previous : previousFacade));
+        const candidate = options2.canonical ? canonicalStore(mutated) : loadCanonical ? canonicalStore(mutated, previous) : normalizeTodayTrendStore(mutated);
+        const candidateFacade = facadeStore(candidate);
         if (expectedGeneration !== generation || !active(task)) return false;
         if (journal && refreshEnabled) {
-          const sagaResult = await sagaCommit({ previous, candidate, task, expectedGeneration, scopeId });
+          const sagaResult = await sagaCommit({
+            previous,
+            candidate,
+            previousFacade,
+            candidateFacade,
+            task,
+            expectedGeneration,
+            scopeId
+          });
           if (sagaResult !== null) return sagaResult;
         }
         const saved = await save(candidate, { scopeId, returnReceipt: true });
-        const committedCandidate = savedStore(saved, candidate);
+        const committedCandidate = savedStore(saved, candidateFacade);
         runtime.store = committedCandidate;
-        if (!refreshEnabled) return candidate;
+        if (!refreshEnabled) return candidateFacade;
         let refreshError = null;
         try {
-          refreshError = injectionFailure4(await refreshInjection?.(candidate));
+          refreshError = injectionFailure4(await refreshInjection?.(candidateFacade));
         } catch (error) {
           refreshError = error;
         }
-        if (!refreshError && expectedGeneration === generation && active(task)) return candidate;
+        if (!refreshError && expectedGeneration === generation && active(task)) return candidateFacade;
         try {
           const rollbackOptions = { scopeId, returnReceipt: true };
           if (Number.isSafeInteger(saved?.storeRevision)) rollbackOptions.expectedStoreRevision = saved.storeRevision;
           const rolledBack = await save(previous, rollbackOptions);
-          const restored = savedStore(rolledBack, previous);
+          const restored = savedStore(rolledBack, previousFacade);
           runtime.store = restored;
-          const rollbackError = injectionFailure4(await refreshInjection?.(previous));
+          const rollbackError = injectionFailure4(await refreshInjection?.(previousFacade));
           if (rollbackError) throw rollbackError;
         } catch (rollbackError) {
           const original = refreshError || new Error("\u4ECA\u65E5\u98CE\u5411\u63D0\u4EA4\u5728\u4EFB\u52A1\u53D6\u6D88\u540E\u9700\u8981\u56DE\u6EDA");
@@ -23292,6 +23777,17 @@ ${error.message}`);
     };
     const commitScope = (storageId, mutate, task = null, options2 = {}) => commitStore(async (store) => {
       if (typeof storageId !== "string" || !storageId) throw new TypeError("\u4ECA\u65E5\u98CE\u5411\u89D2\u8272\u8D44\u6599 ID \u5FC5\u987B\u662F\u975E\u7A7A\u5B57\u7B26\u4E32");
+      if (options2.canonical) {
+        const scopes = store.globalEnvelope.payload.scopes;
+        const envelope = scopes[storageId];
+        const payload = await mutate(clone14(envelope?.payload));
+        if (payload === null) delete scopes[storageId];
+        else {
+          if (!envelope) throw new Error("canonical scope \u4E0D\u5B58\u5728\uFF0C\u5FC5\u987B\u901A\u8FC7\u6574\u6811 mutation \u521B\u5EFA");
+          scopes[storageId] = { ...envelope, payload };
+        }
+        return store;
+      }
       const scope = await mutate(clone14(store.scopes[storageId]));
       if (scope === null) delete store.scopes[storageId];
       else store.scopes[storageId] = scope;

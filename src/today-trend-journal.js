@@ -37,8 +37,18 @@ function canonical(value) {
     return JSON.stringify(value);
 }
 
+function digestValue(value) {
+    if (value?.version !== 2 || !value.globalEnvelope?.payload?.scopes) return value;
+    const normalized = clone(value);
+    normalized.globalEnvelope.revision = 0;
+    for (const envelope of Object.values(normalized.globalEnvelope.payload.scopes)) {
+        if (envelope && typeof envelope === 'object') envelope.revision = 0;
+    }
+    return normalized;
+}
+
 export function todayTrendStoreDigest(value) {
-    const text = canonical(value);
+    const text = canonical(digestValue(value));
     let hash = 2166136261;
     for (let index = 0; index < text.length; index += 1) {
         hash ^= text.charCodeAt(index);
