@@ -19,10 +19,13 @@ import {
     normalizeTodayTrendV2Authority, normalizeTodayTrendV2Envelope,
 } from '../src/today-trend-v2-authority.js';
 import {
-    buildReadOnlyShadow, diffReadOnlyShadow, extractArchivedFixedCore, migrateTodayTrendStoreToV2,
+    applyTodayTrendGenerationToV2, buildReadOnlyShadow, diffReadOnlyShadow, extractArchivedFixedCore, migrateTodayTrendStoreToV2,
     normalizeTodayTrendStageProjection, normalizeTodayTrendV2Candidate, normalizeTodayTrendV2Store,
-    resolveTodayTrendV2LatestStage, validateTodayTrendV2Transition,
+    resolveTodayTrendV2LatestStage, rollbackTodayTrendV2Scope, validateTodayTrendV2Transition,
 } from '../src/today-trend-v2-model.js';
+import {
+    normalizeTodayTrendHistoryProducer,
+} from '../src/today-trend-history-reducer.js';
 import { createTodayTrendCommitter } from '../src/today-trend-commit.js';
 import { createTodayTrendJournal, normalizeTodayTrendJournal, todayTrendStoreDigest } from '../src/today-trend-journal.js';
 import { createPhoneInjectionController } from '../src/phone-injection-controller.js';
@@ -2335,7 +2338,7 @@ await assert.rejects(() => createTodayTrendGenerationController({ getCtx: () => 
     callAI: async () => JSON.stringify({ rule: '规则重写', extra: true }),
 }).regenerateRule({ scope: valid.scopes.chat, preset: valid.presets.preset, rule: 'world' }), /今日风向规则重生成失败/,
 '规则重生成不得接受协议外字段');
-assert.match(generationPrompts.systemPrompt, /顶层必须且只能有 world、reputation、factions、dynamics/, '后续生成必须锁定四模块协议');
+assert.match(generationPrompts.systemPrompt, /顶层必须且只能有 world、reputation、factions、dynamics、history 五个键/, '后续生成必须锁定五键协议');
 assert.match(generationPrompts.systemPrompt, /不允许新建 type 为 incident/, '未命中突发投骰时必须禁止新增事故');
 assert.match(generationPrompts.systemPrompt, /地下线升级必须归档旧事件，再新建关联的 incident/, '生成提示词必须禁止原地改写地下线类型');
 assert.match(generationPrompts.systemPrompt, /A\.parentId 等于 B\.id[\s\S]*保留 parentId 并删除对应外部关联[\s\S]*只针对直接父子/, '增量提示词必须声明直接父子与外部关联互斥');
@@ -3794,7 +3797,241 @@ assert.deepEqual(phase4Persisted.removableEntityStateById[removedDayId], removed
 assert.deepEqual(phase4Persisted.removableEntityTombstonesById[removedDayId], removedDayState,
     '合法 tombstone 必须与 state 在同一 canonical candidate 持久化');
 assert.equal(await phase4Authority.release({ readV2: true, serveV2: false }), true,
+
     '阶段 4 authority harness 必须显式释放 owner');
 phase4Authority.close();
+
+const phase5Producer = (eventId, stages, daySummaries = [], periodSummaries = []) => ({
+    events: [{ eventId, stages, daySummaries, periodSummaries }],
+});
+const phase5Stage = text => ({ text, time: null, timeLabel: null });
+const phase5GeneratedScope = (store, text) => {
+    const scope = structuredClone(buildReadOnlyShadow(store).scopes.chat);
+    const event = scope.dynamics.active.find(item => item.id === 'service');
+    event.stages.push(text);
+    event.latestStage = text;
+    return scope;
+};
+assert.deepEqual(normalizeTodayTrendHistoryProducer({ events: [] }), { events: [] },
+    '空 history producer 必须是合法闭集，用于同 envelope 的无历史变化轮次');
+assert.throws(() => normalizeTodayTrendHistoryProducer({ events: [], debug: true }),
+    error => error?.code === 'TT_HISTORY_SCHEMA_INVALID', 'history producer 顶层额外字段必须整单拒绝');
+
+const phase5Dated = applyTodayTrendGenerationToV2(migratedValidV2, 'chat',
+    phase5GeneratedScope(migratedValidV2, '完成摆盘'), phase5Producer('service', [phase5Stage('完成摆盘')]), {
+        trustedStoryDate: '2025-04-15', assistantCount: 8,generatedAt: 100,
+    });
+const phase5DatedPayload = phase5Dated.globalEnvelope.payload.scopes.chat.payload;
+const phase5DatedEvent = phase5DatedPayload.dynamics.active.find(item => item.id === 'service');
+assert.equal(phase5DatedEvent.stages.at(-1).kind, 'live-stage', '可信日期必须生成 live-stage');
+assert.equal(phase5DatedEvent.stages.at(-1).storyDate, '2025-04-15', 'live-stage 日期只能采用本地可信 storyDate');
+assert.equal(phase5DatedEvent.stages.at(-1).sourceFloorStart, 8, '新增 stage 必须记录本轮助手楼层');
+
+const phase5Undated = applyTodayTrendGenerationToV2(migratedValidV2, 'chat',
+    phase5GeneratedScope(migratedValidV2, '无法定日的进展'), phase5Producer('service', [phase5Stage('无法定日的进展')]), {
+        trustedStoryDate: null, assistantCount: 8, generatedAt: 100,
+    });
+const phase5UndatedStage = phase5Undated.globalEnvelope.payload.scopes.chat.payload.dynamics.active[0].stages.at(-1);
+assert.equal(phase5UndatedStage.kind, 'undated-stage', '缺失可信日期必须生成 undated-stage');
+assert.equal(phase5UndatedStage.storyDate, null, '缺失可信日期不得回退到设备日期');
+
+const phase5SameDay = applyTodayTrendGenerationToV2(phase5Dated, 'chat',
+    phase5GeneratedScope(phase5Dated, '当日继续备餐'), phase5Producer('service', [phase5Stage('当日继续备餐')]), {
+        trustedStoryDate: '2025-04-15', assistantCount: 9, generatedAt: 110,
+    });
+assert.deepEqual(phase5SameDay.globalEnvelope.payload.scopes.chat.payload.dynamics.active[0].stages.slice(-2).map(stage => stage.kind),
+    ['live-stage', 'live-stage'], '同日进展必须按 producer 原序追加 live-stage');
+
+const phase5NextDay = applyTodayTrendGenerationToV2(phase5SameDay, 'chat',
+    phase5GeneratedScope(phase5SameDay, '次日开始复盘'), phase5Producer('service', [phase5Stage('次日开始复盘')], [
+        { summaryText: '首日完成摆盘与备餐', keyStages: ['service'] },
+    ]), { trustedStoryDate: '2025-04-16', assistantCount: 10, generatedAt: 120 });
+const phase5NextPayload = phase5NextDay.globalEnvelope.payload.scopes.chat.payload;
+const phase5NextEvent = phase5NextPayload.dynamics.active[0];
+assert.deepEqual(phase5NextEvent.stages.slice(-2).map(stage => stage.kind), ['day-summary', 'live-stage'],
+    '日期前进必须先封闭旧日，再按原序追加新日 stage');
+assert.equal(phase5NextEvent.stages.at(-2).detailCount, 2, '封日摘要必须保留被折叠 live-stage 的 detail 数量');
+assert.equal(phase5NextPayload.stageDetailsByEvent.service.length, 2, '封日必须把原 live-stage 正文迁入 detail 容器');
+assert.equal(phase5NextPayload.removableEntityStateById['day:service:2025-04-15'].state, 'available',
+    '新 day-summary 必须与 available lifecycle 同事务写入');
+
+assert.throws(() => applyTodayTrendGenerationToV2(phase5Dated, 'chat',
+    phase5GeneratedScope(phase5Dated, '日期倒退进展'), phase5Producer('service', [phase5Stage('日期倒退进展')]), {
+        trustedStoryDate: '2025-04-14', assistantCount: 9,
+    }), error => error?.code === 'TT_DATE_REGRESSION', '可信日期倒退必须整单拒绝');
+assert.throws(() => applyTodayTrendGenerationToV2(phase5Dated, 'chat',
+    phase5GeneratedScope(phase5Dated, '缺少封日摘要'), phase5Producer('service', [phase5Stage('缺少封日摘要')]), {
+        trustedStoryDate: '2025-04-16', assistantCount: 9,
+    }), error => error?.code === 'TT_DATE_CONFLICT', '日期前进缺少 day summary 必须整单拒绝');
+assert.throws(() => applyTodayTrendGenerationToV2(phase5Dated, 'chat',
+    phase5GeneratedScope(phase5Dated, '未知引用摘要'), phase5Producer('service', [phase5Stage('未知引用摘要')], [
+        { summaryText: '无效摘要', keyStages: ['missing-event'] },
+    ]), { trustedStoryDate: '2025-04-16', assistantCount: 9 }),
+error => error?.code === 'TT_HISTORY_UNKNOWN_KEY_STAGE', 'day summary 未知 keyStage 必须整单拒绝');
+assert.throws(() => normalizeTodayTrendHistoryProducer(phase5Producer('service', [], [{
+    summaryText: '过长摘要'.repeat(61), keyStages: ['service'],
+}])), error => error?.code === 'TT_HISTORY_SCHEMA_INVALID', 'summaryText 超过 240 字必须整单拒绝');
+assert.throws(() => normalizeTodayTrendHistoryProducer(phase5Producer('service', [], [], [{
+    summaryText: '跨度越界', startDate: '2025-04-01', endDate: '2025-04-08', childSummaryRefs: [],
+}])), error => error?.code === 'TT_HISTORY_LIMIT_EXCEEDED', 'period summary 超过七日跨度必须整单拒绝');
+const phase5PeriodCandidates = normalizeTodayTrendHistoryProducer({ events: [
+    { eventId: 'service', stages: [], daySummaries: [{ summaryText: '服务摘要', keyStages: ['service'] }], periodSummaries: [{
+        summaryText: '后续由确定性规划器处理的时期候选', startDate: '2025-04-15', endDate: '2025-04-15',
+        childSummaryRefs: ['day:service:2025-04-15'],
+    }] },
+    { eventId: 'rumor', stages: [], daySummaries: [{ summaryText: '传闻摘要', keyStages: ['rumor'] }], periodSummaries: [] },
+    { eventId: 'incident', stages: [], daySummaries: [{ summaryText: '事件摘要', keyStages: ['incident'] }], periodSummaries: [] },
+] });
+assert.equal(phase5PeriodCandidates.events[0].periodSummaries[0].summaryText, '后续由确定性规划器处理的时期候选',
+    '阶段 5 必须保留同一 envelope 中通过限额校验的 period summary 候选，供阶段 6 planner 消费');
+const phase5TooManyDaySummaries = {
+    events: [
+        { eventId: 'service', stages: [], daySummaries: [{ summaryText: '摘要一', keyStages: ['service'] }], periodSummaries: [] },
+        { eventId: 'rumor', stages: [], daySummaries: [{ summaryText: '摘要二', keyStages: ['service'] }], periodSummaries: [] },
+    ],
+};
+assert.throws(() => applyTodayTrendGenerationToV2(migratedValidV2, 'chat', buildReadOnlyShadow(migratedValidV2).scopes.chat,
+    phase5TooManyDaySummaries, { trustedStoryDate: '2025-04-15', assistantCount: 8 }),
+error => error?.code === 'TT_HISTORY_LIMIT_EXCEEDED', 'day summaries 超过 events / 2 必须整单拒绝');
+
+const phase5RolledBack = rollbackTodayTrendV2Scope(phase5NextDay, 'chat', 9);
+const phase5RolledBackPayload = phase5RolledBack.globalEnvelope.payload.scopes.chat.payload;
+assert.equal(phase5RolledBackPayload.dynamics.active[0].stages.at(-1).text, '当日继续备餐',
+    'canonical rollback 必须恢复目标楼层的 Projection');
+assert.equal(phase5RolledBackPayload.generationSnapshots.at(-1).assistantCount, 9,
+    'canonical rollback 必须裁剪已消失楼层后的快照');
+
+let phase5SchedulerStore = structuredClone(migratedValidV2);
+let phase5CalendarStore = { version: 1, scopes: { chat: { baseDate: '2025-04-15' } } };
+let phase5GenerateCalls = 0;
+let phase5CommitOptions = null;
+const phase5SchedulerCommitter = {
+    supportsCanonical: true,
+    invalidateCommits: () => {},
+    commitStore: async (mutate, task, options) => {
+        phase5CommitOptions = options;
+        phase5SchedulerStore = await mutate(structuredClone(phase5SchedulerStore));
+        return buildReadOnlyShadow(phase5SchedulerStore);
+    },
+};
+const phase5Scheduler = createTodayTrendScheduler({
+    controller: { generate: async ({ scope, storyDate, summaryOnly }) => {
+        phase5GenerateCalls += 1;
+        assert.equal(storyDate, '2025-04-15', 'scheduler 必须把 calendar baseDate 作为可信 storyDate 快照');
+        assert.equal(summaryOnly, false, '常规生成不得误标 summary-only');
+        const generatedScope = structuredClone(scope);
+        generatedScope.dynamics.active[0].stages.push('调度器新增进展');
+        generatedScope.dynamics.active[0].latestStage = '调度器新增进展';
+        return { scope: generatedScope, history: phase5Producer('service', [phase5Stage('调度器新增进展')]) };
+    } },
+    committer: phase5SchedulerCommitter, getStore: async () => buildReadOnlyShadow(phase5SchedulerStore),
+    getStorageId: () => 'chat', getCalendarStore: () => phase5CalendarStore, getFloor: () => 8,
+});
+await phase5Scheduler.manual();
+assert.equal(phase5GenerateCalls, 1, 'history producer 必须与结构模块共用一次 AI 调用');
+assert.deepEqual(phase5CommitOptions, { canonical: true, scopeId: 'chat' },
+    '支持 canonical 的 scheduler 必须在统一 commitStore 写链显式声明 canonical scope');
+assert.equal(phase5SchedulerStore.globalEnvelope.payload.scopes.chat.payload.dynamics.active[0].stages.at(-1).kind,
+    'live-stage', 'scheduler canonical 事务必须持久化 history Projection');
+
+const phase5HistoryErrorController = createTodayTrendGenerationController({
+    getCtx: () => ({}), gather: async () => collectedContext,
+    callAI: async () => JSON.stringify({
+        world: null, reputation: null, factions: null, dynamics: null,
+        history: { events: [], debug: true },
+    }),
+});
+await assert.rejects(() => phase5HistoryErrorController.generate({
+    scope: valid.scopes.chat, preset: valid.presets.preset, storyDate: '2025-04-15', summaryOnly: true,
+}), error => error?.code === 'TT_HISTORY_SCHEMA_INVALID'
+    && !error.message.startsWith('今日风向生成失败：'),
+'generation 控制器必须原样透传 history reducer 结构化错误码');
+
+const phase5SummaryOnlyController = createTodayTrendGenerationController({
+    getCtx: () => ({}), gather: async () => collectedContext,
+    callAI: async () => JSON.stringify({
+        world: null, reputation: null, factions: null, dynamics: null, history: { events: [] },
+    }),
+});
+const phase5SummaryOnlyResult = await phase5SummaryOnlyController.generate({
+    scope: valid.scopes.chat, preset: valid.presets.preset, storyDate: '2025-04-15', summaryOnly: true,
+});
+assert.deepEqual(phase5SummaryOnlyResult.history, { events: [] },
+    'summary-only 必须接受不改写结构模块的合法 history 闭集');
+assert.deepEqual(phase5SummaryOnlyResult.scope, valid.scopes.chat,
+    'summary-only 合法响应不得改变当前结构 Projection');
+const phase5SummaryOnlyMutationController = createTodayTrendGenerationController({
+    getCtx: () => ({}), gather: async () => collectedContext,
+    callAI: async () => JSON.stringify({
+        world: { items: [{ id: 'world', name: '节目风向', summary: '禁止改写' }] },
+        reputation: null, factions: null, dynamics: null, history: { events: [] },
+    }),
+});
+await assert.rejects(() => phase5SummaryOnlyMutationController.generate({
+    scope: valid.scopes.chat, preset: valid.presets.preset, storyDate: '2025-04-15', summaryOnly: true,
+}), /summary-only 不得返回结构模块变更/,
+'summary-only 返回任一结构模块变更时必须 fail closed');
+
+let phase5DriftStore = structuredClone(migratedValidV2);
+let phase5DriftCalendar = { version: 1, scopes: { chat: { baseDate: '2025-04-15' } } };
+const phase5DriftBefore = JSON.stringify(phase5DriftStore);
+const phase5DriftScheduler = createTodayTrendScheduler({
+    controller: { generate: async ({ scope, storyDate }) => {
+        assert.equal(storyDate, '2025-04-15', '漂移检测必须以生成开始时的 calendar baseDate 为快照');
+        phase5DriftCalendar = { version: 1, scopes: { chat: { baseDate: '2025-04-16' } } };
+        const generatedScope = structuredClone(scope);
+        generatedScope.dynamics.active[0].stages.push('不应提交的漂移进展');
+        generatedScope.dynamics.active[0].latestStage = '不应提交的漂移进展';
+        return { scope: generatedScope, history: phase5Producer('service', [phase5Stage('不应提交的漂移进展')]) };
+    } },
+    committer: {
+        supportsCanonical: true, invalidateCommits: () => {},
+        commitStore: async (mutate, task, options) => {
+            phase5DriftStore = await mutate(structuredClone(phase5DriftStore));
+            return buildReadOnlyShadow(phase5DriftStore);
+        },
+    },
+    getStore: async () => buildReadOnlyShadow(phase5DriftStore), getStorageId: () => 'chat',
+    getCalendarStore: () => phase5DriftCalendar, getFloor: () => 8,
+});
+await assert.rejects(() => phase5DriftScheduler.manual(),
+    error => error?.name === 'AbortError' && error?.code === 'TT_DATE_DRIFT',
+    'calendar baseDate 在生成期间漂移必须阻断 canonical 提交');
+assert.equal(phase5DriftScheduler.state().phase, 'canceled', '日历漂移必须以 canceled 终止，不得伪报生成失败');
+assert.equal(JSON.stringify(phase5DriftStore), phase5DriftBefore, '日历漂移不得留下部分 canonical 写入');
+
+let phase5V1Store = structuredClone(valid);
+let phase5V1History = { events: [] };
+let phase5V1CommitOptions = null;
+const phase5V1Scheduler = createTodayTrendScheduler({
+    controller: { generate: async ({ scope, storyDate }) => {
+        assert.equal(storyDate, null, '缺日历资料的 v1 兼容路径不得回退设备日期');
+        const generatedScope = structuredClone(scope);
+        generatedScope.dynamics.active[0].stages.push('v1 兼容进展');
+        generatedScope.dynamics.active[0].latestStage = 'v1 兼容进展';
+        return { scope: generatedScope, history: phase5V1History };
+    } },
+    committer: {
+        supportsCanonical: false, invalidateCommits: () => {},
+        commitStore: async (mutate, task, options) => {
+            phase5V1CommitOptions = options;
+            phase5V1Store = await mutate(structuredClone(phase5V1Store));
+            return phase5V1Store;
+        },
+    },
+    getStore: async () => structuredClone(phase5V1Store), getStorageId: () => 'chat', getFloor: () => 8,
+});
+await phase5V1Scheduler.manual();
+assert.deepEqual(phase5V1CommitOptions, { canonical: false, scopeId: 'chat' },
+    '不支持 canonical 的提交器必须显式走原 v1 事务分支');
+assert.equal(phase5V1Store.scopes.chat.generationSnapshots.at(-1).assistantCount, 8,
+    'v1 兼容路径必须继续追加 generation snapshot');
+phase5V1History = phase5Producer('service', [phase5Stage('禁止降级的 history')]);
+const phase5V1BeforeRejectedHistory = JSON.stringify(phase5V1Store);
+await assert.rejects(() => phase5V1Scheduler.manual({ floor: 9 }),
+    error => error?.code === 'TT_V2_REQUIRED',
+    'v1 提交器收到非空 history 时必须 fail closed，禁止丢弃 canonical 数据');
+assert.equal(JSON.stringify(phase5V1Store), phase5V1BeforeRejectedHistory,
+    'TT_V2_REQUIRED 拒绝路径不得修改 v1 store');
 
 console.log('Today trend contracts verified.');

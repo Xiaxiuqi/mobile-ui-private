@@ -1,4 +1,7 @@
 import { normalizeTodayTrendStore } from './today-trend-model.js';
+import {
+    appendTodayTrendCanonicalSnapshot, applyTodayTrendHistoryProducer, rollbackTodayTrendCanonicalPayload,
+} from './today-trend-history-reducer.js';
 
 export const TODAY_TREND_V2_STORE_VERSION = 2;
 const GLOBAL_ENVELOPE_VERSION = 1;
@@ -649,6 +652,36 @@ export function mergeTodayTrendV1StoreIntoV2(currentValue, facadeValue) {
         preserveScopeMetadata(previousEnvelope.payload, nextEnvelope.payload, continuousEventIds);
     }
     return normalizeTodayTrendV2Store(migrated);
+}
+
+export function applyTodayTrendGenerationToV2(currentValue, storageId, generatedScope, history, {
+    trustedStoryDate = null, assistantCount = null, generatedAt = 0, snapshot = true,
+} = {}) {
+    const current = normalizeTodayTrendV2Store(currentValue);
+    const previousEnvelope = current.globalEnvelope.payload.scopes[storageId];
+    if (!previousEnvelope) failure('TT_V2_SCHEMA_INVALID', 'canonical scope 不存在');
+    const facade = buildReadOnlyShadow(current);
+    facade.scopes[storageId] = clone(generatedScope);
+    const merged = mergeTodayTrendV1StoreIntoV2(current, facade);
+    const envelope = merged.globalEnvelope.payload.scopes[storageId];
+    let payload = applyTodayTrendHistoryProducer(envelope.payload, history, {
+        trustedStoryDate, assistantCount, previousPayload: previousEnvelope.payload,
+    });
+    payload.fixedCoreBaselineByEvent = Object.fromEntries(payload.dynamics.archived
+        .map(event => [event.id, extractArchivedFixedCore(event)]));
+    if (snapshot) payload = appendTodayTrendCanonicalSnapshot(payload, assistantCount, generatedAt);
+    envelope.payload = payload;
+    return normalizeTodayTrendV2Store(merged);
+}
+
+export function rollbackTodayTrendV2Scope(currentValue, storageId, assistantCount) {
+    const current = normalizeTodayTrendV2Store(currentValue);
+    const envelope = current.globalEnvelope.payload.scopes[storageId];
+    if (!envelope) return current;
+    envelope.payload = rollbackTodayTrendCanonicalPayload(envelope.payload, assistantCount);
+    envelope.payload.fixedCoreBaselineByEvent = Object.fromEntries(envelope.payload.dynamics.archived
+        .map(event => [event.id, extractArchivedFixedCore(event)]));
+    return normalizeTodayTrendV2Store(current);
 }
 
 export function normalizeTodayTrendV2Candidate(value, currentValue = null) {

@@ -1,6 +1,13 @@
 import { appendTodayTrendGenerationSnapshot, rollbackTodayTrendScope } from './today-trend-model.js';
+import { calendarReferenceDate, calendarScopeFor, formatCalendarDate } from './calendar-model.js';
+import {
+    applyTodayTrendGenerationToV2, buildReadOnlyShadow, rollbackTodayTrendV2Scope,
+} from './today-trend-v2-model.js';
 
 const cancelled = () => Object.assign(new Error('今日风向生成已取消'), { name: 'AbortError' });
+const staleCalendar = () => Object.assign(new Error('日历日期在生成期间已变化，迟到结果已丢弃'), {
+    name: 'AbortError', code: 'TT_DATE_DRIFT',
+});
 const validCount = value => Number.isInteger(value) && value >= 0 ? value : 0;
 const OBSERVATION_LIMIT = 80;
 const HASH_SEEDS = Object.freeze([0x811c9dc5, 0x9e3779b9, 0x85ebca6b, 0xc2b2ae35]);
@@ -81,7 +88,8 @@ const sameSnapshot = (observation, snapshot) => observation?.key === snapshot.ke
 
 export function createTodayTrendScheduler({
     controller, committer, getStore, getStorageId, getChat = () => [], getFloor = () => null, random = Math.random, now = () => Date.now(),
-    wait = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds)), commitFeedbackMs = 240,
+    getCalendarStore = () => null, wait = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds)),
+    commitFeedbackMs = 240,
 } = {}) {
     if (!controller || typeof controller.generate !== 'function') throw new TypeError('今日风向调度器缺少生成控制器');
     if (!committer || typeof committer.commitStore !== 'function' || typeof committer.invalidateCommits !== 'function') throw new TypeError('今日风向调度器缺少事务提交器');
@@ -97,6 +105,12 @@ export function createTodayTrendScheduler({
     const listeners = new Set();
     let lastPublishedSignature = '';
     const readSnapshot = chat => createTurnSnapshot(chat, getFloor());
+    const trustedStoryDateFor = storageId => {
+        const store = typeof getCalendarStore === 'function' ? getCalendarStore() : null;
+        if (!store) return null;
+        const reference = calendarReferenceDate(calendarScopeFor(store, storageId), null);
+        return reference ? formatCalendarDate(reference) : null;
+    };
     const publicTask = task => task ? Object.freeze({
         kind: task.kind,
         storageId: task.storageId,
@@ -116,7 +130,7 @@ export function createTodayTrendScheduler({
         if (signature === lastPublishedSignature) return snapshot;
         lastPublishedSignature = signature;
         for (const listener of listeners) {
-            try { listener(snapshot); } catch {}
+            try { listener(snapshot); } catch { /* Listener failures must not break scheduler state publication. */ }
         }
         return snapshot;
     };
@@ -129,7 +143,7 @@ export function createTodayTrendScheduler({
     const subscribe = listener => {
         if (typeof listener !== 'function') throw new TypeError('今日风向状态订阅器必须是函数');
         listeners.add(listener);
-        try { listener(state()); } catch {}
+        try { listener(state()); } catch { /* Subscription initialization is isolated from listener failures. */ }
         let subscribed = true;
         return () => {
             if (!subscribed) return false;
@@ -202,7 +216,7 @@ export function createTodayTrendScheduler({
         if (chance >= 100) return true;
         return (typeof random === 'function' ? random() : Math.random()) * 100 < chance;
     };
-    const run = async ({ kind, storageId, floor, incidentProbability, target = null } = {}) => {
+    const run = async ({ kind, storageId, floor, incidentProbability, target = null, summaryOnly = false } = {}) => {
         const id = String(storageId || getStorageId() || '').trim();
         if (!id) throw new Error('今日风向生成缺少有效聊天');
         if (activeTask) {
@@ -217,7 +231,7 @@ export function createTodayTrendScheduler({
         const task = Object.freeze({
             id: ++sequence, kind, storageId: id, floor: currentFloor,
             pendingTurns: Number.isInteger(pendingTurns) && pendingTurns >= 0 ? pendingTurns : 0,
-            incidentProbability, target,
+            incidentProbability, target, summaryOnly: summaryOnly === true,
             abortController: new AbortController(),
         });
         terminalTask = null;
@@ -239,6 +253,7 @@ export function createTodayTrendScheduler({
                 removeObservation(id);
                 throw new Error('当前聊天尚未初始化今日风向');
             }
+            const trustedStoryDate = trustedStoryDateFor(id);
             const configuredProbability = scope.dynamicsSettings?.incident?.enabled
                 ? scope.dynamicsSettings.incident.probability : 0;
             const effectiveIncidentProbability = incidentProbability === undefined ? configuredProbability : incidentProbability;
@@ -246,29 +261,41 @@ export function createTodayTrendScheduler({
                 signal: task.abortController.signal, scope, preset, storageId: id,
                 characterId: scope.characterId, characterName: scope.characterName,
                 assistantCount: task.floor, allowIncident: rollIncident(effectiveIncidentProbability),
-                target: task.target, onPhase: next => { if (isActive(task)) setPhase(next, null); },
+                target: task.target, summaryOnly: task.summaryOnly, storyDate: trustedStoryDate,
+                onPhase: next => { if (isActive(task)) setPhase(next, null); },
             });
             if (!isActive(task)) throw cancelled();
             setPhase('committing', null);
             const commitStartedAt = now();
+            const useCanonical = committer.supportsCanonical === true;
             const committed = await committer.commitStore(store => {
-                const current = store.scopes[id];
+                const facade = useCanonical ? buildReadOnlyShadow(store) : store;
+                const current = facade.scopes[id];
                 if (!isActive(task)) return store;
-                const currentPreset = store.presets?.[current?.presetId];
+                const currentPreset = facade.presets?.[current?.presetId];
                 if (!current || current.presetId !== preset.id || currentPreset?.revision !== preset.revision) {
                     throw new Error('今日风向资料已切换，迟到结果已丢弃');
                 }
                 if (JSON.stringify(current) !== JSON.stringify(scope)) {
                     throw new Error('今日风向资料在生成期间已修改，迟到结果已丢弃');
                 }
+                if (trustedStoryDateFor(id) !== trustedStoryDate) throw staleCalendar();
                 const generatedAt = now();
                 const nextScope = { ...generated.scope,
                     operation: task.target ? current.operation : {
                         ...current.operation, lastSuccessfulAssistantCount: task.floor, lastSuccessfulRunAt: generatedAt,
                     }, injection: current.injection, generationSnapshots: current.generationSnapshots };
-                store.scopes[id] = task.target ? nextScope : appendTodayTrendGenerationSnapshot(nextScope, task.floor, generatedAt);
+                if (useCanonical) {
+                    return applyTodayTrendGenerationToV2(store, id, nextScope, generated.history ?? { events: [] }, {
+                        trustedStoryDate, assistantCount: task.floor, generatedAt, snapshot: !task.target,
+                    });
+                }
+                if (generated.history?.events?.length) {
+                    throw Object.assign(new Error('当前提交器不支持 canonical history 写入'), { code: 'TT_V2_REQUIRED' });
+                }
+                facade.scopes[id] = task.target ? nextScope : appendTodayTrendGenerationSnapshot(nextScope, task.floor, generatedAt);
                 return store;
-            }, { active: () => isActive(task) });
+            }, { active: () => isActive(task) }, { canonical: useCanonical, scopeId: id });
             if (!committed || !isActive(task)) throw cancelled();
             const remainingFeedback = Math.max(0, commitFeedbackMs - Math.max(0, now() - commitStartedAt));
             if (remainingFeedback > 0) await wait(remainingFeedback);
@@ -327,13 +354,16 @@ export function createTodayTrendScheduler({
         setPhase('committing', null);
         const commitStartedAt = now();
         try {
+            const useCanonical = committer.supportsCanonical === true;
             const committed = await committer.commitStore(store => {
-                const current = store.scopes[id];
+                const facade = useCanonical ? buildReadOnlyShadow(store) : store;
+                const current = facade.scopes[id];
                 if (!current || !isActive(task)) return store;
                 if (validCount(current.operation?.lastSuccessfulAssistantCount) <= snapshot.floor) return store;
-                store.scopes[id] = rollbackTodayTrendScope(current, snapshot.floor);
+                if (useCanonical) return rollbackTodayTrendV2Scope(store, id, snapshot.floor);
+                facade.scopes[id] = rollbackTodayTrendScope(current, snapshot.floor);
                 return store;
-            }, { active: () => isActive(task) });
+            }, { active: () => isActive(task) }, { canonical: useCanonical, scopeId: id });
             if (!committed || !isActive(task)) throw cancelled();
             const remainingFeedback = Math.max(0, commitFeedbackMs - Math.max(0, now() - commitStartedAt));
             if (remainingFeedback > 0) await wait(remainingFeedback);

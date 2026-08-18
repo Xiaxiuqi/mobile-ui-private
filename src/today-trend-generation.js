@@ -1,5 +1,6 @@
 import { generationErrorMessage, parseFirstJsonObject } from './ai.js';
 import { gatherTodayTrendContext } from './today-trend-context.js';
+import { normalizeTodayTrendHistoryProducer } from './today-trend-history-reducer.js';
 import { TODAY_TREND_VERSION, normalizeTodayTrendScope, normalizeTodayTrendStore } from './today-trend-model.js';
 import {
     buildTodayTrendGenerationEnvelope,
@@ -59,11 +60,12 @@ function parseInitialization(raw) {
     return value;
 }
 
-function parseGeneration(raw) {
+function parseGeneration(raw, { requireHistory = false } = {}) {
     const value = parseFirstJsonObject(raw, '今日风向生成未返回可解析JSON', candidate => own(candidate, 'world') && own(candidate, 'reputation') && own(candidate, 'factions') && own(candidate, 'dynamics'));
     if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('今日风向生成结果必须是对象');
     const keys = Object.keys(value);
-    if (keys.length !== 4 || !['world', 'reputation', 'factions', 'dynamics'].every(key => own(value, key))) throw new Error('今日风向生成结果包含额外字段');
+    const expected = requireHistory ? ['world', 'reputation', 'factions', 'dynamics', 'history'] : ['world', 'reputation', 'factions', 'dynamics'];
+    if (keys.length !== expected.length || !expected.every(key => own(value, key))) throw new Error('今日风向生成结果包含额外字段');
     if (value.world !== null && (typeof value.world !== 'object' || Array.isArray(value.world))) throw new Error('今日风向生成模块 world 无效');
     if (value.reputation !== null && (typeof value.reputation !== 'object' || Array.isArray(value.reputation))) throw new Error('今日风向生成模块 reputation 无效');
     if (value.factions !== null && !Array.isArray(value.factions)) throw new Error('今日风向生成模块 factions 无效');
@@ -72,6 +74,7 @@ function parseGeneration(raw) {
     if (value.reputation !== null) verifyReputation(value.reputation);
     if (value.factions !== null) verifyFactions(value.factions);
     if (value.dynamics !== null) verifyDynamics(value.dynamics);
+    if (requireHistory) value.history = normalizeTodayTrendHistoryProducer(value.history);
     return value;
 }
 
@@ -132,7 +135,7 @@ function assertTargetedGeneration(parsed, scope, target) {
     const module = ['world', 'reputation', 'faction', 'dynamics'].includes(target?.module) ? target.module : '';
     if (!module) return;
     const key = module === 'faction' ? 'factions' : module;
-    if (Object.entries(parsed).some(([name, value]) => name !== key && value !== null)) {
+    if (['world', 'reputation', 'factions', 'dynamics'].some(name => name !== key && parsed[name] !== null)) {
         throw new Error('单模块刷新返回了未请求模块的变更');
     }
     if (parsed[key] === null) throw new Error('单模块刷新未返回目标模块');
@@ -284,22 +287,31 @@ export function createTodayTrendGenerationController({
         try {
             if (!input.scope || !input.preset) throw new TypeError('今日风向生成缺少当前预设或角色资料');
             if (!validTarget(input.target)) throw new TypeError('今日风向生成目标无效');
+            if (input.summaryOnly === true && input.target) throw new TypeError('summary-only 不得与定向刷新同时使用');
+            const requireHistory = Object.hasOwn(input, 'storyDate');
             assertActive(input.signal);
             const context = await gather({ ...input, getCtx, worldBookNames: input.preset.source?.worldBookNames,
                 includeExistingChat: input.preset.source?.includeExistingChat, userRequirements: input.preset.source?.userRequirements });
             assertActive(input.signal);
             const prompts = buildGeneration({ context, preset: input.preset, scope: input.scope,
-                assistantCount: input.assistantCount, allowIncident: input.allowIncident === true, target: input.target });
+                assistantCount: input.assistantCount, allowIncident: input.allowIncident === true, target: input.target,
+                storyDate: input.storyDate ?? null, summaryOnly: input.summaryOnly === true });
             input.onPhase?.('generating');
             const raw = await callAI(prompts.systemPrompt, prompts.userPrompt, { isolated: true, signal: input.signal });
             assertActive(input.signal);
             input.onPhase?.('parsing');
-            const parsed = parseUpdate(raw);
+            const parsed = parseUpdate(raw, { requireHistory });
+            if (input.summaryOnly === true
+                && ['world', 'reputation', 'factions', 'dynamics'].some(key => parsed[key] !== null)) {
+                throw new Error('summary-only 不得返回结构模块变更');
+            }
             assertTargetedGeneration(parsed, input.scope, input.target);
             return { context, scope: normalizeUpdate(parsed, { scope: input.scope, preset: input.preset,
-                allowIncident: input.allowIncident === true, now }), raw };
+                allowIncident: input.allowIncident === true, now }), history: parsed.history ?? null, raw };
         } catch (error) {
             if (error?.name === 'AbortError') throw error;
+            if (typeof error?.code === 'string'
+                && (error.code.startsWith('TT_HISTORY_') || error.code.startsWith('TT_DATE_'))) throw error;
             throw new Error(`今日风向生成失败：${generationErrorMessage(error)}`, { cause: error });
         }
     };

@@ -297,7 +297,7 @@ export function createTodayTrendCommitter({
         return store;
     }, task, { ...options, scopeId: storageId });
 
-    const api = { commitStore, commitScope, invalidateCommits, recover };
+    const api = { commitStore, commitScope, invalidateCommits, recover, supportsCanonical: typeof loadCanonical === 'function' };
     if (journal) Object.assign(api, { ready: recover, isBlocked: () => journal.blocked() === true });
     return api;
 }

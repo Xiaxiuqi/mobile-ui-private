@@ -55,7 +55,7 @@ export function installTodayTrend(_state, deps = {}) {
         }
     };
     const scheduler = createTodayTrendScheduler({ controller, committer, getStore: loadStore, getStorageId,
-        getChat: () => getCtx()?.chat || [], getFloor: getHostFloor });
+        getChat: () => getCtx()?.chat || [], getFloor: getHostFloor, getCalendarStore: deps.getCalendarStore });
     const reloadStore = () => loadStore({ force: true });
     const nextPresetId = (store, storageId) => {
         let id = '';
