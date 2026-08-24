@@ -12439,8 +12439,8 @@ ${entry2.content}` : entry2.content;
       }
       let acquiredForOperation = false;
       const previousFlags = v2.authority ? { readV2: v2.authority.readV2, serveV2: v2.authority.serveV2 } : null;
-      if (options2.allowAuthorityAcquire && v2.authority && !v2.owned) {
-        if (v2.authority.ownerTabId) {
+      if (options2.allowAuthorityAcquire && !v2.owned) {
+        if (v2.authority?.ownerTabId) {
           const error = new Error("\u5176\u4ED6\u6807\u7B7E\u5F53\u524D\u6301\u6709 v2 \u5199\u5165\u6743\u5A01");
           error.code = "TT_AUTHORITY_BUSY";
           throw error;
@@ -12448,8 +12448,8 @@ ${entry2.content}` : entry2.content;
         await v2Authority.acquire({
           readV2: true,
           writeV2: true,
-          serveV2: v2.authority.serveV2,
-          initialStore: v2.authority.storeRevision === 0 ? normalized : void 0
+          serveV2: v2.authority?.serveV2 === true,
+          initialStore: !v2.authority || v2.authority.storeRevision === 0 ? normalized : void 0
         });
         acquiredForOperation = true;
       }

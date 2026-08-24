@@ -1154,24 +1154,25 @@ await assert.rejects(() => busyAuthorityBridge.save(valid, { allowAuthorityAcqui
 assert.deepEqual([busyAcquireCalls, busySaveCalls], [0, 0], 'active writer 存在时不得尝试 acquire 或 save');
 
 let temporaryAuthorityStore = structuredClone(migratedValidV2);
-let temporaryAuthority = { ownerTabId: null, readV2: true, writeV2: false, serveV2: false, storeRevision: 1 };
+let temporaryAuthority = null;
 let temporaryAcquireCalls = 0;
 let temporaryReleaseCalls = 0;
+let temporaryInitialStore = null;
 const temporaryAcquireStorage = createTodayTrendStorage({
     storage: memoryStorage(),
     v2Authority: {
-        load: async () => ({ active: true, store: buildReadOnlyShadow(temporaryAuthorityStore), v2Store: structuredClone(temporaryAuthorityStore), authority: structuredClone(temporaryAuthority) }),
-        status: async () => ({ available: true, owned: temporaryAuthority.ownerTabId === 'temporary-committer', authority: structuredClone(temporaryAuthority) }),
-        acquire: async () => {
+        status: async () => ({ available: true, owned: temporaryAuthority?.ownerTabId === 'temporary-committer', authority: structuredClone(temporaryAuthority) }),
+        acquire: async options => {
             temporaryAcquireCalls += 1;
-            temporaryAuthority = { ...temporaryAuthority, ownerTabId: 'temporary-committer', writeV2: true };
+            temporaryInitialStore = structuredClone(options.initialStore);
+            temporaryAuthority = { ownerTabId: 'temporary-committer', readV2: true, writeV2: true, serveV2: false, storeRevision: 1 };
         },
         save: async value => {
             temporaryAuthorityStore = structuredClone(value);
             temporaryAuthority = { ...temporaryAuthority, storeRevision: temporaryAuthority.storeRevision + 1 };
             return { store: buildReadOnlyShadow(value), storeRevision: temporaryAuthority.storeRevision };
         },
-        release: async flags => {
+        release: async (flags = {}) => {
             temporaryReleaseCalls += 1;
             temporaryAuthority = { ...temporaryAuthority, ownerTabId: null, writeV2: false, ...flags };
             return true;
@@ -1179,7 +1180,7 @@ const temporaryAcquireStorage = createTodayTrendStorage({
     },
 });
 const temporaryAcquireCommitter = createTodayTrendCommitter({
-    load: temporaryAcquireStorage.load, loadCanonical: temporaryAcquireStorage.loadCanonical,
+    loadCanonical: async () => structuredClone(migratedValidV2),
     save: temporaryAcquireStorage.save, storageStatus: temporaryAcquireStorage.status,
     refreshInjection: async () => ({ failedWrites: 0, failedKeys: [] }), journal: null,
 });
@@ -1191,6 +1192,8 @@ assert.equal(temporaryAcquireCommitted.presets.preset.name, '临时 authority �
 assert.deepEqual([temporaryAcquireCalls, temporaryReleaseCalls], [1, 1],
     '无 writer 的 canonical 创建提交必须临时获取并释放 authority');
 assert.equal(temporaryAuthority.ownerTabId, null, '创建提交完成后不得遗留 authority owner');
+assert.equal(temporaryInitialStore.version, 1,
+    'authority 记录尚不存在时必须以 facade 作为首次启用 v2 的 initialStore');
 
 const primarySaveError = new Error('primary save failed');
 primarySaveError.code = 'TT_PRIMARY_SAVE_FAILED';

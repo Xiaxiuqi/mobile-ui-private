@@ -86,15 +86,15 @@ export function createTodayTrendStorage({
         }
         let acquiredForOperation = false;
         const previousFlags = v2.authority ? { readV2: v2.authority.readV2, serveV2: v2.authority.serveV2 } : null;
-        if (options.allowAuthorityAcquire && v2.authority && !v2.owned) {
-            if (v2.authority.ownerTabId) {
+        if (options.allowAuthorityAcquire && !v2.owned) {
+            if (v2.authority?.ownerTabId) {
                 const error = new Error('其他标签当前持有 v2 写入权威');
                 error.code = 'TT_AUTHORITY_BUSY';
                 throw error;
             }
             await v2Authority.acquire({
-                readV2: true, writeV2: true, serveV2: v2.authority.serveV2,
-                initialStore: v2.authority.storeRevision === 0 ? normalized : undefined,
+                readV2: true, writeV2: true, serveV2: v2.authority?.serveV2 === true,
+                initialStore: !v2.authority || v2.authority.storeRevision === 0 ? normalized : undefined,
             });
             acquiredForOperation = true;
         }
