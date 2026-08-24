@@ -252,7 +252,7 @@ export function createTodayTrendCommitter({
                 });
                 if (sagaResult !== null) return sagaResult;
             }
-            const saved = await save(candidate, { scopeId, returnReceipt: true });
+            const saved = await save(candidate, { scopeId, allowAuthorityAcquire: true, returnReceipt: true });
             const committedCandidate = savedStore(saved, candidateFacade);
             runtime.store = committedCandidate;
             if (!refreshEnabled) return candidateFacade;
@@ -261,7 +261,7 @@ export function createTodayTrendCommitter({
             catch (error) { refreshError = error; }
             if (!refreshError && expectedGeneration === generation && active(task)) return candidateFacade;
             try {
-                const rollbackOptions = { scopeId, returnReceipt: true };
+                const rollbackOptions = { scopeId, allowAuthorityAcquire: true, returnReceipt: true };
                 if (Number.isSafeInteger(saved?.storeRevision)) rollbackOptions.expectedStoreRevision = saved.storeRevision;
                 const rolledBack = await save(previous, rollbackOptions);
                 const restored = savedStore(rolledBack, previousFacade);

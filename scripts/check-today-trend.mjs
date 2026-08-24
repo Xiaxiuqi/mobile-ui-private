@@ -606,6 +606,11 @@ for (const view of [{ name: 'settings' }, { name: 'faction', mode: 'editor', edi
     assert.doesNotMatch(renderTodayTrendApp({ scope: valid.scopes.chat, presets: Object.values(valid.presets), view }), /data-today-trend-floor=/, '设置、编辑和规则页不得展示楼层仪表');
 }
 assert.match(appHtml, /today-trend-open-settings/, '主页面必须提供 APP 总设置入口');
+const firstUseAppHtml = renderTodayTrendApp({ worldBooks: ['厨房设定'] });
+assert.match(firstUseAppHtml, /data-action="today-trend-open-settings"[^>]*aria-label="APP 总设置"/,
+    '首次创建页必须提供 APP 总设置入口');
+assert.match(renderTodayTrendApp({ worldBooks: ['厨房设定'], view: { name: 'settings' } }), /请先创建或绑定世界预设。/,
+    '首次创建页的 APP 总设置入口必须能打开无 scope 设置页');
 assert.match(appHtml, /today-trend-generate-all[^>]*aria-busy="false"[^>]*aria-label="手动更新所有今日风向"/, '主页面必须提供手动更新全部今日风向的星光按钮');
 assert.match(appHtml, /today-trend-toggle-operation[\s\S]*aria-pressed="true"/, '主页面必须提供当前运行状态的直接控制');
 assert.ok(appHtml.indexOf('today-trend-generate-all') < appHtml.indexOf('today-trend-toggle-operation'), '顶栏操作顺序必须为生成、开启自动');
@@ -1147,6 +1152,45 @@ const busyAuthorityBridge = createTodayTrendStorage({
 await assert.rejects(() => busyAuthorityBridge.save(valid, { allowAuthorityAcquire: true }), error => error?.code === 'TT_AUTHORITY_BUSY',
     '备份临时 authority 不得抢夺其他标签的 active writer');
 assert.deepEqual([busyAcquireCalls, busySaveCalls], [0, 0], 'active writer 存在时不得尝试 acquire 或 save');
+
+let temporaryAuthorityStore = structuredClone(migratedValidV2);
+let temporaryAuthority = { ownerTabId: null, readV2: true, writeV2: false, serveV2: false, storeRevision: 1 };
+let temporaryAcquireCalls = 0;
+let temporaryReleaseCalls = 0;
+const temporaryAcquireStorage = createTodayTrendStorage({
+    storage: memoryStorage(),
+    v2Authority: {
+        load: async () => ({ active: true, store: buildReadOnlyShadow(temporaryAuthorityStore), v2Store: structuredClone(temporaryAuthorityStore), authority: structuredClone(temporaryAuthority) }),
+        status: async () => ({ available: true, owned: temporaryAuthority.ownerTabId === 'temporary-committer', authority: structuredClone(temporaryAuthority) }),
+        acquire: async () => {
+            temporaryAcquireCalls += 1;
+            temporaryAuthority = { ...temporaryAuthority, ownerTabId: 'temporary-committer', writeV2: true };
+        },
+        save: async value => {
+            temporaryAuthorityStore = structuredClone(value);
+            temporaryAuthority = { ...temporaryAuthority, storeRevision: temporaryAuthority.storeRevision + 1 };
+            return { store: buildReadOnlyShadow(value), storeRevision: temporaryAuthority.storeRevision };
+        },
+        release: async flags => {
+            temporaryReleaseCalls += 1;
+            temporaryAuthority = { ...temporaryAuthority, ownerTabId: null, writeV2: false, ...flags };
+            return true;
+        },
+    },
+});
+const temporaryAcquireCommitter = createTodayTrendCommitter({
+    load: temporaryAcquireStorage.load, loadCanonical: temporaryAcquireStorage.loadCanonical,
+    save: temporaryAcquireStorage.save, storageStatus: temporaryAcquireStorage.status,
+    refreshInjection: async () => ({ failedWrites: 0, failedKeys: [] }), journal: null,
+});
+const temporaryAcquireCommitted = await temporaryAcquireCommitter.commitStore(store => ({
+    ...store, presets: { ...store.presets, preset: { ...store.presets.preset, name: '临时 authority 创建提交' } },
+}));
+assert.equal(temporaryAcquireCommitted.presets.preset.name, '临时 authority 创建提交',
+    '无 writer 的 canonical 创建提交必须成功返回 facade');
+assert.deepEqual([temporaryAcquireCalls, temporaryReleaseCalls], [1, 1],
+    '无 writer 的 canonical 创建提交必须临时获取并释放 authority');
+assert.equal(temporaryAuthority.ownerTabId, null, '创建提交完成后不得遗留 authority owner');
 
 const primarySaveError = new Error('primary save failed');
 primarySaveError.code = 'TT_PRIMARY_SAVE_FAILED';

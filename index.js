@@ -25214,7 +25214,7 @@ ${error.message}`);
           });
           if (sagaResult !== null) return sagaResult;
         }
-        const saved = await save(candidate, { scopeId, returnReceipt: true });
+        const saved = await save(candidate, { scopeId, allowAuthorityAcquire: true, returnReceipt: true });
         const committedCandidate = savedStore(saved, candidateFacade);
         runtime.store = committedCandidate;
         if (!refreshEnabled) return candidateFacade;
@@ -25226,7 +25226,7 @@ ${error.message}`);
         }
         if (!refreshError && expectedGeneration === generation && active(task)) return candidateFacade;
         try {
-          const rollbackOptions = { scopeId, returnReceipt: true };
+          const rollbackOptions = { scopeId, allowAuthorityAcquire: true, returnReceipt: true };
           if (Number.isSafeInteger(saved?.storeRevision)) rollbackOptions.expectedStoreRevision = saved.storeRevision;
           const rolledBack = await save(previous, rollbackOptions);
           const restored = savedStore(rolledBack, previousFacade);
@@ -27463,7 +27463,7 @@ ${targetInstruction}`
       targeted
     });
     const preset = presets.find((item) => item.id === scope?.presetId) || null;
-    const content = !scope || initializationOpen ? renderFirstUse({ presets, worldBooks, error, initializing, draft: initializationDraft, reinitializing, initializationMode }) : view.editingRule ? renderRuleEditorPage(preset, view.editingRule, view.ruleDraft) : view.name === "settings" ? `<main class="pm-today-trend-content">${renderTodayTrendSettingsView({
+    const content = view.name === "settings" ? `<main class="pm-today-trend-content">${renderTodayTrendSettingsView({
       scope,
       presets,
       generationBusy: busy,
@@ -27472,9 +27472,10 @@ ${targetInstruction}`
       retentionSaving,
       retentionDraft,
       errorHtml: errorFeedback(error, diagnosticCopyStatus)
-    })}</main>` : `<main class="pm-today-trend-content${view.mode === "content" ? ` is-${view.name}${scope.injection?.minimalUi ? " is-minimal-ui" : ""}` : ""}">${moduleView(view, { scope, preset, mode: view.mode, dynamicsTab: view.dynamicsTab, editingWorldItemId: view.editingWorldItemId, editingCircleId: view.editingCircleId, editingFactionId: view.editingFactionId, editingEventId: view.editingEventId, editingRule: view.editingRule, ruleDraft: view.ruleDraft, menuOpenId: view.menuOpenId, generationAvailable: !busy, generationBusy: busy, floorStatus, detailById, loadingDetailIds })}</main>`;
+    })}</main>` : !scope || initializationOpen ? renderFirstUse({ presets, worldBooks, error, initializing, draft: initializationDraft, reinitializing, initializationMode }) : view.editingRule ? renderRuleEditorPage(preset, view.editingRule, view.ruleDraft) : `<main class="pm-today-trend-content${view.mode === "content" ? ` is-${view.name}${scope.injection?.minimalUi ? " is-minimal-ui" : ""}` : ""}">${moduleView(view, { scope, preset, mode: view.mode, dynamicsTab: view.dynamicsTab, editingWorldItemId: view.editingWorldItemId, editingCircleId: view.editingCircleId, editingFactionId: view.editingFactionId, editingEventId: view.editingEventId, editingRule: view.editingRule, ruleDraft: view.ruleDraft, menuOpenId: view.menuOpenId, generationAvailable: !busy, generationBusy: busy, floorStatus, detailById, loadingDetailIds })}</main>`;
     const navigation = scope && !initializationOpen && !view.editingRule ? `<nav class="pm-today-trend-tabs${view.name === "world" ? " is-world" : ""}" aria-label="\u4ECA\u65E5\u98CE\u5411\u6A21\u5757">${[["world", "\u4E16\u754C\u6001\u52BF", TODAY_TREND_WORLD_ICON_SVG], ["reputation", "\u4E2A\u4EBA\u98CE\u8BC4", TODAY_TREND_REPUTATION_ICON_SVG], ["faction", "\u52BF\u529B\u56FE\u8C31", TODAY_TREND_FACTION_ICON_SVG], ["dynamics", "\u4E8B\u4EF6\u8FFD\u8E2A", TODAY_TREND_DYNAMICS_ICON_SVG]].map(([name, label, icon3]) => `<button type="button" data-action="today-trend-open-${name === "faction" ? "factions" : name}" aria-label="${label}" aria-pressed="${view.name === name}">${icon3}</button>`).join("")}<button type="button" data-action="today-trend-open-settings" aria-label="APP \u603B\u8BBE\u7F6E" aria-pressed="${view.name === "settings"}">${MORE_ICON_SVG}</button></nav>` : "";
-    return `<section id="pm-today-trend-app" class="pm-today-trend-shell" aria-labelledby="pm-today-trend-title"><header class="pm-today-trend-header"><button type="button" class="pm-today-trend-home" data-today-trend-ui-action="home" aria-label="\u8FD4\u56DE\u684C\u9762" title="\u8FD4\u56DE\u684C\u9762">${HOME_ICON_SVG}</button><h2 id="pm-today-trend-title">\u4ECA\u65E5\u98CE\u5411</h2><span class="pm-today-trend-header-actions"><button type="button" class="pm-today-trend-header-control" data-action="today-trend-generate-all" ${!scope || busy ? "disabled" : ""} aria-busy="${busy}" aria-label="\u624B\u52A8\u66F4\u65B0\u6240\u6709\u4ECA\u65E5\u98CE\u5411" title="\u624B\u52A8\u66F4\u65B0\u6240\u6709\u4ECA\u65E5\u98CE\u5411">${SPARKLES_ICON_SVG}</button><button type="button" class="pm-today-trend-header-control" data-action="today-trend-toggle-operation" ${!scope || busy ? "disabled" : ""} aria-pressed="${scope?.operation?.enabled === true}" aria-label="${scope?.operation?.enabled ? "\u6682\u505C\u8FD0\u4F5C" : "\u5F00\u542F\u81EA\u52A8"}" title="${scope?.operation?.enabled ? "\u6682\u505C\u8FD0\u4F5C" : "\u5F00\u542F\u81EA\u52A8"}">${scope?.operation?.enabled ? PAUSE_ICON_SVG : PLAY_ICON_SVG}</button></span></header>${content}${navigation}</section>`;
+    const firstUseSettings = !scope ? `<button type="button" class="pm-today-trend-header-control" data-action="today-trend-open-settings" aria-label="APP \u603B\u8BBE\u7F6E" title="APP \u603B\u8BBE\u7F6E">${MORE_ICON_SVG}</button>` : "";
+    return `<section id="pm-today-trend-app" class="pm-today-trend-shell" aria-labelledby="pm-today-trend-title"><header class="pm-today-trend-header"><button type="button" class="pm-today-trend-home" data-today-trend-ui-action="home" aria-label="\u8FD4\u56DE\u684C\u9762" title="\u8FD4\u56DE\u684C\u9762">${HOME_ICON_SVG}</button><h2 id="pm-today-trend-title">\u4ECA\u65E5\u98CE\u5411</h2><span class="pm-today-trend-header-actions"><button type="button" class="pm-today-trend-header-control" data-action="today-trend-generate-all" ${!scope || busy ? "disabled" : ""} aria-busy="${busy}" aria-label="\u624B\u52A8\u66F4\u65B0\u6240\u6709\u4ECA\u65E5\u98CE\u5411" title="\u624B\u52A8\u66F4\u65B0\u6240\u6709\u4ECA\u65E5\u98CE\u5411">${SPARKLES_ICON_SVG}</button><button type="button" class="pm-today-trend-header-control" data-action="today-trend-toggle-operation" ${!scope || busy ? "disabled" : ""} aria-pressed="${scope?.operation?.enabled === true}" aria-label="${scope?.operation?.enabled ? "\u6682\u505C\u8FD0\u4F5C" : "\u5F00\u542F\u81EA\u52A8"}" title="${scope?.operation?.enabled ? "\u6682\u505C\u8FD0\u4F5C" : "\u5F00\u542F\u81EA\u52A8"}">${scope?.operation?.enabled ? PAUSE_ICON_SVG : PLAY_ICON_SVG}</button>${firstUseSettings}</span></header>${content}${navigation}</section>`;
   }
 
   // src/today-trend-phone-controller.js
