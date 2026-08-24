@@ -4,13 +4,15 @@ import {
 } from './constants.js';
 import { normalizeTodayTrendStore } from './today-trend-model.js';
 import {
-    buildReadOnlyShadow, diffReadOnlyShadow, migrateTodayTrendStoreToV2, normalizeTodayTrendV2Candidate,
-    normalizeTodayTrendV2Store, rebaseTodayTrendV2Store, validateTodayTrendV2Transition,
+    buildReadOnlyShadow, diffReadOnlyShadow, migrateLegacyTodayTrendV2Store, migrateTodayTrendStoreToV2,
+    normalizeTodayTrendV2Candidate, normalizeTodayTrendV2Store, rebaseTodayTrendV2Store,
+    validateTodayTrendV2Transition,
 } from './today-trend-v2-model.js';
 import { pmIDBCompareAndSwap, pmIDBReadEntry } from './pm-idb.js';
 
 const AUTHORITY_VERSION = 1;
-const ENVELOPE_VERSION = 2;
+const LEGACY_V2_ENVELOPE_VERSION = 2;
+const ENVELOPE_VERSION = 3;
 const MIGRATION_BACKUP_VERSION = 1;
 const CHANNEL_NAME = 'pm-today-trend-v2-authority';
 const clone = value => structuredClone(value);
@@ -38,6 +40,12 @@ function nonNegativeInteger(value, field) {
     return value;
 }
 
+function exactFields(value, keys, field) {
+    if (Object.keys(value).length !== keys.length || keys.some(key => !Object.hasOwn(value, key))) {
+        throw failure('TT_V2_SCHEMA_INVALID', `${field} 字段集合无效`);
+    }
+}
+
 function normalizeScopeRevisions(value) {
     if (!value || typeof value !== 'object' || Array.isArray(value)) throw failure('TT_V2_SCHEMA_INVALID', 'scopeRevisionByStorageId 必须是对象');
     const result = Object.create(null);
@@ -53,6 +61,10 @@ function normalizeScopeRevisions(value) {
 export function normalizeTodayTrendV2Authority(value) {
     if (!value || typeof value !== 'object' || Array.isArray(value)) throw failure('TT_V2_SCHEMA_INVALID', 'v2 authority 必须是对象');
     if (value.schemaVersion > AUTHORITY_VERSION) throw failure('TT_V2_FUTURE_VERSION', `v2 authority 版本 ${value.schemaVersion} 高于当前支持版本 ${AUTHORITY_VERSION}`);
+    exactFields(value, [
+        'schemaVersion', 'epoch', 'authorityRevision', 'storeRevision', 'scopeRevisionByStorageId',
+        'ownerTabId', 'readV2', 'writeV2', 'serveV2',
+    ], 'v2 authority');
     if (value.schemaVersion !== AUTHORITY_VERSION) throw failure('TT_V2_SCHEMA_INVALID', 'v2 authority 版本无效');
     if (value.ownerTabId !== null && (typeof value.ownerTabId !== 'string' || !value.ownerTabId)) throw failure('TT_V2_SCHEMA_INVALID', 'ownerTabId 必须是非空字符串或 null');
     for (const key of ['readV2', 'writeV2', 'serveV2']) if (typeof value[key] !== 'boolean') throw failure('TT_V2_SCHEMA_INVALID', `${key} 必须是布尔值`);
@@ -80,7 +92,12 @@ export function createTodayTrendV2Envelope(payload, revision, scopeRevisionBySto
 export function normalizeTodayTrendV2Envelope(value) {
     if (!value || typeof value !== 'object' || Array.isArray(value)) throw failure('TT_V2_SCHEMA_INVALID', 'v2 store envelope 必须是对象');
     if (value.schemaVersion > ENVELOPE_VERSION) throw failure('TT_V2_FUTURE_VERSION', `v2 store 版本 ${value.schemaVersion} 高于当前支持版本 ${ENVELOPE_VERSION}`);
+    exactFields(value, ['schemaVersion', 'revision', 'payload'], 'v2 store envelope');
     if (value.schemaVersion === 1) return createTodayTrendV2Envelope(normalizeTodayTrendStore(value.payload), value.revision);
+    if (value.schemaVersion === LEGACY_V2_ENVELOPE_VERSION) {
+        const revision = nonNegativeInteger(value.revision, 'revision');
+        return { schemaVersion: ENVELOPE_VERSION, revision, payload: migrateLegacyTodayTrendV2Store(value.payload) };
+    }
     if (value.schemaVersion !== ENVELOPE_VERSION) throw failure('TT_V2_SCHEMA_INVALID', 'v2 store 版本无效');
     return createTodayTrendV2Envelope(value.payload, value.revision);
 }
@@ -95,7 +112,9 @@ export function normalizeTodayTrendMigrationBackup(value) {
     const sourcePayload = normalizeTodayTrendStore(value.sourcePayload);
     const storeRevision = nonNegativeInteger(value.storeRevision, 'migration backup storeRevision');
     if (storeRevision < 1) throw failure('TT_V2_SCHEMA_INVALID', 'migration backup storeRevision 必须大于 0');
-    const migratedStore = normalizeTodayTrendV2Store(value.migratedStore);
+    const migratedStore = value.migratedStore?.globalEnvelope?.schemaVersion === 1
+        ? migrateLegacyTodayTrendV2Store(value.migratedStore)
+        : normalizeTodayTrendV2Store(value.migratedStore);
     const comparison = diffReadOnlyShadow(sourcePayload, migratedStore);
     if (!comparison.equal) throw failure('TT_V2_SCHEMA_INVALID', 'migration backup 与 migratedStore 用户可见语义不一致');
     return {

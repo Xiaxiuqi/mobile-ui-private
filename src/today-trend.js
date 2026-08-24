@@ -3,6 +3,10 @@ import { createTodayTrendGenerationController } from './today-trend-generation.j
 import { createTodayTrendScheduler } from './today-trend-scheduler.js';
 import { loadTodayTrendStore, saveTodayTrendStore } from './today-trend-storage.js';
 import { createEmptyTodayTrendScope } from './today-trend-model.js';
+import {
+    resolveTodayTrendV2DetailForTarget, resolveTodayTrendV2RetentionSettingsState, resolveTodayTrendV2UiScope,
+    saveTodayTrendRetentionSettingsToV2, serializeTodayTrendV2ScopeForGeneration,
+} from './today-trend-v2-model.js';
 
 export function installTodayTrend(_state, deps = {}) {
     const { runtime, callAI, getCtx, getLastMessageId, getStorageId } = deps;
@@ -55,7 +59,10 @@ export function installTodayTrend(_state, deps = {}) {
         }
     };
     const scheduler = createTodayTrendScheduler({ controller, committer, getStore: loadStore, getStorageId,
-        getChat: () => getCtx()?.chat || [], getFloor: getHostFloor, getCalendarStore: deps.getCalendarStore });
+        getChat: () => getCtx()?.chat || [], getFloor: getHostFloor, getCalendarStore: deps.getCalendarStore,
+        getPromptScope: typeof committer.loadCanonical === 'function' ? async storageId => serializeTodayTrendV2ScopeForGeneration(
+            await committer.loadCanonical(), storageId,
+        ) : null });
     const reloadStore = () => loadStore({ force: true });
     const nextPresetId = (store, storageId) => {
         let id = '';
@@ -207,6 +214,33 @@ export function installTodayTrend(_state, deps = {}) {
         if (operation?.enabled) scheduler.arm(identity.storageId); else scheduler.cancel('today-trend-stopped');
         return committed;
     };
+    const retentionSettingsState = async storageId => {
+        if (typeof committer.loadCanonical !== 'function') return null;
+        return resolveTodayTrendV2RetentionSettingsState(await committer.loadCanonical(), storageId);
+    };
+    const saveRetentionSettings = async ({
+        storageId, archivedDetailLatestEventCount, archivedDetailRetentionFloors,
+        expectedScopeRevision, expectedSettingsRevision,
+    } = {}) => {
+        const identity = currentIdentity(String(storageId || ''));
+        if (typeof committer.loadCanonical !== 'function') {
+            throw Object.assign(new Error('归档保留设置需要 canonical 存储能力'), { code: 'TT_V2_CANONICAL_REQUIRED' });
+        }
+        const committed = await committer.commitStore(current => saveTodayTrendRetentionSettingsToV2(
+            current,
+            identity.storageId,
+            { archivedDetailLatestEventCount, archivedDetailRetentionFloors },
+            { expectedScopeRevision, expectedSettingsRevision },
+        ), null, { canonical: true, scopeId: identity.storageId });
+        if (!committed) throw Object.assign(new Error('归档保留设置保存已取消'), { name: 'AbortError' });
+        const canonical = await committer.loadCanonical();
+        const scope = resolveTodayTrendV2UiScope(canonical, identity.storageId);
+        const revisions = resolveTodayTrendV2RetentionSettingsState(canonical, identity.storageId);
+        if (!scope || !revisions) {
+            throw Object.assign(new Error('归档保留设置保存后无法重新读取 committed scope'), { code: 'TT_V2_SCHEMA_INVALID' });
+        }
+        return { scope, revisions };
+    };
     const renamePreset = async (presetId, name) => {
         const selected = String(presetId || '').trim(), nextName = String(name || '').trim();
         if (!nextName) throw new Error('世界预设名称不能为空');
@@ -234,7 +268,18 @@ export function installTodayTrend(_state, deps = {}) {
     };
     Object.assign(deps, {
         getTodayTrendStore: loadStore,
+        getTodayTrendUiScope: async storageId => {
+            if (typeof committer.loadCanonical !== 'function') return (await loadStore()).scopes?.[storageId] || null;
+            return resolveTodayTrendV2UiScope(await committer.loadCanonical(), storageId);
+        },
+        getTodayTrendRetentionSettingsState: retentionSettingsState,
         reloadTodayTrendStore: reloadStore,
+        resolveTodayTrendDetail: async (eventId, detailId, targetAssistantCount = getHostFloor()) => {
+            if (typeof committer.loadCanonical !== 'function' || targetAssistantCount === null) return null;
+            return resolveTodayTrendV2DetailForTarget(
+                await committer.loadCanonical(), getStorageId(), eventId, detailId, targetAssistantCount,
+            );
+        },
         observeTodayTrendTurn: (chat, options) => scheduler.observe(chat, options),
         armTodayTrendGeneration: (storageId, chat) => scheduler.arm(storageId, chat),
         cancelTodayTrendGeneration: (reason, reset) => scheduler.cancel(reason, reset),
@@ -251,6 +296,7 @@ export function installTodayTrend(_state, deps = {}) {
         saveTodayTrendRule: saveRule,
         bindTodayTrendPreset: bindPreset,
         saveTodayTrendSettings: saveSettings,
+        saveTodayTrendRetentionSettings: saveRetentionSettings,
         renameTodayTrendPreset: renamePreset,
         deleteTodayTrendPreset: deletePreset,
         commitTodayTrendScope: (storageId, mutate, task, options) => committer.commitScope(storageId, mutate, task, options),

@@ -1,16 +1,18 @@
-import { normalizeTodayTrendStore } from './today-trend-model.js';
+import { normalizeTodayTrendStore, TODAY_TREND_LIMITS } from './today-trend-model.js';
 import {
     appendTodayTrendCanonicalSnapshot, applyTodayTrendHistoryProducer, rollbackTodayTrendCanonicalPayload,
 } from './today-trend-history-reducer.js';
 
 export const TODAY_TREND_V2_STORE_VERSION = 2;
-const GLOBAL_ENVELOPE_VERSION = 1;
-const SCOPE_ENVELOPE_VERSION = 1;
+const LEGACY_GLOBAL_ENVELOPE_VERSION = 1;
+const LEGACY_SCOPE_ENVELOPE_VERSION = 1;
+const GLOBAL_ENVELOPE_VERSION = 2;
+const SCOPE_ENVELOPE_VERSION = 2;
 const PROJECTION_KINDS = new Set([
     'live-stage', 'undated-stage', 'legacy-stage', 'day-summary', 'period-summary', 'span-stage',
 ]);
 const REMOVABLE_PREFIXES = { detail: 'detail', 'day-summary': 'day', manifest: 'manifest' };
-const REMOVAL_REASONS = new Set(['detail-pool-capacity', 'archived-retention']);
+const REMOVAL_REASONS = new Set(['detail-pool-capacity', 'period-compaction', 'archived-retention']);
 const LEGACY_STAGE_KIND = 'legacy-stage';
 const clone = value => structuredClone(value);
 const plainRecord = value => value && typeof value === 'object' && !Array.isArray(value);
@@ -52,6 +54,18 @@ function nonEmptyString(value, field) {
 
 function nullableString(value, field) {
     if (value !== null && typeof value !== 'string') invalid(`${field} 必须是字符串或 null`);
+}
+
+const timePattern = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
+function nullableTime(value, field) {
+    if (value !== null && (typeof value !== 'string' || !timePattern.test(value))) invalid(`${field} 必须是 HH:mm 或 null`);
+}
+const datePattern = /^\d{4}-\d{2}-\d{2}$/;
+function date(value, field) {
+    const parsed = typeof value === 'string' && datePattern.test(value) ? new Date(`${value}T12:00:00Z`) : null;
+    if (!parsed || !Number.isFinite(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== value) {
+        invalid(`${field} 必须是有效 YYYY-MM-DD 日期`);
+    }
 }
 
 function nullableInteger(value, field) {
@@ -106,8 +120,8 @@ function normalizeLiveStage(value, eventId) {
     normalizeSourceRange(value, 'live-stage');
     normalizeFloorRange(value, 'live-stage');
     if (!String(value.id).startsWith(`live:${eventId}:`) || value.kind !== 'live-stage') invalid('live-stage ID 或 kind 无效');
-    nonEmptyString(value.storyDate, 'live-stage.storyDate');
-    nullableString(value.time, 'live-stage.time');
+    date(value.storyDate, 'live-stage.storyDate');
+    nullableTime(value.time, 'live-stage.time');
     nullableString(value.timeLabel, 'live-stage.timeLabel');
     nonEmptyString(value.text, 'live-stage.text');
     return clone(value);
@@ -121,7 +135,7 @@ function normalizeUndatedStage(value, eventId) {
     if (value.id !== `undated:${eventId}:${value.undatedSequence}` || value.kind !== 'undated-stage' || value.storyDate !== null) {
         invalid('undated-stage ID、kind 或 storyDate 无效');
     }
-    nullableString(value.time, 'undated-stage.time');
+    nullableTime(value.time, 'undated-stage.time');
     nullableString(value.timeLabel, 'undated-stage.timeLabel');
     nonEmptyString(value.text, 'undated-stage.text');
     return clone(value);
@@ -129,9 +143,13 @@ function normalizeUndatedStage(value, eventId) {
 
 function normalizeTimeRange(value, field) {
     exact(value, ['start', 'end', 'label'], field);
-    nullableString(value.start, `${field}.start`);
-    nullableString(value.end, `${field}.end`);
+    nullableTime(value.start, `${field}.start`);
+    nullableTime(value.end, `${field}.end`);
     nullableString(value.label, `${field}.label`);
+    if ((value.start === null) !== (value.end === null) || (value.start !== null && value.start > value.end)) {
+        invalid(`${field} 钟点区间无效`);
+    }
+    if (value.start !== null && value.label !== null) invalid(`${field} 可靠钟点与自然语言标签不得并存`);
 }
 
 function normalizeDaySummary(value, eventId) {
@@ -139,7 +157,7 @@ function normalizeDaySummary(value, eventId) {
     normalizeSourceRange(value, 'day-summary');
     normalizeFloorRange(value, 'day-summary');
     if (value.id !== `day:${eventId}:${value.storyDate}` || value.kind !== 'day-summary' || value.status !== 'closed') invalid('day-summary ID、kind 或 status 无效');
-    nonEmptyString(value.storyDate, 'day-summary.storyDate');
+    date(value.storyDate, 'day-summary.storyDate');
     normalizeTimeRange(value.timeRange, 'day-summary.timeRange');
     nonEmptyString(value.summary, 'day-summary.summary');
     stringArray(value.keyStages, 'day-summary.keyStages');
@@ -153,10 +171,13 @@ function normalizePeriodSummary(value, eventId) {
     normalizeSourceRange(value, 'period-summary');
     safeInteger(value.periodSequence, 'period-summary.periodSequence', 1);
     if (value.id !== `period:${eventId}:${value.periodSequence}` || value.kind !== 'period-summary') invalid('period-summary ID 或 kind 无效');
-    nonEmptyString(value.startDate, 'period-summary.startDate');
-    nullableString(value.startTime, 'period-summary.startTime');
-    nonEmptyString(value.endDate, 'period-summary.endDate');
-    nullableString(value.endTime, 'period-summary.endTime');
+    date(value.startDate, 'period-summary.startDate');
+    nullableTime(value.startTime, 'period-summary.startTime');
+    date(value.endDate, 'period-summary.endDate');
+    nullableTime(value.endTime, 'period-summary.endTime');
+    if ((value.startTime === null) !== (value.endTime === null)) invalid('period-summary 钟点区间必须同时存在或同时为空');
+    if (value.startDate > value.endDate || (value.startDate === value.endDate && value.startTime !== null
+        && value.endTime !== null && value.startTime > value.endTime)) invalid('period-summary 时间区间无效');
     nonEmptyString(value.summary, 'period-summary.summary');
     stringArray(value.childSummaryRefs, 'period-summary.childSummaryRefs');
     safeInteger(value.childSummaryCount, 'period-summary.childSummaryCount');
@@ -169,10 +190,13 @@ function normalizeSpanStage(value, eventId) {
     normalizeSourceRange(value, 'span-stage');
     normalizeFloorRange(value, 'span-stage');
     if (!String(value.id).startsWith(`span:${eventId}:`) || value.kind !== 'span-stage') invalid('span-stage ID 或 kind 无效');
-    nonEmptyString(value.startDate, 'span-stage.startDate');
-    nullableString(value.startTime, 'span-stage.startTime');
-    nonEmptyString(value.endDate, 'span-stage.endDate');
-    nullableString(value.endTime, 'span-stage.endTime');
+    date(value.startDate, 'span-stage.startDate');
+    nullableTime(value.startTime, 'span-stage.startTime');
+    date(value.endDate, 'span-stage.endDate');
+    nullableTime(value.endTime, 'span-stage.endTime');
+    if ((value.startTime === null) !== (value.endTime === null)) invalid('span-stage 钟点区间必须同时存在或同时为空');
+    if (value.startDate > value.endDate || (value.startDate === value.endDate && value.startTime !== null
+        && value.endTime !== null && value.startTime > value.endTime)) invalid('span-stage 时间区间无效');
     nonEmptyString(value.summary, 'span-stage.summary');
     return clone(value);
 }
@@ -209,6 +233,186 @@ function projectionText(stage) {
     return ['day-summary', 'period-summary', 'span-stage'].includes(stage.kind) ? stage.summary : stage.text;
 }
 
+function projectFixedCore(stage) {
+    const common = {
+        id: stage.id, kind: stage.kind, sourceStageStart: stage.sourceStageStart,
+        sourceStageEnd: stage.sourceStageEnd, revision: stage.revision,
+    };
+    if (stage.kind === 'legacy-stage') return {
+        ...common, text: stage.text, legacyIndex: stage.legacyIndex,
+    };
+    if (stage.kind === 'live-stage') return {
+        ...common, storyDate: stage.storyDate, time: stage.time, timeLabel: stage.timeLabel, text: stage.text,
+        sourceFloorStart: stage.sourceFloorStart, sourceFloorEnd: stage.sourceFloorEnd,
+    };
+    if (stage.kind === 'undated-stage') return {
+        ...common, storyDate: stage.storyDate, time: stage.time, timeLabel: stage.timeLabel, text: stage.text,
+        undatedSequence: stage.undatedSequence,
+        sourceFloorStart: stage.sourceFloorStart, sourceFloorEnd: stage.sourceFloorEnd,
+    };
+    if (stage.kind === 'day-summary') return {
+        ...common, status: stage.status, storyDate: stage.storyDate, timeRange: clone(stage.timeRange),
+        summary: stage.summary, keyStages: clone(stage.keyStages), detailCount: stage.detailCount,
+        sourceFloorStart: stage.sourceFloorStart, sourceFloorEnd: stage.sourceFloorEnd,
+    };
+    if (stage.kind === 'period-summary') return {
+        ...common, periodSequence: stage.periodSequence, startDate: stage.startDate, startTime: stage.startTime,
+        endDate: stage.endDate, endTime: stage.endTime, summary: stage.summary,
+        childSummaryCount: stage.childSummaryCount, historicalDetailCount: stage.historicalDetailCount,
+    };
+    if (stage.kind === 'span-stage') return {
+        ...common, startDate: stage.startDate, startTime: stage.startTime, endDate: stage.endDate,
+        endTime: stage.endTime, summary: stage.summary,
+        sourceFloorStart: stage.sourceFloorStart, sourceFloorEnd: stage.sourceFloorEnd,
+    };
+    invalid('fixed core StageProjection kind 无效');
+}
+
+const promptText = (value, maximum) => typeof value === 'string' ? value.trim().slice(0, maximum) : '';
+const promptStageProjection = stage => {
+    const common = { id: stage.id, kind: stage.kind, sourceStageStart: stage.sourceStageStart, sourceStageEnd: stage.sourceStageEnd };
+    if (stage.kind === 'day-summary') return { ...common, storyDate: stage.storyDate, timeRange: clone(stage.timeRange),
+        summary: promptText(stage.summary, 240), keyStages: stage.keyStages.map(item => promptText(item, 120)),
+        detailCount: stage.detailCount, sourceFloorStart: stage.sourceFloorStart, sourceFloorEnd: stage.sourceFloorEnd };
+    if (stage.kind === 'period-summary') return { ...common, periodSequence: stage.periodSequence, startDate: stage.startDate,
+        startTime: stage.startTime, endDate: stage.endDate, endTime: stage.endTime, summary: promptText(stage.summary, 240),
+        childSummaryCount: stage.childSummaryCount, historicalDetailCount: stage.historicalDetailCount };
+    if (stage.kind === 'span-stage') return { ...common, startDate: stage.startDate, startTime: stage.startTime,
+        endDate: stage.endDate, endTime: stage.endTime, summary: promptText(stage.summary, 240),
+        sourceFloorStart: stage.sourceFloorStart, sourceFloorEnd: stage.sourceFloorEnd };
+    return { ...common, storyDate: stage.storyDate, time: stage.time, timeLabel: stage.timeLabel,
+        text: promptText(stage.text, 240), sourceFloorStart: stage.sourceFloorStart, sourceFloorEnd: stage.sourceFloorEnd };
+};
+const promptEventProjection = event => ({
+    id: event.id, type: event.type, title: promptText(event.title, 120), stageLabel: promptText(event.stageLabel, 32),
+    origin: promptText(event.origin, 240),
+    participants: event.participants.map(item => promptText(item, 120)), stages: event.stages.map(promptStageProjection),
+    latestStage: promptText(event.latestStage, 240), outcome: event.outcome, finalResult: event.finalResult === null ? null : promptText(event.finalResult, 240),
+    relatedEventIds: clone(event.relatedEventIds), createdAt: event.createdAt, updatedAt: event.updatedAt,
+});
+
+function fitGenerationPromptProjection(value, maximum) {
+    const result = clone(value);
+    const encoded = () => JSON.stringify(result);
+    while (encoded().length > maximum) {
+        const eventWithHistory = [...result.dynamics.archived, ...result.dynamics.active].find(event => event.stages.length > 1);
+        if (eventWithHistory) { eventWithHistory.stages.shift(); continue; }
+        const eventWithLongText = [...result.dynamics.archived, ...result.dynamics.active]
+            .find(event => event.stages.some(stage => typeof stage.summary === 'string' && stage.summary.length > 32));
+        if (eventWithLongText) {
+            const stage = eventWithLongText.stages.find(item => typeof item.summary === 'string' && item.summary.length > 32);
+            stage.summary = stage.summary.slice(0, Math.max(32, Math.floor(stage.summary.length / 2)));
+            continue;
+        }
+        if (result.dynamics.archived.length) { result.dynamics.archived.shift(); continue; }
+        if (result.dynamics.active.length > 1) { result.dynamics.active.shift(); continue; }
+        if (result.factions.length) { result.factions.shift(); continue; }
+        if (result.reputation.circles.length) { result.reputation.circles.shift(); continue; }
+        if (result.world.items.length) { result.world.items.shift(); continue; }
+        return JSON.stringify({ world: { items: [] }, reputation: { circles: [] }, factions: [], dynamics: { active: [], archived: [] }, truncated: true });
+    }
+    return encoded();
+}
+
+/**
+ * Produces the only history projection permitted in the normal generation prompt.
+ * It intentionally excludes detail bodies, refs, lifecycle records and tombstones.
+ */
+export function serializeTodayTrendV2ScopeForGeneration(currentValue, storageId, { maxChars = 12000 } = {}) {
+    const maximum = Number.isSafeInteger(maxChars) && maxChars > 0 ? maxChars : 12000;
+    const store = normalizeTodayTrendV2Store(currentValue);
+    const payload = store.globalEnvelope.payload.scopes[storageId]?.payload;
+    if (!payload) return null;
+    return fitGenerationPromptProjection({
+        world: clone(payload.world), reputation: clone(payload.reputation), factions: clone(payload.factions),
+        dynamics: {
+            active: payload.dynamics.active.map(promptEventProjection),
+            archived: payload.dynamics.archived.map(promptEventProjection),
+        },
+    }, maximum);
+}
+/**
+ * UI-only canonical projection. It keeps structured stages but excludes detail pools,
+ * manifests, lifecycle records and tombstones from the render input.
+ */
+export function resolveTodayTrendV2UiScope(currentValue, storageId) {
+    if (typeof storageId !== 'string' || !storageId) return null;
+    const store = normalizeTodayTrendV2Store(currentValue);
+    const envelope = store.globalEnvelope.payload.scopes[storageId];
+    const payload = envelope?.payload;
+    if (!payload) return null;
+    return clone({
+        storageId: payload.storageId,
+        characterId: payload.characterId,
+        characterName: payload.characterName,
+        presetId: payload.presetId,
+        operation: payload.operation,
+        injection: payload.injection,
+        world: payload.world,
+        reputation: payload.reputation,
+        factions: payload.factions,
+        dynamicsSettings: payload.dynamicsSettings,
+        historyRetentionSettings: payload.historyRetentionSettings,
+        dynamics: {
+            active: payload.dynamics.active.map(event => uiEventProjection(event)),
+            archived: payload.dynamics.archived.map(event => uiEventProjection(event)),
+        },
+    });
+}
+
+/**
+ * CAS-only metadata for retention settings. Keep commit control fields out of the
+ * general UI projection so renderers cannot accidentally persist stale state.
+ */
+export function resolveTodayTrendV2RetentionSettingsState(currentValue, storageId) {
+    if (typeof storageId !== 'string' || !storageId) return null;
+    const store = normalizeTodayTrendV2Store(currentValue);
+    const envelope = store.globalEnvelope.payload.scopes[storageId];
+    if (!envelope) return null;
+    return clone({
+        scopeRevision: envelope.revision,
+        settingsRevision: envelope.payload.historyRetentionSettings.revision,
+    });
+}
+
+function uiStageProjection(stage) {
+    const projected = promptStageProjection(stage);
+    return {
+        id: projected.id, kind: projected.kind,
+        displayText: projected.summary || projected.text || '',
+        storyDate: projected.storyDate ?? null, time: projected.time ?? null, timeLabel: projected.timeLabel ?? null,
+        startDate: projected.startDate ?? null, startTime: projected.startTime ?? null,
+        endDate: projected.endDate ?? null, endTime: projected.endTime ?? null,
+        timeRange: projected.timeRange ?? null, keyStages: projected.keyStages ?? [],
+        detailCount: projected.detailCount ?? 0, detailRefs: stage.kind === 'day-summary' ? [...stage.detailRefs] : [],
+    };
+}
+
+function uiEventProjection(event) {
+    return {
+        id: event.id, type: event.type, title: event.title, stageLabel: event.stageLabel,
+        origin: event.origin, participants: [...event.participants], stages: event.stages.map(uiStageProjection),
+        latestStage: event.latestStage, outcome: event.outcome, finalResult: event.finalResult,
+        relatedEventIds: [...event.relatedEventIds], createdAt: event.createdAt, updatedAt: event.updatedAt,
+    };
+}
+
+
+function reliableAssistantCount(value) {
+    return Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+function parseRetentionInteger(value, field, maximum) {
+    if (typeof value !== 'string' || !/^\d+$/.test(value.trim())) {
+        failure('TT_RETENTION_SETTINGS_INVALID', `${field} 必须是十进制整数字符串`);
+    }
+    const parsed = Number(value.trim());
+    if (!Number.isSafeInteger(parsed) || parsed < 0 || parsed > maximum) {
+        failure('TT_RETENTION_SETTINGS_INVALID', `${field} 必须在 0..${maximum} 范围内`);
+    }
+    return parsed;
+}
+
 function projectEventToV1(event) {
     return {
         id: event.id, type: event.type, lifecycle: event.lifecycle, title: event.title, stageLabel: event.stageLabel,
@@ -236,8 +440,8 @@ function projectDynamicsToV1(dynamics) {
 export function extractArchivedFixedCore(event) {
     if (event?.lifecycle !== 'archived') invalid('fixed core 只能从 archived event 提取');
     return clone({
-        id: event.id, type: event.type, lifecycle: event.lifecycle, title: event.title, stageLabel: event.stageLabel,
-        origin: event.origin, participants: event.participants, stages: event.stages, latestStage: event.latestStage,
+        id: event.id, type: event.type, title: event.title, stageLabel: event.stageLabel,
+        origin: event.origin, participants: event.participants, stages: event.stages.map(projectFixedCore), latestStage: event.latestStage,
         outcome: event.outcome, finalResult: event.finalResult, relatedEventIds: event.relatedEventIds,
         archivedAtAssistantCount: event.archivedAtAssistantCount, archivedSequence: event.archivedSequence,
         createdAt: event.createdAt, updatedAt: event.updatedAt,
@@ -255,7 +459,13 @@ function scopeFacadeFields(scope) {
 function createScopePayload(scope) {
     const dynamics = migrateDynamics(scope.dynamics);
     const generationSnapshots = scope.generationSnapshots.map(snapshot => ({
-        ...clone(snapshot), dynamics: migrateDynamics(snapshot.dynamics),
+        ...clone(snapshot),
+        storeRevision: 0,
+        detailPoolRevision: 0,
+        visibleFromAssistantCount: snapshot.assistantCount,
+        detailManifestRefs: [],
+        retentionPolicyRevision: 1,
+        dynamics: migrateDynamics(snapshot.dynamics),
     }));
     const fixedCoreBaselineByEvent = {};
     for (const event of dynamics.archived) fixedCoreBaselineByEvent[event.id] = extractArchivedFixedCore(event);
@@ -312,7 +522,9 @@ function normalizeRetentionSettings(value) {
     exact(value, ['archivedDetailLatestEventCount', 'archivedDetailRetentionFloors', 'revision'], 'historyRetentionSettings');
     safeInteger(value.archivedDetailLatestEventCount, 'archivedDetailLatestEventCount');
     safeInteger(value.archivedDetailRetentionFloors, 'archivedDetailRetentionFloors');
-    if (value.revision !== 1) invalid('historyRetentionSettings.revision 无效');
+    if (value.archivedDetailLatestEventCount > 80) invalid('archivedDetailLatestEventCount 必须在 0..80 范围内');
+    if (value.archivedDetailRetentionFloors > 1000) invalid('archivedDetailRetentionFloors 必须在 0..1000 范围内');
+    safeInteger(value.revision, 'historyRetentionSettings.revision', 1);
     return clone(value);
 }
 
@@ -376,9 +588,12 @@ function normalizeRemovableContainers(payload, eventIds, archivedEventIds) {
     }
     const archivedRemovableDataByEvent = {};
     for (const [eventId, container] of Object.entries(payload.archivedRemovableDataByEvent)) {
-        if (!archivedEventIds.has(eventId)) invalid('archived removable data 只能属于 archived event');
+        if (!eventIds.has(eventId)) invalid('archived removable data 指向未知 event');
         exact(container, ['daySummariesById', 'manifestsById'], 'archived removable data');
         if (!plainRecord(container.daySummariesById) || !plainRecord(container.manifestsById)) invalid('archived removable data 集合无效');
+        if (!archivedEventIds.has(eventId) && Object.keys(container.daySummariesById).length) {
+            invalid('active event 的 removable 容器只能保存 snapshot manifest');
+        }
         const daySummariesById = {};
         for (const [id, summary] of Object.entries(container.daySummariesById)) {
             if (summary.id !== id) invalid('day summary key 与 ID 不一致');
@@ -400,7 +615,7 @@ function normalizeRemovableContainers(payload, eventIds, archivedEventIds) {
     for (const event of [...payload.dynamics.active, ...payload.dynamics.archived]) {
         for (const stage of event.stages) {
             if (stage.kind === 'day-summary') {
-                registerBody(stage.id, stage, 'day-summary', event.id);
+                if (event.lifecycle === 'active') registerBody(stage.id, stage, 'day-summary', event.id);
                 addRefs(stage.detailRefs, `detail:${event.id}:`);
             } else if (stage.kind === 'period-summary') addRefs(stage.childSummaryRefs, `day:${event.id}:`);
         }
@@ -427,7 +642,7 @@ function normalizeRemovableContainers(payload, eventIds, archivedEventIds) {
         if (removableEntityTombstonesById[id]) invalid('available 正文不得存在 tombstone');
     }
     for (const [id, state] of Object.entries(removableEntityStateById)) {
-        if (state.state === 'available' && !bodies.has(id)) invalid('available state 缺少正文');
+        if (state.state === 'available' && !bodies.has(id)) invalid(`available state 缺少正文：${id}`);
         if (state.state === 'removed') {
             if (bodies.has(id)) invalid('removed state 不得保留正文');
             if (!same(removableEntityTombstonesById[id], state)) invalid('removed state 与 tombstone 不一致');
@@ -470,6 +685,35 @@ export function validateTodayTrendV2Transition(previousValue, candidateValue) {
         }
         const oldEntities = entityIndex(previousPayload);
         const newEntities = entityIndex(nextPayload);
+        const nextEvents = eventMap(nextPayload.dynamics);
+        const previousArchivedIds = new Set(previousPayload.dynamics.archived.map(event => event.id));
+        for (const archived of previousPayload.dynamics.archived) {
+            const next = nextEvents.get(archived.id);
+            if (!next) continue;
+            if (next.lifecycle !== 'archived' || !same(extractArchivedFixedCore(archived), extractArchivedFixedCore(next))) {
+                invalid('archived fixed core 不可改写或重新激活');
+            }
+        }
+        let expectedArchivedSequence = previousPayload.historyRetentionState.nextArchivedSequence;
+        for (const archived of nextPayload.dynamics.archived) {
+            if (previousArchivedIds.has(archived.id)) continue;
+            const previousActive = previousPayload.dynamics.active.find(event => event.id === archived.id);
+            if (!previousActive || archived.archivedSequence !== expectedArchivedSequence) {
+                invalid('新归档事件必须按 nextArchivedSequence 连续分配');
+            }
+            expectedArchivedSequence += 1;
+        }
+        if (nextPayload.historyRetentionState.nextArchivedSequence !== expectedArchivedSequence) {
+            invalid('nextArchivedSequence 与归档事务不一致');
+        }
+        if (nextPayload.historyRetentionSettings.revision < previousPayload.historyRetentionSettings.revision
+            || nextPayload.historyRetentionState.retentionPolicyRevision < previousPayload.historyRetentionState.retentionPolicyRevision) {
+            invalid('retention revision 不得降低');
+        }
+        const previousHighWater = previousPayload.historyRetentionState.highWaterAssistantCount;
+        const nextHighWater = nextPayload.historyRetentionState.highWaterAssistantCount;
+        if (previousHighWater !== null && (nextHighWater === null || nextHighWater < previousHighWater)) invalid('highWaterAssistantCount 不得降低');
+        if (nextPayload.historyRetentionState.nextArchivedSequence < previousPayload.historyRetentionState.nextArchivedSequence) invalid('nextArchivedSequence 不得降低');
         for (const [id, state] of Object.entries(previousPayload.removableEntityStateById)) {
             const nextState = nextPayload.removableEntityStateById[id];
             if (state.state === 'removed' && !same(nextState, state)) invalid('removed lifecycle 不可逆或删除');
@@ -488,6 +732,9 @@ function normalizeScopeEnvelope(value, presets) {
     const payload = clone(value.payload);
     exact(payload, ['storageId', 'characterId', 'characterName', 'presetId', 'operation', 'injection', 'world', 'reputation', 'factions', 'dynamicsSettings', 'dynamics', 'generationSnapshots', 'historyRetentionSettings', 'historyRetentionState', 'stageDetailsByEvent', 'archivedRemovableDataByEvent', 'removableEntityStateById', 'removableEntityTombstonesById', 'fixedCoreBaselineByEvent', 'commitJournal'], 'scope payload');
     if (!plainRecord(payload.dynamics) || !Array.isArray(payload.generationSnapshots)) invalid('scope payload 无效');
+    if (payload.generationSnapshots.length > TODAY_TREND_LIMITS.generationSnapshots) {
+        failure('TT_SNAPSHOT_LIMIT', 'canonical snapshot 数量超限');
+    }
     payload.dynamics = {
         active: payload.dynamics.active.map(event => normalizeEventProjection(event, 'active')),
         archived: payload.dynamics.archived.map(event => normalizeEventProjection(event, 'archived')),
@@ -504,13 +751,47 @@ function normalizeScopeEnvelope(value, presets) {
             archivedEventIds.add(event.id);
         }
     }
-    payload.generationSnapshots = payload.generationSnapshots.map(snapshot => ({
-        ...clone(snapshot),
-        dynamics: {
-            active: snapshot.dynamics.active.map(event => normalizeEventProjection(event, 'active')),
-            archived: snapshot.dynamics.archived.map(event => normalizeEventProjection(event, 'archived')),
-        },
-    }));
+    const maximumArchivedSequence = payload.dynamics.archived.reduce((maximum, event) => Math.max(maximum, event.archivedSequence), 0);
+    if (payload.historyRetentionState?.nextArchivedSequence <= maximumArchivedSequence) {
+        invalid('nextArchivedSequence 必须大于既有 archivedSequence');
+    }
+    payload.generationSnapshots = payload.generationSnapshots.map(snapshot => {
+        const normalizedSnapshot = clone(snapshot);
+        const assistantCount = safeInteger(normalizedSnapshot.assistantCount, 'snapshot assistantCount');
+        normalizedSnapshot.storeRevision = Object.hasOwn(normalizedSnapshot, 'storeRevision')
+            ? safeInteger(normalizedSnapshot.storeRevision, 'snapshot storeRevision') : 0;
+        normalizedSnapshot.detailPoolRevision = Object.hasOwn(normalizedSnapshot, 'detailPoolRevision')
+            ? safeInteger(normalizedSnapshot.detailPoolRevision, 'snapshot detailPoolRevision') : 0;
+        normalizedSnapshot.visibleFromAssistantCount = Object.hasOwn(normalizedSnapshot, 'visibleFromAssistantCount')
+            ? reliableAssistantCount(normalizedSnapshot.visibleFromAssistantCount) : assistantCount;
+        if (normalizedSnapshot.visibleFromAssistantCount === null) invalid('snapshot visibleFromAssistantCount 无效');
+        normalizedSnapshot.retentionPolicyRevision = Object.hasOwn(normalizedSnapshot, 'retentionPolicyRevision')
+            ? safeInteger(normalizedSnapshot.retentionPolicyRevision, 'snapshot retentionPolicyRevision', 1) : 1;
+        const refs = Object.hasOwn(normalizedSnapshot, 'detailManifestRefs') ? normalizedSnapshot.detailManifestRefs : [];
+        if (!Array.isArray(refs)) invalid('snapshot detailManifestRefs 必须是数组');
+        normalizedSnapshot.detailManifestRefs = refs.map((entry, index) => {
+            exact(entry, ['eventId', 'manifestId', 'detailRefs', 'visibleFromAssistantCount'], `snapshot detailManifestRefs.${index}`);
+            nonEmptyString(entry.eventId, 'snapshot manifest eventId');
+            if (!entry.manifestId.startsWith(`manifest:${entry.eventId}:`)) invalid('snapshot manifest ID 与 event 不一致');
+            if (!Array.isArray(entry.detailRefs) || entry.detailRefs.some(id => typeof id !== 'string'
+                || !id.startsWith(`detail:${entry.eventId}:`))) invalid('snapshot detail refs 无效');
+            if (new Set(entry.detailRefs).size !== entry.detailRefs.length) invalid('snapshot detail refs 不得重复');
+            safeInteger(entry.visibleFromAssistantCount, 'snapshot manifest visibleFromAssistantCount');
+            if (entry.visibleFromAssistantCount > normalizedSnapshot.visibleFromAssistantCount) {
+                invalid('snapshot manifest 可见边界不得晚于 snapshot 边界');
+            }
+            return clone(entry);
+        });
+        normalizedSnapshot.dynamics = {
+            active: normalizedSnapshot.dynamics.active.map(event => normalizeEventProjection(event, 'active')),
+            archived: normalizedSnapshot.dynamics.archived.map(event => normalizeEventProjection(event, 'archived')),
+        };
+        exact(normalizedSnapshot, [
+            'assistantCount', 'generatedAt', 'storeRevision', 'detailPoolRevision', 'visibleFromAssistantCount',
+            'detailManifestRefs', 'retentionPolicyRevision', 'world', 'reputation', 'factions', 'dynamicsSettings', 'dynamics',
+        ], 'snapshot');
+        return normalizedSnapshot;
+    });
     const v1Store = normalizeTodayTrendStore({ version: 1, presets, scopes: { [payload.storageId]: projectScopePayloadToV1(payload) } });
     const facade = v1Store.scopes[payload.storageId];
     payload.operation = clone(facade.operation); payload.injection = clone(facade.injection); payload.world = clone(facade.world);
@@ -532,6 +813,222 @@ function normalizeScopeEnvelope(value, presets) {
     return { schemaVersion: SCOPE_ENVELOPE_VERSION, revision: value.revision, payload };
 }
 
+function legacyMigrationFailure(path, reason) {
+    const error = new Error(`旧版 Today Trend v2 数据无法无损迁移：${path} ${reason}`);
+    error.code = 'TT_V2_LEGACY_MIGRATION_FAILED';
+    error.cause = { diagnostics: [{ path, reason }] };
+    throw error;
+}
+
+function canonicalLegacyDate(value, path, { nullable = false } = {}) {
+    if (nullable && value === null) return null;
+    if (typeof value !== 'string') legacyMigrationFailure(path, nullable ? '必须是日期或 null' : '必须是日期');
+    const match = /^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/.exec(value);
+    if (!match) legacyMigrationFailure(path, '不是无歧义的年-月-日格式');
+    const normalized = `${match[1]}-${match[2].padStart(2, '0')}-${match[3].padStart(2, '0')}`;
+    const parsed = new Date(`${normalized}T12:00:00Z`);
+    if (!Number.isFinite(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== normalized) {
+        legacyMigrationFailure(path, '不是有效自然日');
+    }
+    return normalized;
+}
+
+function canonicalLegacyTime(value, path) {
+    if (value === null) return null;
+    if (typeof value !== 'string') legacyMigrationFailure(path, '必须是钟点或 null');
+    const match = /^(\d{1,2}):(\d{2})$/.exec(value);
+    if (!match) legacyMigrationFailure(path, '不是无歧义的 24 小时制钟点');
+    const hour = Number(match[1]);
+    const minute = Number(match[2]);
+    if (hour > 23 || minute > 59) legacyMigrationFailure(path, '超出有效钟点范围');
+    return `${String(hour).padStart(2, '0')}:${match[2]}`;
+}
+
+function setLegacyIdMapping(idMap, oldId, nextId, path) {
+    const existing = idMap.get(oldId);
+    if (existing && existing !== nextId) legacyMigrationFailure(path, '同一旧 ID 映射到多个新 ID');
+    idMap.set(oldId, nextId);
+}
+
+function migrateLegacyProjection(value, eventId, path, idMap) {
+    if (!plainRecord(value)) legacyMigrationFailure(path, '必须是对象');
+    const stage = clone(value);
+    if (stage.kind === 'live-stage') {
+        stage.storyDate = canonicalLegacyDate(stage.storyDate, `${path}.storyDate`);
+        stage.time = canonicalLegacyTime(stage.time, `${path}.time`);
+    } else if (stage.kind === 'undated-stage') {
+        stage.time = canonicalLegacyTime(stage.time, `${path}.time`);
+    } else if (stage.kind === 'day-summary') {
+        const oldId = stage.id;
+        stage.storyDate = canonicalLegacyDate(stage.storyDate, `${path}.storyDate`);
+        stage.id = `day:${eventId}:${stage.storyDate}`;
+        setLegacyIdMapping(idMap, oldId, stage.id, `${path}.id`);
+        if (!plainRecord(stage.timeRange)) legacyMigrationFailure(`${path}.timeRange`, '必须是对象');
+        stage.timeRange.start = canonicalLegacyTime(stage.timeRange.start, `${path}.timeRange.start`);
+        stage.timeRange.end = canonicalLegacyTime(stage.timeRange.end, `${path}.timeRange.end`);
+    } else if (stage.kind === 'period-summary' || stage.kind === 'span-stage') {
+        stage.startDate = canonicalLegacyDate(stage.startDate, `${path}.startDate`);
+        stage.startTime = canonicalLegacyTime(stage.startTime, `${path}.startTime`);
+        stage.endDate = canonicalLegacyDate(stage.endDate, `${path}.endDate`);
+        stage.endTime = canonicalLegacyTime(stage.endTime, `${path}.endTime`);
+    } else if (stage.kind !== 'legacy-stage') legacyMigrationFailure(`${path}.kind`, '不受支持');
+    return stage;
+}
+
+function migrateLegacyEvent(eventValue, path, idMap) {
+    if (!plainRecord(eventValue) || !Array.isArray(eventValue.stages)) legacyMigrationFailure(path, '事件或 stages 无效');
+    const event = clone(eventValue);
+    event.stages = event.stages.map((stage, index) => migrateLegacyProjection(stage, event.id, `${path}.stages.${index}`, idMap));
+    event.latestStage = resolveTodayTrendV2LatestStage(event);
+    return event;
+}
+
+function remapLegacyRef(value, idMap, path) {
+    if (typeof value !== 'string') legacyMigrationFailure(path, '引用必须是字符串');
+    return idMap.get(value) || value;
+}
+
+function migrateLegacyScopeEnvelope(value, storageId) {
+    const root = `globalEnvelope.payload.scopes.${storageId}`;
+    if (!plainRecord(value) || value.schemaVersion !== LEGACY_SCOPE_ENVELOPE_VERSION || !plainRecord(value.payload)) {
+        legacyMigrationFailure(root, '旧版 scope envelope 版本或结构无效');
+    }
+    const scope = clone(value);
+    const payload = scope.payload;
+    if (!plainRecord(payload.dynamics) || !Array.isArray(payload.dynamics.active) || !Array.isArray(payload.dynamics.archived)) {
+        legacyMigrationFailure(`${root}.payload.dynamics`, '必须包含 active 与 archived 数组');
+    }
+    const idMap = new Map();
+    for (const bucket of ['active', 'archived']) {
+        payload.dynamics[bucket] = payload.dynamics[bucket].map((event, index) =>
+            migrateLegacyEvent(event, `${root}.payload.dynamics.${bucket}.${index}`, idMap));
+    }
+    if (!Array.isArray(payload.generationSnapshots)) legacyMigrationFailure(`${root}.payload.generationSnapshots`, '必须是数组');
+    payload.generationSnapshots = payload.generationSnapshots.map((snapshot, snapshotIndex) => {
+        const migrated = clone(snapshot);
+        for (const bucket of ['active', 'archived']) {
+            if (!Array.isArray(migrated.dynamics?.[bucket])) {
+                legacyMigrationFailure(`${root}.payload.generationSnapshots.${snapshotIndex}.dynamics.${bucket}`, '必须是数组');
+            }
+            migrated.dynamics[bucket] = migrated.dynamics[bucket].map((event, eventIndex) => migrateLegacyEvent(event,
+                `${root}.payload.generationSnapshots.${snapshotIndex}.dynamics.${bucket}.${eventIndex}`, idMap));
+        }
+        return migrated;
+    });
+    if (!plainRecord(payload.stageDetailsByEvent)) legacyMigrationFailure(`${root}.payload.stageDetailsByEvent`, '必须是对象');
+    for (const [eventId, details] of Object.entries(payload.stageDetailsByEvent)) {
+        if (!Array.isArray(details)) legacyMigrationFailure(`${root}.payload.stageDetailsByEvent.${eventId}`, '必须是数组');
+        details.forEach((detail, index) => {
+            detail.storyDate = canonicalLegacyDate(detail.storyDate,
+                `${root}.payload.stageDetailsByEvent.${eventId}.${index}.storyDate`, { nullable: true });
+        });
+    }
+    if (!plainRecord(payload.archivedRemovableDataByEvent)) {
+        legacyMigrationFailure(`${root}.payload.archivedRemovableDataByEvent`, '必须是对象');
+    }
+    for (const [eventId, container] of Object.entries(payload.archivedRemovableDataByEvent)) {
+        if (!plainRecord(container?.daySummariesById)) {
+            legacyMigrationFailure(`${root}.payload.archivedRemovableDataByEvent.${eventId}.daySummariesById`, '必须是对象');
+        }
+        const migratedSummaries = {};
+        for (const [oldId, summary] of Object.entries(container.daySummariesById)) {
+            const migrated = migrateLegacyProjection(summary, eventId,
+                `${root}.payload.archivedRemovableDataByEvent.${eventId}.daySummariesById.${oldId}`, idMap);
+            if (Object.hasOwn(migratedSummaries, migrated.id)) legacyMigrationFailure(`${root}.payload.archivedRemovableDataByEvent.${eventId}.daySummariesById.${oldId}`, '规范化后 ID 冲突');
+            migratedSummaries[migrated.id] = migrated;
+        }
+        container.daySummariesById = migratedSummaries;
+    }
+    const remapProjectionRefs = (event, eventPath) => event.stages.forEach((stage, index) => {
+        if (stage.kind === 'period-summary') stage.childSummaryRefs = stage.childSummaryRefs.map((ref, refIndex) =>
+            remapLegacyRef(ref, idMap, `${eventPath}.stages.${index}.childSummaryRefs.${refIndex}`));
+    });
+    for (const bucket of ['active', 'archived']) payload.dynamics[bucket].forEach((event, index) =>
+        remapProjectionRefs(event, `${root}.payload.dynamics.${bucket}.${index}`));
+    payload.generationSnapshots.forEach((snapshot, snapshotIndex) => {
+        for (const bucket of ['active', 'archived']) snapshot.dynamics[bucket].forEach((event, eventIndex) =>
+            remapProjectionRefs(event, `${root}.payload.generationSnapshots.${snapshotIndex}.dynamics.${bucket}.${eventIndex}`));
+    });
+    for (const [eventId, container] of Object.entries(payload.archivedRemovableDataByEvent)) {
+        for (const [summaryId, summary] of Object.entries(container.daySummariesById)) {
+            summary.detailRefs = summary.detailRefs.map((ref, index) => remapLegacyRef(ref, idMap,
+                `${root}.payload.archivedRemovableDataByEvent.${eventId}.daySummariesById.${summaryId}.detailRefs.${index}`));
+        }
+    }
+    for (const field of ['removableEntityStateById', 'removableEntityTombstonesById']) {
+        if (!plainRecord(payload[field])) legacyMigrationFailure(`${root}.payload.${field}`, '必须是对象');
+        const remapped = {};
+        for (const [oldId, recordValue] of Object.entries(payload[field])) {
+            const nextId = idMap.get(oldId) || oldId;
+            if (Object.hasOwn(remapped, nextId)) legacyMigrationFailure(`${root}.payload.${field}.${oldId}`, '规范化后 ID 冲突');
+            const record = clone(recordValue);
+            record.entityId = idMap.get(record.entityId) || record.entityId;
+            remapped[nextId] = record;
+        }
+        payload[field] = remapped;
+    }
+    const removableIds = new Set([
+        ...Object.keys(payload.removableEntityStateById),
+        ...Object.keys(payload.removableEntityTombstonesById),
+    ]);
+    const productionResolvableIds = new Set(removableIds);
+    for (const details of Object.values(payload.stageDetailsByEvent)) {
+        for (const detail of details) if (typeof detail?.id === 'string') productionResolvableIds.add(detail.id);
+    }
+    for (const container of Object.values(payload.archivedRemovableDataByEvent)) {
+        for (const id of Object.keys(container.daySummariesById)) productionResolvableIds.add(id);
+        for (const id of Object.keys(container.manifestsById || {})) productionResolvableIds.add(id);
+    }
+    for (const event of [...payload.dynamics.active, ...payload.dynamics.archived]) {
+        for (const stage of event.stages) if (typeof stage?.id === 'string') productionResolvableIds.add(stage.id);
+    }
+    const assertResolvableRefs = (event, eventPath, resolvableIds) => event.stages.forEach((stage, stageIndex) => {
+        if (stage.kind !== 'period-summary') return;
+        stage.childSummaryRefs.forEach((ref, refIndex) => {
+            const path = `${eventPath}.stages.${stageIndex}.childSummaryRefs.${refIndex}`;
+            if (!ref.startsWith(`day:${event.id}:`)) legacyMigrationFailure(path, `必须引用事件 ${event.id} 的 day-summary`);
+            if (!resolvableIds.has(ref)) legacyMigrationFailure(path, `指向无法无损迁移的实体 ${ref}`);
+        });
+    });
+    for (const bucket of ['active', 'archived']) payload.dynamics[bucket].forEach((event, index) =>
+        assertResolvableRefs(event, `${root}.payload.dynamics.${bucket}.${index}`, productionResolvableIds));
+    payload.generationSnapshots.forEach((snapshot, snapshotIndex) => {
+        const snapshotResolvableIds = new Set(removableIds);
+        for (const event of [...snapshot.dynamics.active, ...snapshot.dynamics.archived]) {
+            for (const stage of event.stages) {
+                if (typeof stage?.id === 'string') snapshotResolvableIds.add(stage.id);
+            }
+        }
+        for (const bucket of ['active', 'archived']) snapshot.dynamics[bucket].forEach((event, eventIndex) =>
+            assertResolvableRefs(event,
+                `${root}.payload.generationSnapshots.${snapshotIndex}.dynamics.${bucket}.${eventIndex}`, snapshotResolvableIds));
+    });
+    for (const [eventId, container] of Object.entries(payload.archivedRemovableDataByEvent)) {
+        for (const [summaryId, summary] of Object.entries(container.daySummariesById)) summary.detailRefs.forEach((ref, index) => {
+            const path = `${root}.payload.archivedRemovableDataByEvent.${eventId}.daySummariesById.${summaryId}.detailRefs.${index}`;
+            if (!ref.startsWith(`detail:${eventId}:`)) legacyMigrationFailure(path, `必须引用事件 ${eventId} 的 detail`);
+            if (!productionResolvableIds.has(ref)) legacyMigrationFailure(path, `指向无法无损迁移的实体 ${ref}`);
+        });
+    }
+    payload.fixedCoreBaselineByEvent = Object.fromEntries(payload.dynamics.archived.map(event => [event.id, extractArchivedFixedCore(event)]));
+    scope.schemaVersion = SCOPE_ENVELOPE_VERSION;
+    return scope;
+}
+
+export function migrateLegacyTodayTrendV2Store(value) {
+    if (!plainRecord(value) || value.version !== TODAY_TREND_V2_STORE_VERSION || !plainRecord(value.globalEnvelope)) {
+        legacyMigrationFailure('v2Store', '旧版 store 结构无效');
+    }
+    if (value.globalEnvelope.schemaVersion !== LEGACY_GLOBAL_ENVELOPE_VERSION) {
+        legacyMigrationFailure('globalEnvelope.schemaVersion', '不是受支持的旧版 envelope');
+    }
+    const migrated = clone(value);
+    if (!plainRecord(migrated.globalEnvelope.payload?.scopes)) legacyMigrationFailure('globalEnvelope.payload.scopes', '必须是对象');
+    migrated.globalEnvelope.payload.scopes = Object.fromEntries(Object.entries(migrated.globalEnvelope.payload.scopes)
+        .map(([storageId, scope]) => [storageId, migrateLegacyScopeEnvelope(scope, storageId)]));
+    migrated.globalEnvelope.schemaVersion = GLOBAL_ENVELOPE_VERSION;
+    return normalizeTodayTrendV2Store(migrated);
+}
 
 export function migrateTodayTrendStoreToV2(value, { globalRevision = 1, scopeRevisionByStorageId = {} } = {}) {
     if (value?.version === TODAY_TREND_V2_STORE_VERSION && Object.hasOwn(value, 'globalEnvelope')) {
@@ -606,37 +1103,154 @@ function preserveUnchangedEvents(previousPayload, nextPayload) {
     return continuous;
 }
 
+function snapshotV1Comparable(snapshot) {
+    return {
+        assistantCount: snapshot.assistantCount, generatedAt: snapshot.generatedAt,
+        world: snapshot.world, reputation: snapshot.reputation, factions: snapshot.factions,
+        dynamicsSettings: snapshot.dynamicsSettings, dynamics: projectDynamicsToV1(snapshot.dynamics),
+    };
+}
+
 function preserveUnchangedSnapshots(previousPayload, nextPayload) {
-    nextPayload.generationSnapshots = nextPayload.generationSnapshots.map((snapshot, index) => {
-        const existing = previousPayload.generationSnapshots[index];
+    const previousByFloor = new Map(previousPayload.generationSnapshots.map(snapshot => [snapshot.assistantCount, snapshot]));
+    nextPayload.generationSnapshots = nextPayload.generationSnapshots.map(snapshot => {
+        const existing = previousByFloor.get(snapshot.assistantCount);
         if (!existing) return snapshot;
-        const previousV1 = { ...clone(existing), dynamics: projectDynamicsToV1(existing.dynamics) };
-        const nextV1 = { ...clone(snapshot), dynamics: projectDynamicsToV1(snapshot.dynamics) };
-        return same(previousV1, nextV1) ? clone(existing) : snapshot;
+        return same(snapshotV1Comparable(existing), snapshotV1Comparable(snapshot)) ? clone(existing) : snapshot;
     });
 }
 
-function preserveScopeMetadata(previousPayload, nextPayload, continuous) {
+function archiveNewEvents(previousPayload, nextPayload, continuous, assistantCount = null) {
+    const previousActive = new Map(previousPayload.dynamics.active.map(event => [event.id, event]));
+    let sequence = previousPayload.historyRetentionState.nextArchivedSequence;
+    const archivedAtAssistantCount = reliableAssistantCount(assistantCount);
+    nextPayload.dynamics.archived = nextPayload.dynamics.archived.map(event => {
+        if (continuous.has(event.id) || !previousActive.has(event.id)) return event;
+        const prior = previousActive.get(event.id);
+        event = { ...event, stages: clone(prior.stages), capacityCompatibilityPending: prior.capacityCompatibilityPending,
+            archivedSequence: sequence++, archivedAtAssistantCount };
+        continuous.add(event.id);
+        return event;
+    });
+    nextPayload.historyRetentionState.nextArchivedSequence = sequence;
+}
+
+function migrateArchivedRemovable(previousPayload, nextPayload, continuous) {
+    const archivedIds = new Set(nextPayload.dynamics.archived.map(event => event.id));
+    for (const eventId of archivedIds) {
+        if (!continuous.has(eventId)) continue;
+        const details = previousPayload.stageDetailsByEvent[eventId];
+        if (details) nextPayload.stageDetailsByEvent[eventId] = clone(details);
+        const event = nextPayload.dynamics.archived.find(item => item.id === eventId);
+        const existing = previousPayload.archivedRemovableDataByEvent[eventId];
+        const daySummariesById = { ...(existing?.daySummariesById ? clone(existing.daySummariesById) : {}) };
+        for (const stage of event.stages) if (stage.kind === 'day-summary') daySummariesById[stage.id] = clone(stage);
+        nextPayload.archivedRemovableDataByEvent[eventId] = {
+            daySummariesById, manifestsById: clone(existing?.manifestsById || {}),
+        };
+    }
+}
+
+function preserveScopeMetadata(previousPayload, nextPayload, continuous, assistantCount = null) {
     const previousEvents = eventMap(previousPayload.dynamics);
-    const archivedIds = new Set(nextPayload.dynamics.archived.filter(event => continuous.has(event.id)).map(event => event.id));
     const preserve = (source, accept) => Object.fromEntries(Object.entries(source).filter(accept)
         .map(([id, value]) => [id, clone(value)]));
     nextPayload.historyRetentionSettings = clone(previousPayload.historyRetentionSettings);
     nextPayload.historyRetentionState = clone(previousPayload.historyRetentionState);
+    archiveNewEvents(previousPayload, nextPayload, continuous, assistantCount);
     nextPayload.stageDetailsByEvent = preserve(previousPayload.stageDetailsByEvent, ([id]) => continuous.has(id));
-    nextPayload.archivedRemovableDataByEvent = preserve(previousPayload.archivedRemovableDataByEvent, ([id]) => archivedIds.has(id));
+    nextPayload.archivedRemovableDataByEvent = preserve(previousPayload.archivedRemovableDataByEvent, ([id]) => continuous.has(id));
     const eventRecord = ([, value]) => continuous.has(value.eventId);
     nextPayload.removableEntityStateById = preserve(previousPayload.removableEntityStateById, eventRecord);
     nextPayload.removableEntityTombstonesById = preserve(previousPayload.removableEntityTombstonesById, eventRecord);
+    migrateArchivedRemovable(previousPayload, nextPayload, continuous);
     nextPayload.fixedCoreBaselineByEvent = Object.fromEntries(nextPayload.dynamics.archived.map(event => {
         const existing = previousEvents.get(event.id);
-        const baseline = existing && same(projectEventToV1(existing), projectEventToV1(event))
+        const baseline = existing?.lifecycle === 'archived' && same(projectEventToV1(existing), projectEventToV1(event))
             ? previousPayload.fixedCoreBaselineByEvent[event.id] : extractArchivedFixedCore(event);
         return [event.id, clone(baseline)];
     }));
 }
 
-export function mergeTodayTrendV1StoreIntoV2(currentValue, facadeValue) {
+export function evaluateTodayTrendArchivedRetention(payloadValue) {
+    const payload = clone(payloadValue);
+    const { archivedDetailLatestEventCount: n, archivedDetailRetentionFloors: l } = normalizeRetentionSettings(payload.historyRetentionSettings);
+    const highWater = payload.historyRetentionState.highWaterAssistantCount;
+    const ranked = [...payload.dynamics.archived].sort((left, right) =>
+        right.archivedSequence - left.archivedSequence || left.id.localeCompare(right.id));
+    return ranked.map((event, index) => {
+        const rankProtected = n > 0 && index < n;
+        const floorProtected = l > 0 && (highWater === null || event.archivedAtAssistantCount === null
+            || highWater - event.archivedAtAssistantCount <= l);
+        return { eventId: event.id, rank: index + 1, rankProtected, floorProtected,
+            protected: rankProtected || floorProtected, deletable: !rankProtected && !floorProtected };
+    });
+}
+
+function applyArchivedRetention(payloadValue, assistantCount) {
+    const payload = clone(payloadValue);
+    const before = Object.fromEntries(payload.dynamics.archived.map(event => [event.id, extractArchivedFixedCore(event)]));
+    const decisions = evaluateTodayTrendArchivedRetention(payload);
+    const policyRevision = payload.historyRetentionState.retentionPolicyRevision;
+    let changed = false;
+    for (const decision of decisions) {
+        if (!decision.deletable) continue;
+        const eventId = decision.eventId;
+        const entries = [
+            ...(payload.stageDetailsByEvent[eventId] || []).map(item => [item.id, 'detail']),
+            ...Object.keys(payload.archivedRemovableDataByEvent[eventId]?.daySummariesById || {})
+                .map(id => [id, 'day-summary']),
+            ...Object.keys(payload.archivedRemovableDataByEvent[eventId]?.manifestsById || {})
+                .map(id => [id, 'manifest']),
+        ];
+        const uniqueEntries = [...new Map(entries.map(entry => [entry[0], entry])).values()];
+        for (const [id, entityType] of uniqueEntries) {
+            const state = payload.removableEntityStateById[id];
+            if (!state || state.state !== 'available' || state.entityType !== entityType
+                || state.eventId !== eventId || payload.removableEntityTombstonesById[id]) {
+                failure('TT_ARCHIVED_RETENTION_LIFECYCLE_INVALID', `archived retention lifecycle 无效：${id}`);
+            }
+        }
+        delete payload.stageDetailsByEvent[eventId];
+        delete payload.archivedRemovableDataByEvent[eventId];
+        for (const [id] of uniqueEntries) {
+            const state = payload.removableEntityStateById[id];
+            const removed = { ...state, state: 'removed', removalReason: 'archived-retention',
+                removedAtAssistantCount: reliableAssistantCount(assistantCount), policyRevision };
+            payload.removableEntityStateById[id] = removed;
+            payload.removableEntityTombstonesById[id] = clone(removed);
+            changed = true;
+        }
+    }
+    const after = Object.fromEntries(payload.dynamics.archived.map(event => [event.id, extractArchivedFixedCore(event)]));
+    if (!same(before, after)) failure('TT_ARCHIVED_FIXED_CORE_CHANGED', 'archived retention 改写了 fixed core');
+    if (changed) payload.historyRetentionState.detailPoolRevision += 1;
+    return payload;
+}
+
+export function saveTodayTrendRetentionSettingsToV2(currentValue, storageId, values, {
+    expectedScopeRevision, expectedSettingsRevision,
+} = {}) {
+    const current = normalizeTodayTrendV2Store(currentValue);
+    const envelope = current.globalEnvelope.payload.scopes[storageId];
+    if (!envelope) failure('TT_V2_SCHEMA_INVALID', 'canonical scope 不存在');
+    if (!Number.isSafeInteger(expectedScopeRevision) || expectedScopeRevision < 0
+        || !Number.isSafeInteger(expectedSettingsRevision) || expectedSettingsRevision < 1) {
+        failure('TT_RETENTION_SETTINGS_INVALID', '设置保存缺少有效 base revision');
+    }
+    if (envelope.revision !== expectedScopeRevision
+        || envelope.payload.historyRetentionSettings.revision !== expectedSettingsRevision) {
+        failure('TT_SETTINGS_REVISION_CONFLICT', '归档保留设置已被其他事务修改，请重新加载');
+    }
+    const n = parseRetentionInteger(values?.archivedDetailLatestEventCount, 'N', 80);
+    const l = parseRetentionInteger(values?.archivedDetailRetentionFloors, 'L', 1000);
+    envelope.payload.historyRetentionSettings = { archivedDetailLatestEventCount: n,
+        archivedDetailRetentionFloors: l, revision: envelope.payload.historyRetentionSettings.revision + 1 };
+    envelope.payload.historyRetentionState.retentionPolicyRevision += 1;
+    return normalizeTodayTrendV2Store(current);
+}
+
+export function mergeTodayTrendV1StoreIntoV2(currentValue, facadeValue, { assistantCount = null } = {}) {
     const current = normalizeTodayTrendV2Store(currentValue);
     const facade = normalizeTodayTrendStore(facadeValue);
     const revisions = Object.fromEntries(Object.entries(current.globalEnvelope.payload.scopes)
@@ -649,7 +1263,7 @@ export function mergeTodayTrendV1StoreIntoV2(currentValue, facadeValue) {
         if (!previousEnvelope) continue;
         const continuousEventIds = preserveUnchangedEvents(previousEnvelope.payload, nextEnvelope.payload);
         preserveUnchangedSnapshots(previousEnvelope.payload, nextEnvelope.payload);
-        preserveScopeMetadata(previousEnvelope.payload, nextEnvelope.payload, continuousEventIds);
+        preserveScopeMetadata(previousEnvelope.payload, nextEnvelope.payload, continuousEventIds, assistantCount);
     }
     return normalizeTodayTrendV2Store(migrated);
 }
@@ -662,14 +1276,20 @@ export function applyTodayTrendGenerationToV2(currentValue, storageId, generated
     if (!previousEnvelope) failure('TT_V2_SCHEMA_INVALID', 'canonical scope 不存在');
     const facade = buildReadOnlyShadow(current);
     facade.scopes[storageId] = clone(generatedScope);
-    const merged = mergeTodayTrendV1StoreIntoV2(current, facade);
+    const merged = mergeTodayTrendV1StoreIntoV2(current, facade, { assistantCount });
     const envelope = merged.globalEnvelope.payload.scopes[storageId];
     let payload = applyTodayTrendHistoryProducer(envelope.payload, history, {
         trustedStoryDate, assistantCount, previousPayload: previousEnvelope.payload,
     });
+    const reliableCount = reliableAssistantCount(assistantCount);
+    if (reliableCount !== null && (payload.historyRetentionState.highWaterAssistantCount === null
+        || reliableCount > payload.historyRetentionState.highWaterAssistantCount)) {
+        payload.historyRetentionState.highWaterAssistantCount = reliableCount;
+    }
+    payload = applyArchivedRetention(payload, reliableCount);
     payload.fixedCoreBaselineByEvent = Object.fromEntries(payload.dynamics.archived
         .map(event => [event.id, extractArchivedFixedCore(event)]));
-    if (snapshot) payload = appendTodayTrendCanonicalSnapshot(payload, assistantCount, generatedAt);
+    if (snapshot) payload = appendTodayTrendCanonicalSnapshot(payload, assistantCount, generatedAt, current.globalEnvelope.revision + 1);
     envelope.payload = payload;
     return normalizeTodayTrendV2Store(merged);
 }
@@ -684,12 +1304,128 @@ export function rollbackTodayTrendV2Scope(currentValue, storageId, assistantCoun
     return normalizeTodayTrendV2Store(current);
 }
 
+export function resolveTodayTrendV2DetailForTarget(currentValue, storageId, eventId, detailId, targetAssistantCount) {
+    const target = reliableAssistantCount(targetAssistantCount);
+    if (target === null || typeof storageId !== 'string' || typeof eventId !== 'string' || typeof detailId !== 'string') return null;
+    const store = normalizeTodayTrendV2Store(currentValue);
+    const payload = store.globalEnvelope.payload.scopes[storageId]?.payload;
+    if (!payload) return null;
+    const detail = (payload.stageDetailsByEvent[eventId] || []).find(item => item.id === detailId);
+    if (!detail) return null;
+    const detailState = payload.removableEntityStateById[detailId];
+    if (detailState?.state !== 'available' || detailState.entityType !== 'detail' || detailState.eventId !== eventId) return null;
+    const event = [...payload.dynamics.active, ...payload.dynamics.archived].find(item => item.id === eventId);
+    if (!event) return null;
+    const sourceSummary = [
+        ...event.stages.filter(stage => stage.kind === 'day-summary'),
+        ...Object.values(payload.archivedRemovableDataByEvent[eventId]?.daySummariesById || {}),
+    ].find(summary => summary.detailRefs.includes(detailId)
+        && summary.sourceFloorEnd !== null && summary.sourceFloorEnd <= target);
+    if (!sourceSummary) return null;
+    const manifestContainer = payload.archivedRemovableDataByEvent[eventId]?.manifestsById || {};
+    const manifestVisible = payload.generationSnapshots.some(snapshot => {
+        if (snapshot.visibleFromAssistantCount > target) return false;
+        return snapshot.detailManifestRefs.some(entry => {
+            if (entry.eventId !== eventId || entry.visibleFromAssistantCount > target || !entry.detailRefs.includes(detailId)) return false;
+            const manifest = manifestContainer[entry.manifestId];
+            const state = payload.removableEntityStateById[entry.manifestId];
+            return manifest?.id === entry.manifestId && state?.state === 'available'
+                && state.entityType === 'manifest' && state.eventId === eventId;
+        });
+    });
+    return manifestVisible ? clone(detail) : null;
+}
+
 export function normalizeTodayTrendV2Candidate(value, currentValue = null) {
     if (value?.version === TODAY_TREND_V2_STORE_VERSION && Object.hasOwn(value, 'globalEnvelope')) {
         return normalizeTodayTrendV2Store(value);
     }
     if (currentValue) return mergeTodayTrendV1StoreIntoV2(currentValue, value);
     return migrateTodayTrendStoreToV2(value).store;
+}
+
+function translateBranchFloor(value, offset) {
+    return value === null ? null : Math.max(0, value + offset);
+}
+
+function translateBranchProjection(stage, offset) {
+    const translated = clone(stage);
+    if (Object.hasOwn(translated, 'sourceFloorStart')) {
+        translated.sourceFloorStart = translateBranchFloor(translated.sourceFloorStart, offset);
+        translated.sourceFloorEnd = translateBranchFloor(translated.sourceFloorEnd, offset);
+    }
+    return translated;
+}
+
+function translateBranchEvent(event, offset) {
+    const translated = clone(event);
+    translated.stages = translated.stages.map(stage => translateBranchProjection(stage, offset));
+    if (translated.lifecycle === 'archived') {
+        translated.archivedAtAssistantCount = translateBranchFloor(translated.archivedAtAssistantCount, offset);
+    }
+    return translated;
+}
+
+export function copyTodayTrendV2ScopeForBranch(sourceEnvelopeValue, targetStorageId, targetAssistantCount = 0, presetsValue) {
+    if (typeof targetStorageId !== 'string' || !targetStorageId) throw new TypeError('目标 storageId 必须是非空字符串');
+    if (!plainRecord(presetsValue)) throw new TypeError('分支复制必须提供 canonical 世界预设集合');
+    const targetFloor = safeInteger(targetAssistantCount, '分支目标 assistantCount');
+    const presets = clone(presetsValue);
+    const sourceEnvelope = normalizeScopeEnvelope(sourceEnvelopeValue, presets);
+    if (sourceEnvelope.payload.storageId === targetStorageId) invalid('分支目标不得与来源 scope 相同');
+    const sourceFloor = reliableAssistantCount(sourceEnvelope.payload.operation.lastSuccessfulAssistantCount) ?? 0;
+    const offset = targetFloor - sourceFloor;
+    const payload = clone(sourceEnvelope.payload);
+    payload.storageId = targetStorageId;
+    payload.commitJournal = null;
+    payload.operation = {
+        ...payload.operation, lastSuccessfulAssistantCount: targetFloor, lastSuccessfulRunAt: 0,
+    };
+    payload.dynamics = {
+        active: payload.dynamics.active.map(event => translateBranchEvent(event, offset)),
+        archived: payload.dynamics.archived.map(event => translateBranchEvent(event, offset)),
+    };
+    for (const container of Object.values(payload.archivedRemovableDataByEvent)) {
+        container.daySummariesById = Object.fromEntries(Object.entries(container.daySummariesById)
+            .map(([id, summary]) => [id, translateBranchProjection(summary, offset)]));
+    }
+    for (const field of ['removableEntityStateById', 'removableEntityTombstonesById']) {
+        payload[field] = Object.fromEntries(Object.entries(payload[field]).map(([id, state]) => [id, {
+            ...state, removedAtAssistantCount: translateBranchFloor(state.removedAtAssistantCount, offset),
+        }]));
+    }
+    payload.historyRetentionState.highWaterAssistantCount = translateBranchFloor(
+        payload.historyRetentionState.highWaterAssistantCount, offset,
+    );
+    const translatedSnapshots = [];
+    let baselineSnapshot = null;
+    for (const snapshot of payload.generationSnapshots) {
+        const assistantCount = translateBranchFloor(snapshot.assistantCount, offset);
+        const translated = {
+            ...clone(snapshot), assistantCount,
+            visibleFromAssistantCount: translateBranchFloor(snapshot.visibleFromAssistantCount, offset),
+            detailManifestRefs: snapshot.detailManifestRefs.map(entry => ({
+                ...clone(entry), visibleFromAssistantCount: translateBranchFloor(entry.visibleFromAssistantCount, offset),
+            })),
+            dynamics: {
+                active: snapshot.dynamics.active.map(event => translateBranchEvent(event, offset)),
+                archived: snapshot.dynamics.archived.map(event => translateBranchEvent(event, offset)),
+            },
+        };
+        if (assistantCount === 0) {
+            if (baselineSnapshot === null || snapshot.assistantCount > baselineSnapshot.sourceAssistantCount) {
+                baselineSnapshot = { sourceAssistantCount: snapshot.assistantCount, value: translated };
+            }
+        } else translatedSnapshots.push(translated);
+    }
+    // Source history before the target chat's floor 0 cannot be represented. Collapse it deterministically
+    // to the latest source checkpoint at or before that boundary instead of overwriting Map keys silently.
+    if (baselineSnapshot) translatedSnapshots.push(baselineSnapshot.value);
+    payload.generationSnapshots = translatedSnapshots.sort((left, right) => left.assistantCount - right.assistantCount)
+        .slice(-TODAY_TREND_LIMITS.generationSnapshots);
+    payload.fixedCoreBaselineByEvent = Object.fromEntries(payload.dynamics.archived
+        .map(event => [event.id, extractArchivedFixedCore(event)]));
+    return normalizeScopeEnvelope({ ...sourceEnvelope, revision: 0, payload }, presets);
 }
 
 export function rebaseTodayTrendV2Store(value, globalRevision, scopeRevisionByStorageId = null) {

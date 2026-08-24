@@ -29,7 +29,7 @@ dynamics 必须仅含 active 与 archived。事件仅含 id,type,lifecycle,title
     return { systemPrompt, userPrompt };
 }
 
-export function buildTodayTrendGenerationEnvelope({ context, preset, scope, assistantCount = 0, allowIncident = false, target = null, storyDate = null, summaryOnly = false } = {}) {
+export function buildTodayTrendGenerationEnvelope({ context, preset, scope, promptScope = null, assistantCount = 0, allowIncident = false, target = null, storyDate = null, summaryOnly = false } = {}) {
     if (!context || typeof context !== 'object') throw new TypeError('今日风向生成提示词缺少上下文');
     if (!preset || typeof preset !== 'object') throw new TypeError('今日风向生成提示词缺少世界预设');
     if (!scope || typeof scope !== 'object') throw new TypeError('今日风向生成提示词缺少角色资料');
@@ -54,7 +54,7 @@ dynamics 非 null 时必须仅含 active、archived。事件仅含 id,type,lifec
         block('reputation_rule', preset.moduleRules?.reputation, 600),
         block('faction_rule', preset.moduleRules?.faction, 600),
         block('dynamics_rule', [preset.moduleRules?.dynamics, preset.dynamicsRules?.general, preset.dynamicsRules?.incident, preset.dynamicsRules?.rumor, preset.dynamicsRules?.underground].filter(Boolean).join('\n'), 2400),
-        block('current_today_trend', JSON.stringify({ world: scope.world, reputation: scope.reputation, factions: scope.factions, dynamics: scope.dynamics }), 12000),
+        block('current_today_trend', typeof promptScope === 'string' && promptScope.trim() ? promptScope : JSON.stringify({ world: scope.world, reputation: scope.reputation, factions: scope.factions, dynamics: scope.dynamics }), 12000),
         block('story_date', storyDate, 10),
         `目标角色：${context.characterName}\n目标聊天：${context.storageId}\n当前已完成助手楼层：${assistantCount}\n${targetInstruction}`,
     ].filter(Boolean).join('\n\n');

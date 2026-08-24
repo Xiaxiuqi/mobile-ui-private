@@ -4,7 +4,9 @@ import {
 } from './today-trend-storage.js';
 import { normalizeTodayTrendStore } from './today-trend-model.js';
 import { todayTrendStoreDigest } from './today-trend-journal.js';
-import { buildReadOnlyShadow, normalizeTodayTrendV2Candidate } from './today-trend-v2-model.js';
+import {
+    buildReadOnlyShadow, copyTodayTrendV2ScopeForBranch, normalizeTodayTrendV2Candidate,
+} from './today-trend-v2-model.js';
 
 const clone = value => structuredClone(value);
 
@@ -280,6 +282,29 @@ export function createTodayTrendCommitter({
 
     const commitScope = (storageId, mutate, task = null, options = {}) => commitStore(async store => {
         if (typeof storageId !== 'string' || !storageId) throw new TypeError('今日风向角色资料 ID 必须是非空字符串');
+        if (options.branchSourceId !== undefined && loadCanonical) {
+            if (typeof options.branchSourceId !== 'string' || !options.branchSourceId) {
+                throw new TypeError('今日风向分支来源 ID 必须是非空字符串');
+            }
+            const scopes = store.globalEnvelope.payload.scopes;
+            const envelope = scopes[storageId];
+            const currentScope = envelope ? facadeStore(store).scopes[storageId] : undefined;
+            const scope = await mutate(clone(currentScope));
+            if (scope === null) delete scopes[storageId];
+            else {
+                if (envelope) throw new Error('分支继承不得覆盖已存在的 canonical scope');
+                if (!Number.isSafeInteger(options.targetAssistantCount) || options.targetAssistantCount < 0) {
+                    throw new TypeError('今日风向分支目标楼层必须是非负安全整数');
+                }
+                const sourceEnvelope = scopes[options.branchSourceId];
+                if (!sourceEnvelope) throw new Error('分支继承来源 canonical scope 不存在');
+                scopes[storageId] = copyTodayTrendV2ScopeForBranch(
+                    sourceEnvelope, storageId, options.targetAssistantCount,
+                    store.globalEnvelope.payload.presets,
+                );
+            }
+            return store;
+        }
         if (options.canonical) {
             const scopes = store.globalEnvelope.payload.scopes;
             const envelope = scopes[storageId];
@@ -295,9 +320,14 @@ export function createTodayTrendCommitter({
         if (scope === null) delete store.scopes[storageId];
         else store.scopes[storageId] = scope;
         return store;
-    }, task, { ...options, scopeId: storageId });
+    }, task, {
+        ...options,
+        canonical: options.canonical === true || (options.branchSourceId !== undefined && !!loadCanonical),
+        scopeId: storageId,
+    });
 
-    const api = { commitStore, commitScope, invalidateCommits, recover, supportsCanonical: typeof loadCanonical === 'function' };
+    const api = { commitStore, commitScope, invalidateCommits, recover, loadCanonical,
+        supportsCanonical: typeof loadCanonical === 'function' };
     if (journal) Object.assign(api, { ready: recover, isBlocked: () => journal.blocked() === true });
     return api;
 }

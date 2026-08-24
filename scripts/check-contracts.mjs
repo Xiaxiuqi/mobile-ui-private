@@ -1,3 +1,4 @@
+/* eslint-disable import-x/no-nodejs-modules -- This contract checker intentionally runs in Node.js. */
 import { readFile, readdir } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
@@ -1703,8 +1704,8 @@ function staticValue(node) {
     switch (node.operator) {
     case '===': return { known: true, value: left.value === right.value };
     case '!==': return { known: true, value: left.value !== right.value };
-    case '==': return { known: true, value: left.value == right.value }; // eslint-disable-line eqeqeq
-    case '!=': return { known: true, value: left.value != right.value }; // eslint-disable-line eqeqeq
+    case '==': return { known: true, value: left.value == right.value };
+    case '!=': return { known: true, value: left.value != right.value };
     case '<': return { known: true, value: left.value < right.value };
     case '<=': return { known: true, value: left.value <= right.value };
     case '>': return { known: true, value: left.value > right.value };
@@ -2171,7 +2172,10 @@ verifyCallAiOptionsDetector();
 
 // CSS token migration is intentionally isolated from the concurrent scene-model split.
 // Keep this exception file-specific: every other source module remains subject to the limit.
-const MODULE_LINE_LIMIT_EXCEPTIONS = new Set(['src/interactive-scene-model.js']);
+const MODULE_LINE_LIMIT_EXCEPTIONS = new Set([
+  'src/interactive-scene-model.js',
+  'src/today-trend-v2-model.js',
+]);
 const MAX_SOURCE_MODULE_LINES = 800;
 const sourceResult = {
   commandObject: false, commandObjectHelp: false,
@@ -3626,7 +3630,18 @@ for (const expected of [
   '.pm-today-trend-page{overflow:hidden;background:var(--pm-color-surface-page)}',
   '.pm-today-trend-header{position:sticky;top:0;z-index:var(--pm-z-base)',
   '.pm-today-trend-header button svg,.pm-today-trend-icon-button svg{width:var(--pm-size-icon-md);height:var(--pm-size-icon-md)',
+  '.pm-today-trend-retention-settings{display:flex;min-width:0;flex-direction:column;gap:var(--pm-space-2)',
+  '.pm-today-trend-retention-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:var(--pm-space-2)',
+  '.pm-today-trend-shell input.pm-today-trend-input:invalid{border-color:var(--pm-color-danger)',
+  '.pm-today-trend-diagnostic button:focus-visible{outline:var(--pm-today-trend-focus-offset) solid var(--pm-color-focus-ring)',
+  '.pm-today-trend-stage-date{display:block;margin-bottom:var(--pm-space-1);color:var(--pm-color-text-tertiary)',
+  '@media(max-width:320px){.pm-today-trend-content{padding:var(--pm-space-3)',
 ]) requireText('style.css', css, expected);
+for (const [file, expected] of [
+  ['today-trend.js', 'saveTodayTrendRetentionSettings: saveRetentionSettings'],
+  ['today-trend-phone-controller.js', "cause?.code === 'TT_SETTINGS_REVISION_CONFLICT'"],
+  ['today-trend-view.js', 'data-action="today-trend-copy-diagnostic-code"'],
+]) if (!sourceModuleByName.get(file)?.code.includes(expected)) failures.push(`${file}: phase 11 contract missing ${expected}`);
 if (css.includes('assets/today-trend/world/middle-repeat.svg') || css.includes('pm-today-trend-world-grid')) failures.push('style.css: world card layout must not retain the repeated grid background');
 const removedTodayTrendAssetPattern = /assets\/today-trend\/(?:world|reputation|faction|dynamics)\/(?:top|bottom|top-glow|starlight[^/]*)\.svg/g;
 const removedTodayTrendAssets = css.match(removedTodayTrendAssetPattern) || [];

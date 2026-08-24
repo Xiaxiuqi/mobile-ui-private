@@ -88,12 +88,13 @@ const sameSnapshot = (observation, snapshot) => observation?.key === snapshot.ke
 
 export function createTodayTrendScheduler({
     controller, committer, getStore, getStorageId, getChat = () => [], getFloor = () => null, random = Math.random, now = () => Date.now(),
-    getCalendarStore = () => null, wait = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds)),
+    getCalendarStore = () => null, getPromptScope = null, wait = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds)),
     commitFeedbackMs = 240,
 } = {}) {
     if (!controller || typeof controller.generate !== 'function') throw new TypeError('今日风向调度器缺少生成控制器');
     if (!committer || typeof committer.commitStore !== 'function' || typeof committer.invalidateCommits !== 'function') throw new TypeError('今日风向调度器缺少事务提交器');
     if (typeof getStore !== 'function' || typeof getStorageId !== 'function') throw new TypeError('今日风向调度器缺少存储或聊天读取器');
+    if (getPromptScope !== null && typeof getPromptScope !== 'function') throw new TypeError('今日风向调度器 prompt scope 读取器无效');
     let sequence = 0;
     let accessSequence = 0;
     let activeTask = null;
@@ -257,11 +258,14 @@ export function createTodayTrendScheduler({
             const configuredProbability = scope.dynamicsSettings?.incident?.enabled
                 ? scope.dynamicsSettings.incident.probability : 0;
             const effectiveIncidentProbability = incidentProbability === undefined ? configuredProbability : incidentProbability;
+            const promptScope = getPromptScope ? await getPromptScope(id) : null;
+            if (getPromptScope && typeof promptScope !== 'string') throw new Error('今日风向 canonical prompt scope 不可用');
+            if (!isActive(task)) throw cancelled();
             const generated = await controller.generate({
                 signal: task.abortController.signal, scope, preset, storageId: id,
                 characterId: scope.characterId, characterName: scope.characterName,
                 assistantCount: task.floor, allowIncident: rollIncident(effectiveIncidentProbability),
-                target: task.target, summaryOnly: task.summaryOnly, storyDate: trustedStoryDate,
+                target: task.target, summaryOnly: task.summaryOnly, storyDate: trustedStoryDate, promptScope,
                 onPhase: next => { if (isActive(task)) setPhase(next, null); },
             });
             if (!isActive(task)) throw cancelled();

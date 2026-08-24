@@ -11,11 +11,17 @@ const text = (value, label, max = 240) => {
     return value.trim();
 };
 const nullableText = (value, label, max = 120) => value === null ? null : text(value, label, max);
+const timePattern = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
+const nullableTime = (value, label) => {
+    if (value !== null && (typeof value !== 'string' || !timePattern.test(value))) fail('TT_HISTORY_SCHEMA_INVALID', `${label} 必须是 HH:mm 或 null`);
+    return value;
+};
 const datePattern = /^\d{4}-\d{2}-\d{2}$/;
 const validDate = value => typeof value === 'string' && datePattern.test(value)
     && Number.isFinite(new Date(`${value}T12:00:00Z`).getTime())
     && new Date(`${value}T12:00:00Z`).toISOString().slice(0, 10) === value;
 const projectionText = stage => ['day-summary', 'period-summary', 'span-stage'].includes(stage.kind) ? stage.summary : stage.text;
+const DETAIL_CAPACITY = 80;
 const availableState = (entityType, entityId, eventId) => ({
     entityType, entityId, eventId, state: 'available', removalReason: null, removedAtAssistantCount: null, policyRevision: 1,
 });
@@ -30,7 +36,7 @@ function normalizeIdArray(value, label, max) {
 
 function normalizeStage(value) {
     exact(value, ['text', 'time', 'timeLabel'], 'history stage');
-    return { text: text(value.text, 'history stage.text', 600), time: nullableText(value.time, 'history stage.time', 5),
+    return { text: text(value.text, 'history stage.text', 600), time: nullableTime(value.time, 'history stage.time'),
         timeLabel: nullableText(value.timeLabel, 'history stage.timeLabel', 40) };
 }
 
@@ -144,6 +150,58 @@ function closeLiveDate(event, storyDate, summary, payload, knownEventIds) {
     return true;
 }
 
+function governDetailCapacity(event, payload, assistantCount) {
+    const details = payload.stageDetailsByEvent[event.id] || [];
+    if (details.length <= DETAIL_CAPACITY) return false;
+    const detailsByDate = new Map();
+    for (const detail of details) {
+        if (!validDate(detail.storyDate)) continue;
+        const group = detailsByDate.get(detail.storyDate) || [];
+        group.push(detail);
+        detailsByDate.set(detail.storyDate, group);
+    }
+    const openStoryDates = new Set(event.stages.filter(stage => stage.kind === 'live-stage').map(stage => stage.storyDate));
+    const summariesByDate = new Map(event.stages.filter(stage => stage.kind === 'day-summary' && stage.status === 'closed')
+        .map(stage => [stage.storyDate, stage]));
+    const groups = [...detailsByDate.entries()].sort(([left], [right]) => left.localeCompare(right)).flatMap(([storyDate, group]) => {
+        if (openStoryDates.has(storyDate)) return [];
+        const summary = summariesByDate.get(storyDate);
+        if (!summary) return [];
+        const refs = new Set(summary.detailRefs);
+        if (group.some(detail => !refs.has(detail.id))) return [];
+        return [{ storyDate, details: [...group].sort((left, right) =>
+            left.sourceStageSequence - right.sourceStageSequence || left.id.localeCompare(right.id)) }];
+    });
+    let requiredSlots = details.length - DETAIL_CAPACITY;
+    const removedDetails = [];
+    for (const group of groups) {
+        removedDetails.push(...group.details);
+        requiredSlots -= group.details.length;
+        if (requiredSlots <= 0) break;
+    }
+    if (requiredSlots > 0) {
+        fail('TT_DETAIL_CAPACITY_NO_SAFE_GROUP', `event ${event.id} 没有足够的已摘要完整日期可安全清理`);
+    }
+    const removedAtAssistantCount = Number.isSafeInteger(assistantCount) && assistantCount >= 0 ? assistantCount : null;
+    const removedIds = new Set(removedDetails.map(detail => detail.id));
+    for (const detail of removedDetails) {
+        const state = payload.removableEntityStateById[detail.id];
+        if (!state || state.state !== 'available' || state.entityType !== 'detail' || state.eventId !== event.id) {
+            fail('TT_HISTORY_SCHEMA_INVALID', 'detail capacity lifecycle 无效');
+        }
+        const removed = {
+            ...state, state: 'removed', removalReason: 'detail-pool-capacity', removedAtAssistantCount,
+        };
+        payload.removableEntityStateById[detail.id] = removed;
+        payload.removableEntityTombstonesById[detail.id] = clone(removed);
+    }
+    const retained = details.filter(detail => !removedIds.has(detail.id));
+    if (retained.length > DETAIL_CAPACITY) fail('TT_DETAIL_CAPACITY_NO_SAFE_GROUP', `event ${event.id} detail 容量治理失败`);
+    if (retained.length) payload.stageDetailsByEvent[event.id] = retained;
+    else delete payload.stageDetailsByEvent[event.id];
+    return true;
+}
+
 function latestKnownDate(event) {
     const dates = event.stages.flatMap(stage => {
         if (stage.kind === 'live-stage' || stage.kind === 'day-summary') return [stage.storyDate];
@@ -169,11 +227,133 @@ function assertStageAlignment(previousEvent, candidateEvent, producerStages) {
     }
 }
 
+const periodBoundary = stage => stage.kind === 'day-summary' ? {
+    startDate: stage.storyDate, startTime: stage.timeRange.start,
+    endDate: stage.storyDate, endTime: stage.timeRange.end,
+} : {
+    startDate: stage.startDate, startTime: stage.startTime,
+    endDate: stage.endDate, endTime: stage.endTime,
+};
+const periodChildRefs = stage => stage.kind === 'day-summary' ? [stage.id] : stage.childSummaryRefs;
+const periodChildCount = stage => stage.kind === 'day-summary' ? 1 : stage.childSummaryCount;
+const periodDetailCount = stage => stage.kind === 'day-summary' ? stage.detailCount : stage.historicalDetailCount;
+const daySpan = (startDate, endDate) => Math.floor((new Date(`${endDate}T12:00:00Z`)
+    - new Date(`${startDate}T12:00:00Z`)) / 86400000) + 1;
+
+function periodCandidate(stages, start, end) {
+    const children = stages.slice(start, end + 1);
+    if (children.length < 2 || children.some(stage => !['day-summary', 'period-summary'].includes(stage.kind))) return null;
+    for (let index = 1; index < children.length; index += 1) {
+        if (children[index].sourceStageStart !== children[index - 1].sourceStageEnd + 1) return null;
+    }
+    const first = periodBoundary(children[0]);
+    const last = periodBoundary(children.at(-1));
+    if (daySpan(first.startDate, last.endDate) > 7) return null;
+    const childSummaryRefs = children.flatMap(periodChildRefs);
+    if (childSummaryRefs.length > 24 || new Set(childSummaryRefs).size !== childSummaryRefs.length) return null;
+    if ((first.startTime === null) !== (last.endTime === null)) return null;
+    return {
+        start, end, children, childSummaryRefs, startDate: first.startDate, startTime: first.startTime,
+        endDate: last.endDate, endTime: last.endTime, gain: children.length - 1,
+        childSummaryCount: children.reduce((count, stage) => count + periodChildCount(stage), 0),
+        historicalDetailCount: children.reduce((count, stage) => count + periodDetailCount(stage), 0),
+        sourceStageStart: children[0].sourceStageStart, sourceStageEnd: children.at(-1).sourceStageEnd,
+        sortId: children.map(stage => stage.id).join('\u0000'),
+    };
+}
+
+function periodCandidates(stages) {
+    const result = [];
+    // StageProjection schema caps admission at 40, so this exhaustive O(n²) enumeration is strictly bounded.
+    for (let start = 0; start < stages.length - 1; start += 1) {
+        for (let end = start + 1; end < stages.length; end += 1) {
+            const candidate = periodCandidate(stages, start, end);
+            if (candidate) result.push(candidate);
+            else if (!['day-summary', 'period-summary'].includes(stages[end].kind)) break;
+        }
+    }
+    return result;
+}
+
+function exactAiPeriod(candidate, summaries) {
+    return summaries.find(summary => summary.startDate === candidate.startDate
+        && summary.endDate === candidate.endDate && same(summary.childSummaryRefs, candidate.childSummaryRefs)) || null;
+}
+
+function reusableSummary(candidate) {
+    const combined = candidate.children.map(stage => stage.summary).join('\n---\n');
+    return combined.length <= 240 ? combined : null;
+}
+
+function choosePeriodCandidate(event, summaries, requiredGain, optional) {
+    const candidates = periodCandidates(event.stages).map(candidate => ({
+        ...candidate, ai: exactAiPeriod(candidate, summaries), fallback: optional ? null : reusableSummary(candidate),
+    })).filter(candidate => candidate.ai || candidate.fallback);
+    if (optional) {
+        const matched = candidates.filter(candidate => candidate.ai);
+        if (!matched.length) return null;
+        candidates.length = 0;
+        candidates.push(...matched);
+    }
+    candidates.sort((left, right) => {
+        const start = left.sourceStageStart - right.sourceStageStart;
+        if (start) return start;
+        const leftSatisfies = left.gain >= requiredGain;
+        const rightSatisfies = right.gain >= requiredGain;
+        if (leftSatisfies !== rightSatisfies) return leftSatisfies ? -1 : 1;
+        if (leftSatisfies) {
+            const projectionChildCount = left.children.length - right.children.length;
+            if (projectionChildCount) return projectionChildCount;
+        }
+        return left.sourceStageEnd - right.sourceStageEnd || left.sortId.localeCompare(right.sortId);
+    });
+    return candidates[0] || null;
+}
+
+function compactPeriod(event, payload, candidate, periodSequence, assistantCount) {
+    const removedAtAssistantCount = Number.isSafeInteger(assistantCount) && assistantCount >= 0 ? assistantCount : null;
+    for (const stage of candidate.children) {
+        if (stage.kind !== 'day-summary') continue;
+        const state = payload.removableEntityStateById[stage.id];
+        if (!state || state.state !== 'available' || state.entityType !== 'day-summary' || state.eventId !== event.id) {
+            fail('TT_HISTORY_SCHEMA_INVALID', 'period compaction day-summary lifecycle 无效');
+        }
+        const removed = {
+            ...state, state: 'removed', removalReason: 'period-compaction', removedAtAssistantCount,
+        };
+        payload.removableEntityStateById[stage.id] = removed;
+        payload.removableEntityTombstonesById[stage.id] = clone(removed);
+    }
+    const period = {
+        id: `period:${event.id}:${periodSequence}`, kind: 'period-summary', periodSequence,
+        startDate: candidate.startDate, startTime: candidate.startTime, endDate: candidate.endDate, endTime: candidate.endTime,
+        summary: candidate.ai?.summaryText || candidate.fallback, childSummaryRefs: candidate.childSummaryRefs,
+        childSummaryCount: candidate.childSummaryCount, historicalDetailCount: candidate.historicalDetailCount,
+        sourceStageStart: candidate.sourceStageStart, sourceStageEnd: candidate.sourceStageEnd, revision: 1,
+    };
+    event.stages.splice(candidate.start, candidate.children.length, period);
+}
+
+function planPeriodCompaction(event, payload, summaries, assistantCount) {
+    let periodSequence = event.stages.reduce((maximum, stage) => Math.max(maximum,
+        stage.kind === 'period-summary' ? stage.periodSequence : 0), 0) + 1;
+    if (event.stages.length >= 36 && event.stages.length <= 38) {
+        const candidate = choosePeriodCandidate(event, summaries, 1, true);
+        if (candidate) compactPeriod(event, payload, candidate, periodSequence++, assistantCount);
+    }
+    while (event.stages.length >= 40) {
+        const candidate = choosePeriodCandidate(event, summaries, event.stages.length - 39, false);
+        if (!candidate) fail('TT_CAPACITY_NO_COMPACTION_CANDIDATE', `event ${event.id} 无可安全折叠历史`);
+        compactPeriod(event, payload, candidate, periodSequence++, assistantCount);
+    }
+}
+
 export function applyTodayTrendHistoryProducer(payloadValue, producerValue, {
     trustedStoryDate = null, assistantCount = null, previousPayload = null,
 } = {}) {
     if (trustedStoryDate !== null && !validDate(trustedStoryDate)) fail('TT_DATE_CONFLICT', '可信 storyDate 格式无效');
     const payload = clone(payloadValue);
+    let detailPoolChanged = false;
     const producer = normalizeTodayTrendHistoryProducer(producerValue);
     assertProducerLimits(producer, payload);
     const candidates = mapEvents(payload.dynamics);
@@ -216,28 +396,76 @@ export function applyTodayTrendHistoryProducer(payloadValue, producerValue, {
         if (item.daySummaries.length !== (requiresSummary ? 1 : 0)) {
             fail('TT_DATE_CONFLICT', requiresSummary ? '日期前进必须恰好提供一个 day summary' : '当前日期没有可封闭的 live-stage');
         }
-        if (requiresSummary) closeLiveDate(event, openDate, item.daySummaries[0], payload, knownEventIds);
+        if (requiresSummary) detailPoolChanged = closeLiveDate(event, openDate, item.daySummaries[0], payload, knownEventIds) || detailPoolChanged;
         appendStageProjections(event, item.stages, trustedStoryDate, Number.isSafeInteger(assistantCount) ? assistantCount : null);
         if (!event.stages.length) fail('TT_HISTORY_SCHEMA_INVALID', 'history producer 不得产生空 event 历史');
+        planPeriodCompaction(event, payload, item.periodSummaries, assistantCount);
         event.latestStage = projectionText(event.stages.at(-1));
         event.capacityCompatibilityPending = event.stages.length === 40;
+    }
+    for (const event of payload.dynamics.active) {
+        detailPoolChanged = governDetailCapacity(event, payload, assistantCount) || detailPoolChanged;
+    }
+    if (detailPoolChanged) {
+        payload.historyRetentionState.detailPoolRevision += 1;
     }
     return payload;
 }
 
-function snapshotFromPayload(payload, assistantCount, generatedAt) {
+function snapshotDetailManifestRefs(payload, visibleFromAssistantCount, storeRevision) {
+    const result = [];
+    const manifestRevision = Math.max(1, storeRevision);
+    for (const event of allEvents(payload.dynamics)) {
+        const availableDetailIds = new Set((payload.stageDetailsByEvent[event.id] || [])
+            .filter(detail => payload.removableEntityStateById[detail.id]?.state === 'available')
+            .map(detail => detail.id));
+        const summaries = event.lifecycle === 'archived'
+            ? Object.values(payload.archivedRemovableDataByEvent[event.id]?.daySummariesById || {})
+            : event.stages.filter(stage => stage.kind === 'day-summary');
+        const detailRefs = [...new Set(summaries
+            .flatMap(summary => summary.detailRefs || []).filter(id => availableDetailIds.has(id)))].sort();
+        if (!detailRefs.length) continue;
+        const container = payload.archivedRemovableDataByEvent[event.id] || {
+            daySummariesById: {}, manifestsById: {},
+        };
+        payload.archivedRemovableDataByEvent[event.id] = container;
+        const existingManifestId = Object.keys(container.manifestsById).sort().find(id => {
+            const state = payload.removableEntityStateById[id];
+            return state?.state === 'available' && state.entityType === 'manifest' && state.eventId === event.id;
+        });
+        const manifestId = existingManifestId || `manifest:${event.id}:${manifestRevision}`;
+        if (!existingManifestId) {
+            container.manifestsById[manifestId] = { id: manifestId };
+            payload.removableEntityStateById[manifestId] = {
+                entityType: 'manifest', entityId: manifestId, eventId: event.id, state: 'available',
+                removalReason: null, removedAtAssistantCount: null,
+                policyRevision: payload.historyRetentionState.retentionPolicyRevision,
+            };
+        }
+        result.push({ eventId: event.id, manifestId, detailRefs, visibleFromAssistantCount });
+    }
+    return result;
+}
+
+function snapshotFromPayload(payload, assistantCount, generatedAt, storeRevision) {
+    const detailManifestRefs = snapshotDetailManifestRefs(payload, assistantCount, storeRevision);
     return {
-        assistantCount, generatedAt,
+        assistantCount, generatedAt, storeRevision,
+        detailPoolRevision: payload.historyRetentionState.detailPoolRevision,
+        visibleFromAssistantCount: assistantCount,
+        detailManifestRefs,
+        retentionPolicyRevision: payload.historyRetentionState.retentionPolicyRevision,
         world: clone(payload.world), reputation: clone(payload.reputation), factions: clone(payload.factions),
         dynamicsSettings: clone(payload.dynamicsSettings), dynamics: clone(payload.dynamics),
     };
 }
 
-export function appendTodayTrendCanonicalSnapshot(payloadValue, assistantCount, generatedAt) {
+export function appendTodayTrendCanonicalSnapshot(payloadValue, assistantCount, generatedAt, storeRevision = 0) {
     const payload = clone(payloadValue);
     const floor = Number.isSafeInteger(assistantCount) && assistantCount >= 0 ? assistantCount : 0;
     const timestamp = Number.isFinite(generatedAt) && generatedAt >= 0 ? Math.floor(generatedAt) : 0;
-    const snapshots = [...payload.generationSnapshots.filter(item => item.assistantCount !== floor), snapshotFromPayload(payload, floor, timestamp)]
+    const revision = Number.isSafeInteger(storeRevision) && storeRevision >= 0 ? storeRevision : 0;
+    const snapshots = [...payload.generationSnapshots.filter(item => item.assistantCount !== floor), snapshotFromPayload(payload, floor, timestamp, revision)]
         .sort((left, right) => left.assistantCount - right.assistantCount);
     const baseline = snapshots.find(item => item.assistantCount === 0);
     payload.generationSnapshots = baseline
@@ -249,6 +477,7 @@ export function appendTodayTrendCanonicalSnapshot(payloadValue, assistantCount, 
 function alignRollbackRemovableContainers(payload) {
     const events = allEvents(payload.dynamics);
     const eventIds = new Set(events.map(event => event.id));
+    const activeIds = new Set(payload.dynamics.active.map(event => event.id));
     const archivedIds = new Set(payload.dynamics.archived.map(event => event.id));
     const bodyIds = new Set();
     const detailRefsByEvent = new Map();
@@ -256,7 +485,8 @@ function alignRollbackRemovableContainers(payload) {
         const refs = new Set();
         for (const stage of event.stages) {
             if (stage.kind !== 'day-summary') continue;
-            bodyIds.add(stage.id);
+            // Archived stage projections are fixed core, not removable day-summary bodies.
+            if (activeIds.has(event.id)) bodyIds.add(stage.id);
             for (const ref of stage.detailRefs) refs.add(ref);
         }
         detailRefsByEvent.set(event.id, refs);
@@ -269,8 +499,9 @@ function alignRollbackRemovableContainers(payload) {
         return retained.length ? [[eventId, retained]] : [];
     }));
     payload.archivedRemovableDataByEvent = Object.fromEntries(Object.entries(payload.archivedRemovableDataByEvent || {})
-        .filter(([eventId]) => archivedIds.has(eventId))
+        .filter(([eventId]) => eventIds.has(eventId))
         .map(([eventId, container]) => {
+            if (!archivedIds.has(eventId)) container.daySummariesById = {};
             for (const id of Object.keys(container.daySummariesById || {})) bodyIds.add(id);
             for (const id of Object.keys(container.manifestsById || {})) bodyIds.add(id);
             return [eventId, container];
@@ -293,9 +524,12 @@ export function rollbackTodayTrendCanonicalPayload(payloadValue, assistantCount)
     const floor = Number.isSafeInteger(assistantCount) && assistantCount >= 0 ? assistantCount : 0;
     const snapshot = payload.generationSnapshots.filter(item => item.assistantCount <= floor).at(-1);
     if (!snapshot) return payload;
+    const currentArchived = clone(payload.dynamics.archived);
+    const archivedIds = new Set(currentArchived.map(event => event.id));
     Object.assign(payload, {
         world: clone(snapshot.world), reputation: clone(snapshot.reputation), factions: clone(snapshot.factions),
-        dynamicsSettings: clone(snapshot.dynamicsSettings), dynamics: clone(snapshot.dynamics),
+        dynamicsSettings: clone(snapshot.dynamicsSettings),
+        dynamics: { active: clone(snapshot.dynamics.active).filter(event => !archivedIds.has(event.id)), archived: currentArchived },
         operation: { ...payload.operation, lastSuccessfulAssistantCount: snapshot.assistantCount, lastSuccessfulRunAt: snapshot.generatedAt },
         generationSnapshots: payload.generationSnapshots.filter(item => item.assistantCount <= snapshot.assistantCount),
     });

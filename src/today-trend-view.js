@@ -9,6 +9,20 @@ import { escapeAttr, escapeHtml } from './ui.js';
 
 const moduleView = (view, props) => ({ world: renderTodayTrendWorldView, reputation: renderTodayTrendReputationView, faction: renderTodayTrendFactionView, dynamics: renderTodayTrendDynamicsView }[view.name] || renderTodayTrendWorldView)(props);
 
+function errorFeedback(error, copyStatus = '') {
+    if (!error) return '';
+    const message = typeof error === 'string' ? error : String(error.message || '未知错误');
+    const code = typeof error === 'object' && /^TT_[A-Z0-9_]+$/.test(String(error.code || '')) ? String(error.code) : '';
+    if (!code && !copyStatus) {
+        return `<p class="pm-today-trend-init-feedback pm-today-trend-error" role="alert">${escapeHtml(message)}</p>`;
+    }
+    const diagnostic = code
+        ? `<span class="pm-today-trend-diagnostic"><code>${escapeHtml(code)}</code><button type="button" data-action="today-trend-copy-diagnostic-code" data-code="${escapeAttr(code)}">复制诊断码</button></span>`
+        : '';
+    const copyFeedback = copyStatus ? `<small class="pm-today-trend-diagnostic-copy-status" role="status">${escapeHtml(copyStatus)}</small>` : '';
+    return `<div class="pm-today-trend-init-feedback pm-today-trend-error" role="alert" tabindex="-1"><span>${escapeHtml(message)}</span>${diagnostic}${copyFeedback}</div>`;
+}
+
 function renderFirstUse({ presets, worldBooks, error, initializing, draft = {}, reinitializing = false, initializationMode = 'reuse' }) {
     const presetOptions = presets.map(item => `<option value="${escapeAttr(item.id)}">${escapeHtml(item.name)}</option>`).join('');
     const canReusePreset = Boolean(presetOptions) && !reinitializing;
@@ -17,8 +31,7 @@ function renderFirstUse({ presets, worldBooks, error, initializing, draft = {}, 
     const books = worldBooks.map(name => `<label class="pm-today-trend-book-option"><input class="pm-today-trend-book-input" type="checkbox" name="worldBookNames" value="${escapeAttr(name)}" ${selectedBooks.has(name) ? 'checked' : ''}><i class="pm-today-trend-book-check" aria-hidden="true"></i><span>${escapeHtml(name)}</span></label>`).join('');
     const modeSwitch = canReusePreset ? `<div class="pm-today-trend-mode-switch" aria-label="预设使用方式"><button type="button" data-action="today-trend-use-preset" aria-pressed="${activeMode === 'reuse'}">复用预设</button><button type="button" data-action="today-trend-create-preset" aria-pressed="${activeMode === 'create'}">创建预设</button></div>` : '';
     const worldBookOptions = books || '<p class="pm-today-trend-empty-state" role="status">当前聊天没有可用世界书，无法初始化。</p>';
-    const feedback = error
-        ? `<p class="pm-today-trend-init-feedback pm-today-trend-error" role="alert">${escapeHtml(error)}</p>`
+    const feedback = error ? errorFeedback(error)
         : initializing ? '<p class="pm-today-trend-init-feedback pm-today-trend-loading" role="status" aria-live="polite">正在初始化今日风向，请保持页面开启。</p>' : '';
     const cancelAction = reinitializing ? '<button class="pm-today-trend-secondary-action" type="button" data-action="today-trend-cancel-initialize">取消</button>' : '';
     const initializeSectionTitle = reinitializing ? '重新初始化配置' : '创建新预设';
@@ -46,7 +59,10 @@ function renderRuleEditorPage(preset, rule, draft) {
     return `<main class="pm-today-trend-content pm-today-trend-rule-page"><section class="pm-today-trend-view">${trendRuleEditor({ rule, value })}</section></main>`;
 }
 
-export function renderTodayTrendApp({ scope = null, presets = [], worldBooks = [], view = { name: 'world', mode: 'content' }, generation = {}, currentFloor, error = null, initializing = false, initializationDraft, initializationOpen = false, reinitializing = false, initializationMode = 'reuse' } = {}) {
+export function renderTodayTrendApp({ scope = null, presets = [], worldBooks = [], view = { name: 'world', mode: 'content' }, generation = {}, currentFloor,
+    error = null, initializing = false, initializationDraft, initializationOpen = false, reinitializing = false, initializationMode = 'reuse',
+    detailById = {}, loadingDetailIds = new Set(), retentionRevisions = null, retentionSaving = false, retentionDraft = null,
+    diagnosticCopyStatus = '' } = {}) {
     const busy = ['queued', 'generating', 'parsing', 'committing'].includes(generation.phase);
     const syncedFloor = Number.isInteger(scope?.operation?.lastSuccessfulAssistantCount) && scope.operation.lastSuccessfulAssistantCount >= 0
         ? scope.operation.lastSuccessfulAssistantCount : 0;
@@ -65,8 +81,9 @@ export function renderTodayTrendApp({ scope = null, presets = [], worldBooks = [
     const content = !scope || initializationOpen ? renderFirstUse({ presets, worldBooks, error, initializing, draft: initializationDraft, reinitializing, initializationMode }) : view.editingRule
         ? renderRuleEditorPage(preset, view.editingRule, view.ruleDraft)
         : view.name === 'settings'
-        ? `<main class="pm-today-trend-content">${renderTodayTrendSettingsView({ scope, presets, generationBusy: busy, menuOpenId: view.menuOpenId })}</main>`
-        : `<main class="pm-today-trend-content${view.mode === 'content' ? ` is-${view.name}${scope.injection?.minimalUi ? ' is-minimal-ui' : ''}` : ''}">${moduleView(view, { scope, preset, mode: view.mode, dynamicsTab: view.dynamicsTab, editingWorldItemId: view.editingWorldItemId, editingCircleId: view.editingCircleId, editingFactionId: view.editingFactionId, editingEventId: view.editingEventId, editingRule: view.editingRule, ruleDraft: view.ruleDraft, menuOpenId: view.menuOpenId, generationAvailable: !busy, generationBusy: busy, floorStatus })}</main>`;
+        ? `<main class="pm-today-trend-content">${renderTodayTrendSettingsView({ scope, presets, generationBusy: busy, menuOpenId: view.menuOpenId,
+            retentionRevisions, retentionSaving, retentionDraft, errorHtml: errorFeedback(error, diagnosticCopyStatus) })}</main>`
+        : `<main class="pm-today-trend-content${view.mode === 'content' ? ` is-${view.name}${scope.injection?.minimalUi ? ' is-minimal-ui' : ''}` : ''}">${moduleView(view, { scope, preset, mode: view.mode, dynamicsTab: view.dynamicsTab, editingWorldItemId: view.editingWorldItemId, editingCircleId: view.editingCircleId, editingFactionId: view.editingFactionId, editingEventId: view.editingEventId, editingRule: view.editingRule, ruleDraft: view.ruleDraft, menuOpenId: view.menuOpenId, generationAvailable: !busy, generationBusy: busy, floorStatus, detailById, loadingDetailIds })}</main>`;
     const navigation = scope && !initializationOpen && !view.editingRule ? `<nav class="pm-today-trend-tabs${view.name === 'world' ? ' is-world' : ''}" aria-label="今日风向模块">${[['world','世界态势',TODAY_TREND_WORLD_ICON_SVG],['reputation','个人风评',TODAY_TREND_REPUTATION_ICON_SVG],['faction','势力图谱',TODAY_TREND_FACTION_ICON_SVG],['dynamics','事件追踪',TODAY_TREND_DYNAMICS_ICON_SVG]].map(([name,label,icon]) => `<button type="button" data-action="today-trend-open-${name === 'faction' ? 'factions' : name}" aria-label="${label}" aria-pressed="${view.name === name}">${icon}</button>`).join('')}<button type="button" data-action="today-trend-open-settings" aria-label="APP 总设置" aria-pressed="${view.name === 'settings'}">${MORE_ICON_SVG}</button></nav>` : '';
     return `<section id="pm-today-trend-app" class="pm-today-trend-shell" aria-labelledby="pm-today-trend-title"><header class="pm-today-trend-header"><button type="button" class="pm-today-trend-home" data-today-trend-ui-action="home" aria-label="返回桌面" title="返回桌面">${HOME_ICON_SVG}</button><h2 id="pm-today-trend-title">今日风向</h2><span class="pm-today-trend-header-actions"><button type="button" class="pm-today-trend-header-control" data-action="today-trend-generate-all" ${!scope || busy ? 'disabled' : ''} aria-busy="${busy}" aria-label="手动更新所有今日风向" title="手动更新所有今日风向">${SPARKLES_ICON_SVG}</button><button type="button" class="pm-today-trend-header-control" data-action="today-trend-toggle-operation" ${!scope || busy ? 'disabled' : ''} aria-pressed="${scope?.operation?.enabled === true}" aria-label="${scope?.operation?.enabled ? '暂停运作' : '开启自动'}" title="${scope?.operation?.enabled ? '暂停运作' : '开启自动'}">${scope?.operation?.enabled ? PAUSE_ICON_SVG : PLAY_ICON_SVG}</button></span></header>${content}${navigation}</section>`;
 }

@@ -9,7 +9,7 @@ import { getStorageIdFor } from './host-context.js';
 import { applyCalendarBackupFields } from './settings-backup.js';
 import { createEmptyTodayTrendStore, normalizeTodayTrendStore } from './today-trend-model.js';
 import { normalizeTodayTrendMigrationBackup } from './today-trend-v2-authority.js';
-import { normalizeTodayTrendV2Store } from './today-trend-v2-model.js';
+import { migrateLegacyTodayTrendV2Store, normalizeTodayTrendV2Store } from './today-trend-v2-model.js';
 import { normalizeWorldBookConfig } from './worldbook-config.js';
 
 const clone = value => JSON.parse(JSON.stringify(value));
@@ -274,15 +274,22 @@ const assertTodayTrendBackupStore = value => {
 const assertTodayTrendV2Backup = value => {
     if (value === null) return null;
     const backup = objectValue(value, 'todayTrendV2');
+    const legacyStore = backup.v2Store?.globalEnvelope?.schemaVersion === 1;
     const normalized = {
-        v2Store: normalizeTodayTrendV2Store(backup.v2Store),
+        v2Store: legacyStore ? migrateLegacyTodayTrendV2Store(backup.v2Store) : normalizeTodayTrendV2Store(backup.v2Store),
         migrationBackup: backup.migrationBackup === null ? null : normalizeTodayTrendMigrationBackup(backup.migrationBackup),
         storeRevision: backup.storeRevision,
     };
     const v2StoreRevision = normalized.v2Store.globalEnvelope.revision;
     if (!Number.isSafeInteger(normalized.storeRevision) || normalized.storeRevision < 1
-        || normalized.storeRevision !== v2StoreRevision
-        || JSON.stringify(backup) !== JSON.stringify(normalized)) throw new Error('备份字段 todayTrendV2 内容无效或不是规范格式');
+        || normalized.storeRevision !== v2StoreRevision) throw new Error('备份字段 todayTrendV2 内容无效或不是规范格式');
+    if (legacyStore) {
+        if (Object.keys(backup).length !== 3 || !Object.hasOwn(backup, 'migrationBackup')) {
+            throw new Error('备份字段 todayTrendV2 内容无效或不是规范格式');
+        }
+    } else if (JSON.stringify(backup) !== JSON.stringify(normalized)) {
+        throw new Error('备份字段 todayTrendV2 内容无效或不是规范格式');
+    }
     return normalized;
 };
 

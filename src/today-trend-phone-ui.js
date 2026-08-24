@@ -11,8 +11,9 @@ export function installTodayTrendPhoneUi(state, deps = {}) {
         if (!container.addEventListener) {
             const storageId = deps.getStorageId();
             const store = await deps.getTodayTrendStore?.();
+            const scope = await (typeof deps.getTodayTrendUiScope === 'function' ? deps.getTodayTrendUiScope(storageId) : store?.scopes?.[storageId] || null);
             if (phoneWindow !== state.phoneWindow || !container.isConnected) return false;
-            container.innerHTML = renderTodayTrendApp({ scope: store?.scopes?.[storageId] || null,
+            container.innerHTML = renderTodayTrendApp({ scope,
                 currentFloor: deps.getTodayTrendCurrentFloor?.() });
             return true;
         }

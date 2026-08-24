@@ -5387,6 +5387,26 @@ const parsedSchema16Backup = parseBackupData({
 assert.deepEqual(parsedSchema16Backup.todayTrendV2, {
     v2Store: schema16V2Store, migrationBackup: null, storeRevision: 1,
 }, 'schema 16 必须恢复规范 v2 store、migration backup 与 revision');
+const schema16LegacyV2Store = structuredClone(schema16V2Store);
+schema16LegacyV2Store.globalEnvelope.schemaVersion = 1;
+for (const scopeEnvelope of Object.values(schema16LegacyV2Store.globalEnvelope.payload.scopes)) scopeEnvelope.schemaVersion = 1;
+const parsedSchema16LegacyBackup = parseBackupData({
+    ...schema16BackupBase,
+    todayTrendV2: { v2Store: schema16LegacyV2Store, migrationBackup: null, storeRevision: 1 },
+}, currentBackup);
+assert.equal(parsedSchema16LegacyBackup.todayTrendV2.v2Store.globalEnvelope.schemaVersion, 2,
+    'schema 16 旧 v2Store 备份必须经显式兼容入口升级 global envelope');
+assert.ok(Object.values(parsedSchema16LegacyBackup.todayTrendV2.v2Store.globalEnvelope.payload.scopes)
+    .every(scopeEnvelope => scopeEnvelope.schemaVersion === 2),
+'schema 16 旧 v2Store 备份必须严格重写全部 scope envelope');
+assert.equal(schema16LegacyV2Store.globalEnvelope.schemaVersion, 1,
+    'schema 16 旧 v2Store 备份迁移不得原地改写导入对象');
+assert.throws(() => parseBackupData({
+    ...schema16BackupBase,
+    todayTrendV2: { v2Store: schema16LegacyV2Store, migrationBackup: null, storeRevision: 1, unexpected: true },
+}, currentBackup), /todayTrendV2 内容无效或不是规范格式/,
+'schema 16 旧 v2Store 兼容分支不得绕过备份字段集合约束');
+
 assert.equal(parseBackupData({
     ...schema16BackupBase, schemaVersion: 15,
 }, currentBackup).todayTrendV2, null, 'schema 15 及更早备份不得伪造 todayTrendV2');
@@ -8875,7 +8895,10 @@ try {
     localStorageControl.failSetOnCalls.clear();
     await pmIDBDel(BRANCH_LINEAGE_STORE_KEY);
     const productionTargetId = getStorageIdFor('alice.png', 'production-branch');
-    const productionContext = { ...branchContext, chatId: 'production-branch' };
+    const productionContext = {
+        ...branchContext, chatId: 'production-branch',
+        chat: [{ is_user: true, mes: '分支起点', message_id: 20 }],
+    };
     previousProductionBeforeUnloadRegistration = window.__pmBeforeUnloadRegistered;
     previousProductionWindowAddEventListener = window.addEventListener;
     previousProductionDocument = globalThis.document;
@@ -8973,7 +8996,12 @@ try {
     const productionBranch = productionListeners.get('production_chat_changed')[0](productionTargetId);
     let productionFailure = null;
     productionBranch.catch(error => { productionFailure = error; });
-    await lineageCommitBlocker.entered;
+    const productionInterlock = await Promise.race([
+        lineageCommitBlocker.entered.then(() => ({ entered: true })),
+        productionBranch.then(result => ({ entered: false, result })),
+    ]);
+    assert.equal(productionInterlock.entered, true,
+        `真实生产分支必须进入 lineage 提交窗口：${productionInterlock.result?.error?.message || '提前结束'}`);
     assert.deepEqual(productionCleanupCalls, [],
         '分支持久化尚未完成时不得提前清理旧会话或中断宿主任务');
     try {
@@ -9028,8 +9056,30 @@ try {
         '真实分支新增必须通过统一 committer 只递增一次 Today Trend store revision');
     assert.equal(productionTrendStatusAfter.authority.scopeRevisionByStorageId[productionTargetId], 1,
         '真实分支新增必须只递增一次目标 Today Trend scope revision');
-    assert.ok((await todayTrendV2Authority.load()).store.scopes[productionTargetId],
+    const productionTrendLoaded = await todayTrendV2Authority.load();
+    assert.ok(productionTrendLoaded.store.scopes[productionTargetId],
         '真实分支新增必须把目标 Today Trend scope 持久化到 v2 authority');
+    const productionTrendTargetEnvelope = productionTrendLoaded.v2Store.globalEnvelope.payload.scopes[productionTargetId];
+    assert.equal(productionTrendTargetEnvelope.revision, 1,
+        '真实分支新增持久化后必须由 authority 将目标 canonical scope revision 推进到 1');
+    assert.equal(productionTrendTargetEnvelope.payload.storageId, productionTargetId,
+        '真实分支新增必须改写 canonical payload storageId');
+    assert.equal(productionTrendTargetEnvelope.payload.operation.lastSuccessfulAssistantCount, 20,
+        '真实分支新增必须把 canonical checkpoint 平移到宿主目标楼层，禁止硬编码为 0');
+    assert.equal(productionTrendTargetEnvelope.payload.historyRetentionState.highWaterAssistantCount, null,
+        '真实分支新增必须保持 unknown 高水位为 null，禁止伪造楼层');
+    assert.ok(productionTrendTargetEnvelope.payload.generationSnapshots.length <= 12,
+        '真实分支新增的 canonical snapshot 不得超过 12 个');
+       assert.ok(productionTrendTargetEnvelope.payload.generationSnapshots.some(snapshot => snapshot.assistantCount === 20),
+        '真实分支新增必须把来源 checkpoint snapshot 平移到宿主目标楼层');
+    for (const snapshot of productionTrendTargetEnvelope.payload.generationSnapshots) {
+        assert.equal(Object.hasOwn(snapshot, 'stageDetailsByEvent'), false,
+            'canonical snapshot 不得复制 detail 正文池');
+        assert.equal(Object.hasOwn(snapshot, 'archivedRemovableDataByEvent'), false,
+            'canonical snapshot 不得复制归档 removable 正文池');
+    }
+    assert.equal(productionTrendTargetEnvelope.payload.commitJournal, null,
+        '真实分支新增不得复制来源 scope journal');
     assert.equal([...idbValues.keys()].some(key => key.startsWith(TODAY_TREND_V2_JOURNAL_PREFIX)), false,
         '真实分支新增 accepted 后不得遗留开放 journal');
     assert.equal(productionTrendRefreshes, 1,
@@ -9079,7 +9129,12 @@ try {
     const failedLineageBlocker = blockIDBOperation('put', BRANCH_LINEAGE_STORE_KEY);
     idbControl.abortOperations.push({ type: 'put', key: BRANCH_LINEAGE_STORE_KEY });
     const failedProductionBranch = productionListeners.get('production_chat_changed')[0](failedProductionTargetId);
-    await failedLineageBlocker.entered;
+    const failedProductionInterlock = await Promise.race([
+        failedLineageBlocker.entered.then(() => ({ entered: true })),
+        failedProductionBranch.then(result => ({ entered: false, result })),
+    ]);
+    assert.equal(failedProductionInterlock.entered, true,
+        `失败夹具必须先进入 lineage 提交窗口：${failedProductionInterlock.result?.error?.message || '提前结束'}`);
     try {
         for (const store of ['pokeConfig', 'characterBehavior', 'bidirectional', 'budget']) {
             assert.deepEqual(getActiveDirectoryBranchScopes(store), [failedProductionTargetId],

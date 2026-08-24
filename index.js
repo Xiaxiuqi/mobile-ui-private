@@ -408,8 +408,8 @@ ${userPrompt}` : userPrompt;
   }
   var isValidWeatherDate = (value) => dateParts(value) !== null;
   var storyWeatherEventLabel = (type) => STORY_WEATHER_EVENT_TYPES[type]?.label || "\u672A\u77E5\u5929\u6C14\u4E8B\u4EF6";
-  function shiftWeatherDate(date, offset) {
-    const parts = dateParts(date);
+  function shiftWeatherDate(date2, offset) {
+    const parts = dateParts(date2);
     if (!parts || !Number.isInteger(offset)) return null;
     const value = new Date(2e3, parts.month - 1, parts.day, 12);
     value.setFullYear(parts.year);
@@ -450,10 +450,10 @@ ${userPrompt}` : userPrompt;
       days: Object.freeze(days)
     });
   }
-  function storyWeatherEventForDate(event, date) {
+  function storyWeatherEventForDate(event, date2) {
     const normalized = normalizeStoryWeatherEvent(event);
-    if (!normalized || !isValidWeatherDate(date)) return null;
-    const day = normalized.days.find((item) => item.date === date);
+    if (!normalized || !isValidWeatherDate(date2)) return null;
+    const day = normalized.days.find((item) => item.date === date2);
     return day ? { event: normalized, day } : null;
   }
   function createStoryWeatherEvent(weatherStore, referenceDate, storageId = "", options2 = {}) {
@@ -472,9 +472,9 @@ ${userPrompt}` : userPrompt;
     const length = requestedDays;
     const days = [];
     for (let index = 0; index < length; index++) {
-      const date = shiftWeatherDate(startDate, index);
-      if (!date) break;
-      const base = resolveWeatherForDate(weatherStore, date);
+      const date2 = shiftWeatherDate(startDate, index);
+      if (!date2) break;
+      const base = resolveWeatherForDate(weatherStore, date2);
       if (base.status !== "available") return null;
       const codes = STORY_WEATHER_EVENT_TYPES[type].codes;
       const randomCode = codes[stableHash(`${seed}|code|${index}`) % codes.length];
@@ -483,7 +483,7 @@ ${userPrompt}` : userPrompt;
       const cooling = Math.round(baseCooling * (intensity === "mild" ? 0.5 : intensity === "severe" ? 1.5 : 1));
       const tempMin = Math.max(-80, base.day.tempMin - cooling);
       const tempMax = Math.max(tempMin + 1, Math.min(55, base.day.tempMax - cooling));
-      days.push({ date, weatherCode, tempMin, tempMax });
+      days.push({ date: date2, weatherCode, tempMin, tempMax });
     }
     return normalizeStoryWeatherEvent({ id: `weather_${stableHash(seed).toString(36)}`, type, startDate, locationKey, days });
   }
@@ -513,12 +513,12 @@ ${userPrompt}` : userPrompt;
     }
     return null;
   }
-  function climateEstimate(location, date, parts) {
+  function climateEstimate(location, date2, parts) {
     const latitude = Number(location?.latitude), longitude = Number(location?.longitude);
     const name = typeof location?.name === "string" ? location.name.trim() : "";
     if (!name || !Number.isFinite(latitude) || latitude < -90 || latitude > 90 || !Number.isFinite(longitude) || longitude < -180 || longitude > 180) return null;
     const revision = Number.isSafeInteger(location?.climateRevision) && location.climateRevision >= 0 ? location.climateRevision : 0;
-    const baseKey = `${latitude.toFixed(4)},${longitude.toFixed(4)}|${name}|${date}`;
+    const baseKey = `${latitude.toFixed(4)},${longitude.toFixed(4)}|${name}|${date2}`;
     const key = revision ? `${baseKey}|${revision}` : baseKey;
     const hash = stableHash(key);
     const random = (offset) => (hash >>> offset & 255) / 255;
@@ -560,13 +560,13 @@ ${userPrompt}` : userPrompt;
       const rainCode = subtropicalRainCode(locationKey, revision, parts, chance);
       weatherCode = rainCode ?? (chance < 0.35 ? 0 : chance < 0.58 ? 1 : chance < 0.78 ? 2 : chance < 0.9 ? 3 : 45);
     } else weatherCode = chance < 0.26 ? 0 : chance < 0.46 ? 1 : chance < 0.68 ? 2 : chance < 0.84 ? 3 : chance < 0.92 ? 45 : chance < 0.97 ? 61 : 80;
-    return { date, weatherCode, tempMin, tempMax };
+    return { date: date2, weatherCode, tempMin, tempMax };
   }
-  function resolveWeatherForDate(weatherStore, date, { storyWeatherEvent, storyWeatherEventEnabled = false } = {}) {
-    const parts = dateParts(date);
+  function resolveWeatherForDate(weatherStore, date2, { storyWeatherEvent, storyWeatherEventEnabled = false } = {}) {
+    const parts = dateParts(date2);
     if (!parts) return { status: "unavailable", source: null, sourceLabel: "\u65E0\u6CD5\u63A8\u6F14", unavailableReason: "\u65E5\u671F\u65E0\u6548" };
     if (storyWeatherEventEnabled === true) {
-      const override = storyWeatherEventForDate(storyWeatherEvent, date);
+      const override = storyWeatherEventForDate(storyWeatherEvent, date2);
       const locationKey = weatherLocationKey(weatherStore?.location);
       if (override && override.event.locationKey === locationKey) {
         return {
@@ -578,14 +578,14 @@ ${userPrompt}` : userPrompt;
         };
       }
     }
-    const persisted = weatherStore?.lastSuccess?.forecast?.days?.find((item) => item.date === date);
+    const persisted = weatherStore?.lastSuccess?.forecast?.days?.find((item) => item.date === date2);
     if (persisted) {
       const source = isStoredWeatherSource(weatherStore?.lastSuccess?.source) ? weatherStore.lastSuccess.source : WEATHER_SOURCE_FORECAST;
       const tempMin = Math.round(Math.min(persisted.tempMin, persisted.tempMax));
       const tempMax = Math.round(Math.max(persisted.tempMin, persisted.tempMax));
       return { status: "available", source, sourceLabel: weatherSourceLabel(source), day: { ...persisted, tempMin, tempMax } };
     }
-    const day = climateEstimate(weatherStore?.location ? { ...weatherStore.location, climateRevision: weatherStore.climateRevision } : null, date, parts);
+    const day = climateEstimate(weatherStore?.location ? { ...weatherStore.location, climateRevision: weatherStore.climateRevision } : null, date2, parts);
     if (!day) return { status: "unavailable", source: null, sourceLabel: "\u65E0\u6CD5\u63A8\u6F14", unavailableReason: "\u5C1A\u672A\u8BBE\u7F6E\u6709\u6548\u5929\u6C14\u4F4D\u7F6E" };
     return {
       status: "available",
@@ -614,12 +614,12 @@ ${userPrompt}` : userPrompt;
   function createCalendarDate(year, month, day) {
     const numericYear = Number(year), numericMonth = Number(month), numericDay = Number(day);
     if (![numericYear, numericMonth, numericDay].every(Number.isInteger) || numericYear < CALENDAR_YEAR_RANGE.min || numericYear > CALENDAR_YEAR_RANGE.max || numericMonth < 1 || numericMonth > 12 || numericDay < 1 || numericDay > 31) return null;
-    const date = new Date(2e3, numericMonth - 1, numericDay, 12, 0, 0, 0);
-    date.setFullYear(numericYear);
-    return date.getFullYear() === numericYear && date.getMonth() === numericMonth - 1 && date.getDate() === numericDay ? date : null;
+    const date2 = new Date(2e3, numericMonth - 1, numericDay, 12, 0, 0, 0);
+    date2.setFullYear(numericYear);
+    return date2.getFullYear() === numericYear && date2.getMonth() === numericMonth - 1 && date2.getDate() === numericDay ? date2 : null;
   }
-  function formatCalendarDate(date) {
-    return `${padYear(date.getFullYear())}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+  function formatCalendarDate(date2) {
+    return `${padYear(date2.getFullYear())}-${pad(date2.getMonth() + 1)}-${pad(date2.getDate())}`;
   }
   function parseCalendarDate(value) {
     const match = String(value ?? "").trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
@@ -637,10 +637,10 @@ ${userPrompt}` : userPrompt;
     const result = [];
     const length = Math.max(1, Math.min(42, days));
     for (let index = 0; index < length; index += 1) {
-      const date = new Date(base);
-      date.setDate(base.getDate() + index);
-      if (date.getFullYear() < CALENDAR_YEAR_RANGE.min || date.getFullYear() > CALENDAR_YEAR_RANGE.max) break;
-      result.push(formatCalendarDate(date));
+      const date2 = new Date(base);
+      date2.setDate(base.getDate() + index);
+      if (date2.getFullYear() < CALENDAR_YEAR_RANGE.min || date2.getFullYear() > CALENDAR_YEAR_RANGE.max) break;
+      result.push(formatCalendarDate(date2));
     }
     return result;
   }
@@ -652,9 +652,9 @@ ${userPrompt}` : userPrompt;
     }
     const result = [];
     for (let offset = start; offset <= end; offset += 1) {
-      const date = new Date(base);
-      date.setDate(base.getDate() + offset);
-      if (date.getFullYear() >= CALENDAR_YEAR_RANGE.min && date.getFullYear() <= CALENDAR_YEAR_RANGE.max) result.push(formatCalendarDate(date));
+      const date2 = new Date(base);
+      date2.setDate(base.getDate() + offset);
+      if (date2.getFullYear() >= CALENDAR_YEAR_RANGE.min && date2.getFullYear() <= CALENDAR_YEAR_RANGE.max) result.push(formatCalendarDate(date2));
     }
     return result;
   }
@@ -690,10 +690,10 @@ ${userPrompt}` : userPrompt;
     const daysInMonth = calendarDaysInMonth(numericYear, numericMonth);
     const cellCount = Math.max(35, Math.min(42, Math.ceil((leadingDays + daysInMonth) / 7) * 7));
     return Array.from({ length: cellCount }, (_, index) => {
-      const date = new Date(first);
-      date.setDate(first.getDate() + index - leadingDays);
-      const representable = date.getFullYear() >= CALENDAR_YEAR_RANGE.min && date.getFullYear() <= CALENDAR_YEAR_RANGE.max;
-      return representable ? { date: formatCalendarDate(date), isPlaceholder: false } : { date: null, isPlaceholder: true };
+      const date2 = new Date(first);
+      date2.setDate(first.getDate() + index - leadingDays);
+      const representable = date2.getFullYear() >= CALENDAR_YEAR_RANGE.min && date2.getFullYear() <= CALENDAR_YEAR_RANGE.max;
+      return representable ? { date: formatCalendarDate(date2), isPlaceholder: false } : { date: null, isPlaceholder: true };
     });
   }
   function calendarMonthKeys(year, month) {
@@ -713,15 +713,15 @@ ${userPrompt}` : userPrompt;
   var normalizeStoryWeatherRevision = (value) => Number.isSafeInteger(value) && value >= 0 ? value : 0;
   function normalizeCalendarEvent(value, expectedDate = "", now2 = Date.now()) {
     if (!plainRecord(value)) throw new Error("\u65E5\u7A0B\u5FC5\u987B\u662F\u5BF9\u8C61");
-    const date = parseCalendarDate(expectedDate || value.date) ? expectedDate || value.date : "";
-    if (!date) throw new Error("\u65E5\u7A0B\u65E5\u671F\u65E0\u6548");
+    const date2 = parseCalendarDate(expectedDate || value.date) ? expectedDate || value.date : "";
+    if (!date2) throw new Error("\u65E5\u7A0B\u65E5\u671F\u65E0\u6548");
     const title = cleanText(value.title, CALENDAR_LIMITS.title);
     if (!title) throw new Error("\u65E5\u7A0B\u6807\u9898\u4E0D\u80FD\u4E3A\u7A7A");
     const source = CALENDAR_SOURCES.includes(value.source) ? value.source : "manual";
     const createdAt = normalizeTimestamp(value.createdAt, now2);
     return {
       id: cleanText(value.id, 80) || uid(),
-      date,
+      date: date2,
       title,
       note: cleanText(value.note, CALENDAR_LIMITS.note),
       source,
@@ -740,13 +740,13 @@ ${userPrompt}` : userPrompt;
     const source = plainRecord(value) ? value : {};
     const events = {};
     let dateCount = 0;
-    for (const [date, rawEvents] of Object.entries(plainRecord(source.events) ? source.events : {})) {
-      if (dateCount >= CALENDAR_LIMITS.dates || !parseCalendarDate(date) || !Array.isArray(rawEvents)) continue;
+    for (const [date2, rawEvents] of Object.entries(plainRecord(source.events) ? source.events : {})) {
+      if (dateCount >= CALENDAR_LIMITS.dates || !parseCalendarDate(date2) || !Array.isArray(rawEvents)) continue;
       const seen = /* @__PURE__ */ new Set();
       const normalized2 = [];
       for (const rawEvent of rawEvents.slice(0, CALENDAR_LIMITS.eventsPerDate)) {
         try {
-          const event = normalizeCalendarEvent(rawEvent, date);
+          const event = normalizeCalendarEvent(rawEvent, date2);
           if (seen.has(event.id)) continue;
           seen.add(event.id);
           normalized2.push(event);
@@ -754,7 +754,7 @@ ${userPrompt}` : userPrompt;
         }
       }
       if (normalized2.length) {
-        events[date] = normalized2;
+        events[date2] = normalized2;
         dateCount += 1;
       }
     }
@@ -853,14 +853,14 @@ ${userPrompt}` : userPrompt;
   }
   function upsertCalendarEvent(scope, rawEvent, now2 = Date.now()) {
     const next = normalizeCalendarScope(scope);
-    const date = String(rawEvent?.date || "");
+    const date2 = String(rawEvent?.date || "");
     const title = cleanText(rawEvent?.title, CALENDAR_LIMITS.title);
     const source = CALENDAR_SOURCES.includes(rawEvent?.source) ? rawEvent.source : "manual";
-    const duplicate = !rawEvent?.id ? (next.events[date] || []).find((item) => item.title === title && item.source === source) : null;
-    const event = normalizeCalendarEvent({ ...rawEvent, id: rawEvent?.id || duplicate?.id }, date, now2);
-    for (const [date2, events2] of Object.entries(next.events)) {
-      next.events[date2] = events2.filter((item) => item.id !== event.id);
-      if (!next.events[date2].length) delete next.events[date2];
+    const duplicate = !rawEvent?.id ? (next.events[date2] || []).find((item) => item.title === title && item.source === source) : null;
+    const event = normalizeCalendarEvent({ ...rawEvent, id: rawEvent?.id || duplicate?.id }, date2, now2);
+    for (const [date3, events2] of Object.entries(next.events)) {
+      next.events[date3] = events2.filter((item) => item.id !== event.id);
+      if (!next.events[date3].length) delete next.events[date3];
     }
     const events = next.events[event.date] || [];
     next.events[event.date] = [...events, event].slice(-CALENDAR_LIMITS.eventsPerDate).sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id));
@@ -869,11 +869,11 @@ ${userPrompt}` : userPrompt;
   function deleteCalendarEvent(scope, eventId) {
     const next = normalizeCalendarScope(scope);
     let removed = false;
-    for (const [date, events] of Object.entries(next.events)) {
+    for (const [date2, events] of Object.entries(next.events)) {
       const filtered = events.filter((event) => event.id !== eventId);
       if (filtered.length !== events.length) removed = true;
-      if (filtered.length) next.events[date] = filtered;
-      else delete next.events[date];
+      if (filtered.length) next.events[date2] = filtered;
+      else delete next.events[date2];
     }
     return { scope: next, removed };
   }
@@ -957,10 +957,10 @@ ${userPrompt}` : userPrompt;
     return null;
   }
   function shiftCalendarDate(now2, offset) {
-    const date = createCalendarDate(now2.getFullYear(), now2.getMonth() + 1, now2.getDate());
-    if (!date) return null;
-    date.setDate(date.getDate() + offset);
-    return date.getFullYear() < CALENDAR_YEAR_RANGE.min || date.getFullYear() > CALENDAR_YEAR_RANGE.max ? null : formatCalendarDate(date);
+    const date2 = createCalendarDate(now2.getFullYear(), now2.getMonth() + 1, now2.getDate());
+    if (!date2) return null;
+    date2.setDate(date2.getDate() + offset);
+    return date2.getFullYear() < CALENDAR_YEAR_RANGE.min || date2.getFullYear() > CALENDAR_YEAR_RANGE.max ? null : formatCalendarDate(date2);
   }
   var hasExplicitCalendarYear = (value) => /(?:\d{4}|[零〇一二三四五六七八九]{4})\s*年/.test(value) || /(?:^|\D)\d{4}[\s./-]+\d{1,2}[\s./-]+\d{1,2}(?:\D|$)/.test(value);
   function extractCalendarBaseDate(text9, dateTags = DEFAULT_CALENDAR_DATE_TAGS) {
@@ -969,8 +969,8 @@ ${userPrompt}` : userPrompt;
     const reference = /* @__PURE__ */ new Date();
     for (const content of extractCalendarDateTagContents(source, dateTags).reverse()) {
       if (!hasExplicitCalendarYear(content)) continue;
-      const date = dateFromNaturalText(content, reference);
-      if (date) return date;
+      const date2 = dateFromNaturalText(content, reference);
+      if (date2) return date2;
     }
     const legacyTag = source.match(/<\s*(\d{4})[\s年./-]+(\d{1,2})[\s月./-]+(\d{1,2})\s*日?\s*>/);
     if (legacyTag) return calendarDateFromParts(Number(legacyTag[1]), Number(legacyTag[2]), Number(legacyTag[3]));
@@ -1010,13 +1010,13 @@ ${userPrompt}` : userPrompt;
     const seen = /* @__PURE__ */ new Set();
     const events = [];
     for (const line2 of lines.slice(-80)) {
-      const date = extractCalendarDate(line2, now2, dateTags);
-      if (!date) continue;
+      const date2 = extractCalendarDate(line2, now2, dateTags);
+      if (!date2) continue;
       const title = cleanText(line2.replace(taggedDatePattern, " ").replace(/<\s*[^<>]+?\s*>/g, " ").replace(/\s+/g, " "), CALENDAR_LIMITS.title);
-      const key = `${date}\0${title}`;
+      const key = `${date2}\0${title}`;
       if (!title || seen.has(key)) continue;
       seen.add(key);
-      events.push({ date, title, note: "\u4ECE\u5F53\u524D\u804A\u5929\u4E0A\u4E0B\u6587\u8BC6\u522B", source: "context" });
+      events.push({ date: date2, title, note: "\u4ECE\u5F53\u524D\u804A\u5929\u4E0A\u4E0B\u6587\u8BC6\u522B", source: "context" });
     }
     return events.slice(0, 20);
   }
@@ -1029,7 +1029,7 @@ ${userPrompt}` : userPrompt;
     const text9 = [context.mainChatText, context.worldBookText].filter(Boolean).join("\n");
     return {
       today: formatCalendarDate(now2),
-      candidateEvents: extractContextCalendarEvents(text9, now2, dateTags).map(({ date, title, note }) => ({ date, title, note })),
+      candidateEvents: extractContextCalendarEvents(text9, now2, dateTags).map(({ date: date2, title, note }) => ({ date: date2, title, note })),
       historicalEvents: Array.isArray(historicalEvents) ? historicalEvents : [],
       currentEvents: Array.isArray(currentEvents) ? currentEvents : [],
       dateFacts: Array.isArray(dateFacts) ? dateFacts : [],
@@ -1122,10 +1122,10 @@ ${userPrompt}` : userPrompt;
     const incomingDates = new Set(events.map((event) => event.date));
     const replacementDates = replaceAiInWindow ? new Set(calendarWeekKeys(windowStart, days)) : incomingDates;
     if (replaceAiInDates || replaceAiInWindow) {
-      for (const date of replacementDates) {
-        const retained = (next.events[date] || []).filter((event) => event.source !== "ai");
-        if (retained.length) next.events[date] = retained;
-        else delete next.events[date];
+      for (const date2 of replacementDates) {
+        const retained = (next.events[date2] || []).filter((event) => event.source !== "ai");
+        if (retained.length) next.events[date2] = retained;
+        else delete next.events[date2];
       }
     }
     for (const event of events) next = upsertCalendarEvent(next, event, timestamp5);
@@ -1134,7 +1134,7 @@ ${userPrompt}` : userPrompt;
   function replaceCalendarEventsInWindow(scope, events, { start = /* @__PURE__ */ new Date(), days = 7, timestamp: timestamp5 = Date.now() } = {}) {
     const next = normalizeCalendarScope(scope);
     const dates = new Set(calendarWeekKeys(start, days));
-    for (const date of dates) delete next.events[date];
+    for (const date2 of dates) delete next.events[date2];
     for (const event of events) {
       if (!dates.has(event.date)) throw new Error("\u91CD\u65B0\u751F\u6210\u65E5\u7A0B\u5305\u542B\u7A97\u53E3\u5916\u65E5\u671F");
       const normalized = normalizeCalendarEvent({ ...event, source: "ai" }, event.date, timestamp5);
@@ -1173,8 +1173,8 @@ ${userPrompt}` : userPrompt;
   var uid2 = () => `occasion_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 9)}`;
   var pad2 = (value) => String(value).padStart(2, "0");
   var dateKey = (value) => {
-    const date = parseCalendarDate(value);
-    return date ? `${date.getFullYear().toString().padStart(4, "0")}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}` : "";
+    const date2 = parseCalendarDate(value);
+    return date2 ? `${date2.getFullYear().toString().padStart(4, "0")}-${pad2(date2.getMonth() + 1)}-${pad2(date2.getDate())}` : "";
   };
   var normalizedExcludedDates = (value) => [...new Set((Array.isArray(value) ? value : []).map(dateKey).filter(Boolean))].sort().slice(0, OCCASION_LIMITS.excludedDates);
   function isLeapYear(year) {
@@ -1214,8 +1214,8 @@ ${userPrompt}` : userPrompt;
     if (!type) throw new Error("\u7C7B\u578B\u5FC5\u987B\u662F\u751F\u65E5\u6216\u7EAA\u5FF5\u65E5");
     const month = Number(value.month), day = Number(value.day);
     if (!isValidOccasionMonthDay(month, day)) throw new Error("\u751F\u65E5\u6216\u7EAA\u5FF5\u65E5\u65E5\u671F\u65E0\u6548");
-    const date = anchorDate(value.date, month, day);
-    if (!date) throw new Error("\u91CD\u590D\u65E5\u7A0B\u65E5\u671F\u65E0\u6548");
+    const date2 = anchorDate(value.date, month, day);
+    if (!date2) throw new Error("\u91CD\u590D\u65E5\u7A0B\u65E5\u671F\u65E0\u6548");
     const title = cleanText2(value.title, OCCASION_LIMITS.title);
     if (!title) throw new Error("\u751F\u65E5\u6216\u7EAA\u5FF5\u65E5\u6807\u9898\u4E0D\u80FD\u4E3A\u7A7A");
     const createdAt = timestamp(value.createdAt, now2);
@@ -1232,7 +1232,7 @@ ${userPrompt}` : userPrompt;
       leapDayRule: OCCASION_LEAP_DAY_RULES.includes(value.leapDayRule) ? value.leapDayRule : "feb28",
       ...repeat ? { repeat } : {},
       ...repeat === "custom" ? { intervalDays: normalizedIntervalDays(value.intervalDays) } : {},
-      ...hasDate ? { date: `${date.getFullYear().toString().padStart(4, "0")}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}` } : {},
+      ...hasDate ? { date: `${date2.getFullYear().toString().padStart(4, "0")}-${pad2(date2.getMonth() + 1)}-${pad2(date2.getDate())}` } : {},
       ...normalizedExcludedDates(value.excludedDates).length ? { excludedDates: normalizedExcludedDates(value.excludedDates) } : {},
       createdAt,
       updatedAt: Math.max(createdAt, timestamp(value.updatedAt, createdAt))
@@ -1291,19 +1291,19 @@ ${userPrompt}` : userPrompt;
     return { scope: { occasions }, removed: occasions.length !== next.occasions.length };
   }
   function excludeOccasionDate(scope, occasionId, occurrenceDate, now2 = Date.now()) {
-    const date = dateKey(occurrenceDate);
-    if (!date) throw new Error("\u8981\u6E05\u7406\u7684\u65E5\u7A0B\u65E5\u671F\u65E0\u6548");
+    const date2 = dateKey(occurrenceDate);
+    if (!date2) throw new Error("\u8981\u6E05\u7406\u7684\u65E5\u7A0B\u65E5\u671F\u65E0\u6548");
     const next = normalizeOccasionScope(scope);
     const occasion = findOccasion(next, occasionId);
     if (!occasion) throw new Error("\u91CD\u590D\u65E5\u7A0B\u4E0D\u5B58\u5728");
     const occursOnDate = expandOccasions({ occasions: [occasion] }, {
-      start: parseCalendarDate(date),
+      start: parseCalendarDate(date2),
       days: 1
-    }).some((item) => item.id === occasionId && item.date === date);
+    }).some((item) => item.id === occasionId && item.date === date2);
     if (!occursOnDate) throw new Error("\u8BE5\u65E5\u671F\u6CA1\u6709\u53EF\u6E05\u7406\u7684\u91CD\u590D\u65E5\u7A0B");
     return upsertOccasion(next, {
       ...occasion,
-      excludedDates: [...occasion.excludedDates || [], date],
+      excludedDates: [...occasion.excludedDates || [], date2],
       updatedAt: now2
     }, now2);
   }
@@ -1320,14 +1320,14 @@ ${userPrompt}` : userPrompt;
         day = 1;
       } else day = 28;
     }
-    const date = calendarDateFromParts(numericYear, month, day);
-    return date ? { date, leapAdjusted } : null;
+    const date2 = calendarDateFromParts(numericYear, month, day);
+    return date2 ? { date: date2, leapAdjusted } : null;
   }
   function expandOccasions(scope, { start = /* @__PURE__ */ new Date(), days = 7 } = {}) {
     const length = Math.max(1, Math.min(366, Number.isInteger(days) ? days : 7));
     const dateKeys = calendarDateRangeKeys(start, 0, length - 1);
     const dates = new Set(dateKeys);
-    const years = new Set([...dates].map((date) => Number(date.slice(0, 4))));
+    const years = new Set([...dates].map((date2) => Number(date2.slice(0, 4))));
     const result = [];
     for (const occasion of normalizeOccasionScope(scope).occasions) {
       const repeat = occasion.repeat || "yearly";
@@ -1340,19 +1340,19 @@ ${userPrompt}` : userPrompt;
         continue;
       }
       const anchor = anchorDate(occasion.date, occasion.month, occasion.day);
-      for (const date of dateKeys) {
-        const parsed = parseCalendarDate(date);
+      for (const date2 of dateKeys) {
+        const parsed = parseCalendarDate(date2);
         const anchorKey = `${anchor.getFullYear().toString().padStart(4, "0")}-${pad2(anchor.getMonth() + 1)}-${pad2(anchor.getDate())}`;
-        if (!parsed || date < anchorKey) continue;
+        if (!parsed || date2 < anchorKey) continue;
         const sameWeekday = parsed.getDay() === anchor.getDay();
         const elapsedDays = Math.round((parsed.getTime() - anchor.getTime()) / 864e5);
         const sameMonthDay = parsed.getDate() === anchor.getDate();
         const lastDayOfMonth = !calendarDateFromParts(parsed.getFullYear(), parsed.getMonth() + 1, anchor.getDate()) && parsed.getDate() === daysInCalendarMonth(parsed.getFullYear(), parsed.getMonth() + 1);
-        if (excludedDates.has(date)) continue;
+        if (excludedDates.has(date2)) continue;
         if (repeat === "daily" || repeat === "weekly" && sameWeekday || repeat === "biweekly" && sameWeekday && elapsedDays % 14 === 0 || repeat === "monthly" && (sameMonthDay || lastDayOfMonth)) {
-          result.push({ ...occasion, date, leapAdjusted: false });
+          result.push({ ...occasion, date: date2, leapAdjusted: false });
         } else if (repeat === "custom" && elapsedDays % normalizedIntervalDays(occasion.intervalDays) === 0) {
-          result.push({ ...occasion, date, leapAdjusted: false });
+          result.push({ ...occasion, date: date2, leapAdjusted: false });
         }
       }
     }
@@ -1379,7 +1379,7 @@ ${userPrompt}` : userPrompt;
   var CHINESE_DAYS_YEAR_URL = (year) => `https://cdn.jsdelivr.net/npm/chinese-days/dist/years/${year}.json`;
   var plainRecord3 = (value) => value && typeof value === "object" && !Array.isArray(value);
   var pad3 = (value) => String(value).padStart(2, "0");
-  var dateKey2 = (date) => `${date.getFullYear()}-${pad3(date.getMonth() + 1)}-${pad3(date.getDate())}`;
+  var dateKey2 = (date2) => `${date2.getFullYear()}-${pad3(date2.getMonth() + 1)}-${pad3(date2.getDate())}`;
   function holidayYearRange(country) {
     return HOLIDAY_COUNTRY_YEAR_RANGES[country] || null;
   }
@@ -1387,11 +1387,11 @@ ${userPrompt}` : userPrompt;
     const range = holidayYearRange(country), year = Number(value);
     return !!range && Number.isInteger(year) && year >= range.min && year <= range.max;
   }
-  function entry(date, name, kind = "holiday", source = "local-rule") {
-    if (!parseCalendarDate(date)) throw new Error("\u8282\u5047\u65E5\u65E5\u671F\u65E0\u6548");
+  function entry(date2, name, kind = "holiday", source = "local-rule") {
+    if (!parseCalendarDate(date2)) throw new Error("\u8282\u5047\u65E5\u65E5\u671F\u65E0\u6548");
     const cleanName = String(name ?? "").trim().slice(0, HOLIDAY_LIMITS.name);
     if (!cleanName || !HOLIDAY_KINDS.includes(kind)) throw new Error("\u8282\u5047\u65E5\u5B57\u6BB5\u65E0\u6548");
-    return { date, name: cleanName, kind, source };
+    return { date: date2, name: cleanName, kind, source };
   }
   function sortEntries(entries) {
     const seen = /* @__PURE__ */ new Set();
@@ -1422,12 +1422,12 @@ ${userPrompt}` : userPrompt;
     if (!formatter || typeof formatter.formatToParts !== "function") return null;
     const start = createCalendarDate(year, 6, 1), end = createCalendarDate(year, 10, 1);
     if (!start || !end) return null;
-    for (const date = new Date(start); date < end; date.setDate(date.getDate() + 1)) {
+    for (const date2 = new Date(start); date2 < end; date2.setDate(date2.getDate() + 1)) {
       try {
-        const parts = formatter.formatToParts(date);
+        const parts = formatter.formatToParts(date2);
         const month = parts.find((part) => part.type === "month")?.value;
         const day = Number(parts.find((part) => part.type === "day")?.value);
-        if (month === "\u4E03\u6708" && day === 7) return dateKey2(date);
+        if (month === "\u4E03\u6708" && day === 7) return dateKey2(date2);
       } catch (error) {
         return null;
       }
@@ -1456,10 +1456,10 @@ ${userPrompt}` : userPrompt;
     return chinese ? calendarDateFromParts(Number(chinese[1]), Number(chinese[2]), Number(chinese[3])) : numeric ? calendarDateFromParts(Number(numeric[1]), Number(numeric[3]), Number(numeric[4])) : null;
   }
   function appendContextFestival(rows, dateText, name) {
-    const date = parseContextFestivalDate(dateText);
-    if (!date) return;
+    const date2 = parseContextFestivalDate(dateText);
+    if (!date2) return;
     try {
-      rows.push(entry(date, name, "cultural", "context-evidence"));
+      rows.push(entry(date2, name, "cultural", "context-evidence"));
     } catch (error) {
     }
   }
@@ -1491,17 +1491,17 @@ ${userPrompt}` : userPrompt;
     return sortEntries(rows);
   }
   function nthWeekday(year, month, weekday, nth) {
-    const date = new Date(year, month - 1, 1, 12);
-    date.setDate(1 + (7 + weekday - date.getDay()) % 7 + (nth - 1) * 7);
-    return dateKey2(date);
+    const date2 = new Date(year, month - 1, 1, 12);
+    date2.setDate(1 + (7 + weekday - date2.getDay()) % 7 + (nth - 1) * 7);
+    return dateKey2(date2);
   }
   function lastWeekday(year, month, weekday) {
-    const date = new Date(year, month, 0, 12);
-    date.setDate(date.getDate() - (7 + date.getDay() - weekday) % 7);
-    return dateKey2(date);
+    const date2 = new Date(year, month, 0, 12);
+    date2.setDate(date2.getDate() - (7 + date2.getDay() - weekday) % 7);
+    return dateKey2(date2);
   }
-  function observedDate(date) {
-    const parsed = parseCalendarDate(date);
+  function observedDate(date2) {
+    const parsed = parseCalendarDate(date2);
     if (parsed.getDay() === 6) parsed.setDate(parsed.getDate() - 1);
     else if (parsed.getDay() === 0) parsed.setDate(parsed.getDate() + 1);
     return dateKey2(parsed);
@@ -1514,11 +1514,11 @@ ${userPrompt}` : userPrompt;
     const result = [];
     const append = (records, kind) => {
       if (!plainRecord3(records)) return;
-      for (const [date, rawLabel] of Object.entries(records)) {
-        if (!date.startsWith(`${year}-`) || !parseCalendarDate(date)) continue;
+      for (const [date2, rawLabel] of Object.entries(records)) {
+        if (!date2.startsWith(`${year}-`) || !parseCalendarDate(date2)) continue;
         const parts = String(rawLabel ?? "").split(",");
         const name = (parts[1] || parts[0] || "").trim();
-        if (name) result.push(entry(date, name, kind, "chinese-days"));
+        if (name) result.push(entry(date2, name, kind, "chinese-days"));
       }
     };
     append(value.holidays, "holiday");
@@ -1600,28 +1600,28 @@ ${userPrompt}` : userPrompt;
     let rows = japaneseBaseHolidays(numericYear);
     const occupied = new Set(rows.map((item) => item.date));
     for (const holiday of [...rows]) {
-      const date = parseCalendarDate(holiday.date);
-      if (date.getDay() !== 0) continue;
+      const date2 = parseCalendarDate(holiday.date);
+      if (date2.getDay() !== 0) continue;
       do {
-        date.setDate(date.getDate() + 1);
-      } while (occupied.has(dateKey2(date)));
-      const substitute = dateKey2(date);
+        date2.setDate(date2.getDate() + 1);
+      } while (occupied.has(dateKey2(date2)));
+      const substitute = dateKey2(date2);
       occupied.add(substitute);
       rows.push(entry(substitute, `${holiday.name} \u632F\u66FF\u4F11\u65E5`, "observed"));
     }
     for (let month = 1; month <= 12; month += 1) {
       const last = new Date(numericYear, month, 0, 12).getDate();
       for (let day = 2; day < last; day += 1) {
-        const date = calendarDateFromParts(numericYear, month, day);
-        const probe = parseCalendarDate(date);
-        if (probe.getDay() === 0 || occupied.has(date)) continue;
+        const date2 = calendarDateFromParts(numericYear, month, day);
+        const probe = parseCalendarDate(date2);
+        if (probe.getDay() === 0 || occupied.has(date2)) continue;
         probe.setDate(probe.getDate() - 1);
         const before = dateKey2(probe);
         probe.setDate(probe.getDate() + 2);
         const after = dateKey2(probe);
         if (occupied.has(before) && occupied.has(after)) {
-          occupied.add(date);
-          rows.push(entry(date, "\u56FD\u6C11\u306E\u4F11\u65E5", "observed"));
+          occupied.add(date2);
+          rows.push(entry(date2, "\u56FD\u6C11\u306E\u4F11\u65E5", "observed"));
         }
       }
     }
@@ -2198,11 +2198,11 @@ ${userPrompt}` : userPrompt;
     const overrides = {};
     let count = 0;
     if (plainRecord4(source.overrides)) {
-      for (const date of Object.keys(source.overrides).sort()) {
+      for (const date2 of Object.keys(source.overrides).sort()) {
         if (count >= CYCLE_LIMITS.overrides) break;
-        if (!parseCalendarDate(date)) continue;
-        if (!CYCLE_OVERRIDE_TYPES.includes(source.overrides[date])) continue;
-        overrides[date] = source.overrides[date];
+        if (!parseCalendarDate(date2)) continue;
+        if (!CYCLE_OVERRIDE_TYPES.includes(source.overrides[date2])) continue;
+        overrides[date2] = source.overrides[date2];
         count += 1;
       }
     }
@@ -2343,9 +2343,9 @@ ${userPrompt}` : userPrompt;
     const count = Math.max(1, Math.min(90, Number.isFinite(days) ? Math.floor(days) : 7));
     const results = [];
     for (let i = 0; i < count; i += 1) {
-      const date = new Date(start);
-      date.setDate(start.getDate() + i);
-      const dateStr = formatCalendarDate(date);
+      const date2 = new Date(start);
+      date2.setDate(start.getDate() + i);
+      const dateStr = formatCalendarDate(date2);
       const prediction = predictCyclePhase(normalized, dateStr);
       results.push({ date: dateStr, phase: prediction.phase, status: prediction.status, day: prediction.day });
     }
@@ -2376,10 +2376,10 @@ ${userPrompt}` : userPrompt;
   function normalizeProfile(value) {
     const source = plainRecord5(value) ? value : {};
     const days = {};
-    for (const date of Object.keys(plainRecord5(source.days) ? source.days : {}).sort()) {
-      if (Object.keys(days).length >= OUTFIT_LIMITS.dates || !parseCalendarDate(date)) continue;
-      const outfit = normalizeOutfit(source.days[date]);
-      if (outfit) days[date] = outfit;
+    for (const date2 of Object.keys(plainRecord5(source.days) ? source.days : {}).sort()) {
+      if (Object.keys(days).length >= OUTFIT_LIMITS.dates || !parseCalendarDate(date2)) continue;
+      const outfit = normalizeOutfit(source.days[date2]);
+      if (outfit) days[date2] = outfit;
     }
     return {
       colorPreference: cleanText3(source.colorPreference, OUTFIT_LIMITS.color),
@@ -2428,32 +2428,32 @@ ${userPrompt}` : userPrompt;
     next.scopes[storageId] = scope;
     return next;
   }
-  function outfitForDate(profile, date) {
-    return parseCalendarDate(date) ? normalizeProfile(profile).days[date] || null : null;
+  function outfitForDate(profile, date2) {
+    return parseCalendarDate(date2) ? normalizeProfile(profile).days[date2] || null : null;
   }
-  function upsertOutfit(profile, { date, text: text9, source = "manual" } = {}, now2 = Date.now()) {
-    if (!parseCalendarDate(date)) throw new Error("\u7A7F\u642D\u65E5\u671F\u65E0\u6548");
+  function upsertOutfit(profile, { date: date2, text: text9, source = "manual" } = {}, now2 = Date.now()) {
+    if (!parseCalendarDate(date2)) throw new Error("\u7A7F\u642D\u65E5\u671F\u65E0\u6548");
     const clean2 = cleanText3(text9, OUTFIT_LIMITS.text);
     if (!clean2) throw new Error("OOTD \u5185\u5BB9\u4E0D\u80FD\u4E3A\u7A7A");
     const next = normalizeProfile(profile);
-    next.days[date] = { text: clean2, source: source === "ai" ? "ai" : "manual", updatedAt: timestamp2(now2) };
+    next.days[date2] = { text: clean2, source: source === "ai" ? "ai" : "manual", updatedAt: timestamp2(now2) };
     return next;
   }
-  function deleteOutfit(profile, date) {
+  function deleteOutfit(profile, date2) {
     const next = normalizeProfile(profile);
-    if (!parseCalendarDate(date) || !next.days[date]) return { profile: next, removed: false };
-    delete next.days[date];
+    if (!parseCalendarDate(date2) || !next.days[date2]) return { profile: next, removed: false };
+    delete next.days[date2];
     return { profile: next, removed: true };
   }
   function replaceOutfitsInWindow(profile, generated, { start = /* @__PURE__ */ new Date(), now: now2 = Date.now(), days = 7 } = {}) {
     const next = normalizeProfile(profile);
     const dates = calendarDateRangeKeys(start, 0, days - 1);
     const incoming = new Map(generated.days.map((day) => [day.date, day.text]));
-    for (const date of dates) {
-      const text9 = incoming.get(date);
+    for (const date2 of dates) {
+      const text9 = incoming.get(date2);
       if (!text9) throw new Error("AI \u7A7F\u642D\u672A\u5B8C\u6574\u8986\u76D6\u91CD\u65B0\u751F\u6210\u7A97\u53E3");
-      if (next.days[date]?.source === "manual") continue;
-      next.days[date] = { text: text9, source: "ai", updatedAt: timestamp2(now2) };
+      if (next.days[date2]?.source === "manual") continue;
+      next.days[date2] = { text: text9, source: "ai", updatedAt: timestamp2(now2) };
     }
     next.lastGeneratedAt = timestamp2(now2);
     return next;
@@ -2478,12 +2478,12 @@ ${userPrompt}` : userPrompt;
       seen.add(day.date);
       return { date: day.date, text: text9 };
     });
-    if (expectedDates.some((date) => !seen.has(date))) throw new Error("AI \u7A7F\u642D\u672A\u5B8C\u6574\u8986\u76D6\u751F\u6210\u7A97\u53E3");
+    if (expectedDates.some((date2) => !seen.has(date2))) throw new Error("AI \u7A7F\u642D\u672A\u5B8C\u6574\u8986\u76D6\u751F\u6210\u7A97\u53E3");
     return { days: parsedDays.sort((left, right) => left.date.localeCompare(right.date)) };
   }
   function buildOutfitPrompts(context, profile, start = /* @__PURE__ */ new Date(), { days = 7, subject = "" } = {}) {
     const current = normalizeProfile(profile), window2 = calendarWindowDescription(start, days);
-    const existing = window2.dates.flatMap((date) => current.days[date] ? [{ date, text: current.days[date].text, source: current.days[date].source }] : []);
+    const existing = window2.dates.flatMap((date2) => current.days[date2] ? [{ date: date2, text: current.days[date2].text, source: current.days[date2].source }] : []);
     const target = context?.outfitTarget || {};
     const evidence = {
       targetProfile: { kind: target.kind || "role", name: target.name || outfitSubjectLabel(subject) || "\u5F53\u524D\u89D2\u8272", description: String(context?.cardDesc || "").slice(0, 1600), personality: String(context?.cardPersonality || "").slice(0, 800), scenario: String(context?.cardScenario || "").slice(0, 1600) },
@@ -2503,7 +2503,7 @@ ${userPrompt}` : userPrompt;
   }
   function renderOutfitInjection(profile, { start = /* @__PURE__ */ new Date(), subject = "" } = {}) {
     const current = normalizeProfile(profile);
-    const lines = calendarDateRangeKeys(start, -1, 1).flatMap((date) => current.days[date]?.text ? [`${date}\uFF5C${current.days[date].text}`] : []);
+    const lines = calendarDateRangeKeys(start, -1, 1).flatMap((date2) => current.days[date2]?.text ? [`${date2}\uFF5C${current.days[date2].text}`] : []);
     return lines.length ? `${subject ? `\u89D2\u8272\uFF1A${outfitSubjectLabel(subject) || subject}
 ` : ""}${lines.join("\n")}`.slice(0, 4e3) : "";
   }
@@ -2546,10 +2546,10 @@ ${userPrompt}` : userPrompt;
   function normalizeRecipeScope(value) {
     const source = plainRecord6(value) ? value : {};
     const days = {};
-    for (const date of Object.keys(plainRecord6(source.days) ? source.days : {}).sort()) {
-      if (Object.keys(days).length >= RECIPE_LIMITS.dates || !parseCalendarDate(date)) continue;
-      const day = normalizeDay(source.days[date]);
-      if (Object.keys(day).length) days[date] = day;
+    for (const date2 of Object.keys(plainRecord6(source.days) ? source.days : {}).sort()) {
+      if (Object.keys(days).length >= RECIPE_LIMITS.dates || !parseCalendarDate(date2)) continue;
+      const day = normalizeDay(source.days[date2]);
+      if (Object.keys(day).length) days[date2] = day;
     }
     return {
       regionPreference: cleanText4(source.regionPreference, RECIPE_LIMITS.region),
@@ -2575,39 +2575,39 @@ ${userPrompt}` : userPrompt;
   function setRecipeRegionPreference(scope, value) {
     return { ...normalizeRecipeScope(scope), regionPreference: cleanText4(value, RECIPE_LIMITS.region) };
   }
-  function recipeDayFor(scope, date) {
-    if (!parseCalendarDate(date)) return {};
-    return normalizeRecipeScope(scope).days[date] || {};
+  function recipeDayFor(scope, date2) {
+    if (!parseCalendarDate(date2)) return {};
+    return normalizeRecipeScope(scope).days[date2] || {};
   }
-  function upsertRecipeMeal(scope, { date, mealType, text: text9, source = "manual" } = {}, now2 = Date.now()) {
-    if (!parseCalendarDate(date)) throw new Error("\u83DC\u8C31\u65E5\u671F\u65E0\u6548");
+  function upsertRecipeMeal(scope, { date: date2, mealType, text: text9, source = "manual" } = {}, now2 = Date.now()) {
+    if (!parseCalendarDate(date2)) throw new Error("\u83DC\u8C31\u65E5\u671F\u65E0\u6548");
     if (!RECIPE_MEAL_TYPES.includes(mealType)) throw new Error("\u83DC\u8C31\u9910\u6B21\u65E0\u6548");
     const normalizedText = cleanText4(text9, RECIPE_LIMITS.meal);
     if (!normalizedText) throw new Error("\u83DC\u8C31\u5185\u5BB9\u4E0D\u80FD\u4E3A\u7A7A");
     const next = normalizeRecipeScope(scope);
-    next.days[date] = {
-      ...next.days[date] || {},
+    next.days[date2] = {
+      ...next.days[date2] || {},
       [mealType]: { text: normalizedText, source: source === "ai" ? "ai" : "manual", updatedAt: timestamp3(now2) }
     };
     return next;
   }
-  function deleteRecipeMeal(scope, date, mealType) {
+  function deleteRecipeMeal(scope, date2, mealType) {
     const next = normalizeRecipeScope(scope);
-    if (!parseCalendarDate(date) || !RECIPE_MEAL_TYPES.includes(mealType) || !next.days[date]?.[mealType]) {
+    if (!parseCalendarDate(date2) || !RECIPE_MEAL_TYPES.includes(mealType) || !next.days[date2]?.[mealType]) {
       return { scope: next, removed: false };
     }
-    delete next.days[date][mealType];
-    if (!Object.keys(next.days[date]).length) delete next.days[date];
+    delete next.days[date2][mealType];
+    if (!Object.keys(next.days[date2]).length) delete next.days[date2];
     return { scope: next, removed: true };
   }
   function replaceRecipeInWindow(scope, generated, { start = /* @__PURE__ */ new Date(), now: now2 = Date.now(), days = 7 } = {}) {
     const next = normalizeRecipeScope(scope);
     const dates = calendarDateRangeKeys(start, 0, days - 1);
     const incoming = new Map(generated.days.map((day) => [day.date, day]));
-    for (const date of dates) {
-      const day = incoming.get(date);
+    for (const date2 of dates) {
+      const day = incoming.get(date2);
       if (!day) throw new Error("AI \u83DC\u8C31\u672A\u5B8C\u6574\u8986\u76D6\u91CD\u65B0\u751F\u6210\u7A97\u53E3");
-      next.days[date] = Object.fromEntries(RECIPE_MEAL_TYPES.map((mealType) => [mealType, {
+      next.days[date2] = Object.fromEntries(RECIPE_MEAL_TYPES.map((mealType) => [mealType, {
         text: day[mealType],
         source: "ai",
         updatedAt: timestamp3(now2)
@@ -2651,7 +2651,7 @@ ${userPrompt}` : userPrompt;
       }
       return day;
     });
-    if (expectedDates.some((date) => !seen.has(date))) throw new Error("AI \u83DC\u8C31\u672A\u5B8C\u6574\u8986\u76D6\u751F\u6210\u7A97\u53E3");
+    if (expectedDates.some((date2) => !seen.has(date2))) throw new Error("AI \u83DC\u8C31\u672A\u5B8C\u6574\u8986\u76D6\u751F\u6210\u7A97\u53E3");
     parsedDays.sort((left, right) => left.date.localeCompare(right.date));
     return { appliedRegion, days: parsedDays };
   }
@@ -2660,10 +2660,10 @@ ${userPrompt}` : userPrompt;
     const window2 = calendarWindowDescription(start, days);
     const generationRule = scope.generationRule || DEFAULT_RECIPE_GENERATION_RULE;
     const regionInstruction = scope.regionPreference ? `\u7528\u6237\u660E\u786E\u6307\u5B9A\u7684\u996E\u98DF\u5730\u533A/\u6587\u5316\u4E3A\u201C${scope.regionPreference}\u201D\uFF0C\u8FD9\u662F\u6700\u9AD8\u4F18\u5148\u7EA7\uFF0C\u4E0D\u5F97\u6539\u5199\u3002` : "\u7528\u6237\u672A\u6307\u5B9A\u996E\u98DF\u5730\u533A\u3002\u8BF7\u4EC5\u4F9D\u636E\u89D2\u8272\u8BBE\u5B9A\u3001\u5F53\u524D\u573A\u666F\u3001\u4E16\u754C\u4E66\u548C\u6700\u8FD1\u5267\u60C5\u63A8\u65AD\u6700\u5408\u9002\u7684\u996E\u98DF\u5730\u533A\u6216\u6587\u5316\uFF0C\u5E76\u5728 appliedRegion \u4E2D\u7B80\u6D01\u5199\u660E\u63A8\u65AD\u7ED3\u679C\uFF1B\u8BC1\u636E\u4E0D\u8DB3\u65F6\u5199\u201C\u901A\u7528\u5BB6\u5E38\u996E\u98DF\u201D\uFF0C\u4E0D\u5F97\u81C6\u9020\u5177\u4F53\u7C4D\u8D2F\u3002";
-    const existing = window2.dates.map((date) => ({
-      date,
+    const existing = window2.dates.map((date2) => ({
+      date: date2,
       meals: Object.fromEntries(RECIPE_MEAL_TYPES.flatMap((type) => {
-        const meal = scope.days[date]?.[type];
+        const meal = scope.days[date2]?.[type];
         return meal ? [[type, { text: meal.text, source: meal.source }]] : [];
       }))
     }));
@@ -2691,10 +2691,10 @@ ${userPrompt}` : userPrompt;
     const normalized = normalizeRecipeScope(scope);
     const dates = calendarDateRangeKeys(start, -1, 1);
     const lines = [];
-    for (const date of dates) {
-      const day = normalized.days[date] || {};
+    for (const date2 of dates) {
+      const day = normalized.days[date2] || {};
       const meals = RECIPE_MEAL_TYPES.flatMap((type) => day[type]?.text ? [`${RECIPE_MEAL_LABELS[type]}\uFF1A${day[type].text}`] : []);
-      if (meals.length) lines.push(`${date}\uFF5C${meals.join("\uFF1B")}`);
+      if (meals.length) lines.push(`${date2}\uFF5C${meals.join("\uFF1B")}`);
     }
     if (!lines.length) return "";
     const region = normalized.regionPreference || normalized.lastGeneratedRegion;
@@ -3763,9 +3763,9 @@ ${userPrompt}` : userPrompt;
     const attrs = `data-entry-kind="${kind}" data-entry-id="${escapeAttr(id2)}"`;
     return `<span class="pm-calendar-inline-actions"><button type="button" data-action="calendar-edit-entry" ${attrs} aria-label="\u7F16\u8F91${escapeAttr(title)}" title="\u7F16\u8F91">${EDIT_ICON_SVG}</button><button type="button" class="is-danger" data-action="calendar-delete-entry" ${attrs} aria-label="\u5220\u9664${escapeAttr(title)}" title="\u5220\u9664">${TRASH_ICON_SVG}</button></span>`;
   }
-  function eventRows(scope, occasionsByDate, date, editing = false) {
-    const events = scope.events[date] || [];
-    const occasionRows = (occasionsByDate.get(date) || []).map((occasion) => `<article class="pm-calendar-event is-occasion" data-occasion-id="${escapeAttr(occasion.id)}">
+  function eventRows(scope, occasionsByDate, date2, editing = false) {
+    const events = scope.events[date2] || [];
+    const occasionRows = (occasionsByDate.get(date2) || []).map((occasion) => `<article class="pm-calendar-event is-occasion" data-occasion-id="${escapeAttr(occasion.id)}">
         <div><b>${escapeHtml(occasion.title)}</b><span>${occasionTypeLabel(occasion.type, occasion.repeat, occasion.intervalDays)}${occasion.leapAdjusted ? "\uFF08\u95F0\u65E5\u987A\u5EF6\uFF09" : ""}${occasion.note ? ` \xB7 ${escapeHtml(occasion.note)}` : ""}</span></div>
         ${editing ? inlineEntryActions("occasion", occasion.id, occasion.title) : ""}
     </article>`);
@@ -3775,10 +3775,10 @@ ${userPrompt}` : userPrompt;
     </article>`);
     return [...occasionRows, ...eventItems].join("");
   }
-  function holidayRows(cache, date) {
-    const year = Number(date.slice(0, 4));
+  function holidayRows(cache, date2) {
+    const year = Number(date2.slice(0, 4));
     const row = holidayYearFromCache(cache, cache?.selectedCountry, year);
-    return (row?.entries || []).filter((item) => item.date === date).map(
+    return (row?.entries || []).filter((item) => item.date === date2).map(
       (item) => `<article class="pm-calendar-event is-holiday"><div><b>${escapeHtml(item.name)}</b><span>${escapeHtml(item.kind === "workday" ? "\u8C03\u4F11\u5DE5\u4F5C\u65E5" : item.kind === "in_lieu" ? "\u8C03\u4F11" : item.kind === "observed" ? "\u66FF\u4EE3\u4F11\u606F\u65E5" : "\u8282\u5047\u65E5")}</span></div></article>`
     ).join("");
   }
@@ -3792,18 +3792,18 @@ ${userPrompt}` : userPrompt;
     if ([95, 96, 99].includes(weatherCode)) return WEATHER_STORM_ICON_SVG;
     return WEATHER_ICON_SVG;
   }
-  function statusCard({ relativeLabel, context, value, icon: icon3, parsed, date, kind, phase = "" }) {
+  function statusCard({ relativeLabel, context, value, icon: icon3, parsed, date: date2, kind, phase = "" }) {
     return `<div class="pm-calendar-status-card pm-calendar-status-card-${kind}"${phase ? ` data-cycle-phase="${escapeAttr(phase)}"` : ""}>
         <span class="pm-calendar-status-watermark" aria-hidden="true">${icon3}</span>
         <div class="pm-calendar-status-content">
-            <div class="pm-calendar-status-heading">${relativeLabel ? `<strong class="pm-calendar-status-relative">${escapeHtml(relativeLabel)}</strong>` : ""}<span class="pm-calendar-status-date"><time datetime="${escapeAttr(date)}">${escapeHtml(detailDate.format(parsed))}</time><em>${escapeHtml(detailWeekday.format(parsed))}</em></span></div>
+            <div class="pm-calendar-status-heading">${relativeLabel ? `<strong class="pm-calendar-status-relative">${escapeHtml(relativeLabel)}</strong>` : ""}<span class="pm-calendar-status-date"><time datetime="${escapeAttr(date2)}">${escapeHtml(detailDate.format(parsed))}</time><em>${escapeHtml(detailWeekday.format(parsed))}</em></span></div>
             <b class="pm-calendar-status-value">${value}</b>
             <div class="pm-calendar-status-context">${context}</div>
         </div>
     </div>`;
   }
-  function weatherStatusCard(scope, weatherStore, date, parsed, relativeLabel) {
-    const resolved = resolveWeatherForDate(weatherStore, date, {
+  function weatherStatusCard(scope, weatherStore, date2, parsed, relativeLabel) {
+    const resolved = resolveWeatherForDate(weatherStore, date2, {
       storyWeatherEvent: scope.weatherEvent,
       storyWeatherEventEnabled: scope.weatherEventEnabled
     });
@@ -3816,15 +3816,15 @@ ${userPrompt}` : userPrompt;
     return { content: statusCard({
       kind: "weather",
       parsed,
-      date,
+      date: date2,
       icon: weatherStatusIcon(resolved.day.weatherCode),
       relativeLabel,
       context: `<span class="pm-calendar-status-weather-context">${escapeHtml(condition)} \xB7 ${escapeHtml(location)}${escapeHtml(eventLabel)}</span><span class="pm-calendar-status-location" aria-hidden="true">${LOCATION_ICON_SVG}</span>`,
       value: `${resolved.day.tempMin}\xB0\u2013${resolved.day.tempMax}\xB0`
     }), isCard: true };
   }
-  function cycleStatusCard(cycleScope, date, parsed, relativeLabel) {
-    const prediction = predictCyclePhase(cycleScope, date);
+  function cycleStatusCard(cycleScope, date2, parsed, relativeLabel) {
+    const prediction = predictCyclePhase(cycleScope, date2);
     const detail = CYCLE_DETAILS[prediction.phase];
     if (!detail) return { content: "", isCard: false };
     const context = prediction.phase === "period" ? "\u662F\u7279\u6B8A\u7684\u65E5\u5B50 &gt; &lt; \uFF01\u8981\u6CE8\u610F\u4FDD\u91CD\u8EAB\u4F53\u5440" : "\u54CE\u5440\u5440\uFF0C\u662F\u505A\u5B89\u5168\u9632\u62A4\u8FD8\u662F\u2026\u2026";
@@ -3832,15 +3832,15 @@ ${userPrompt}` : userPrompt;
       kind: "cycle",
       phase: prediction.phase,
       parsed,
-      date,
+      date: date2,
       icon: detail.icon,
       relativeLabel,
       context: `<span class="pm-calendar-status-cycle-context">${context}</span>`,
       value: detail.label
     }), isCard: true };
   }
-  function recipeRows(recipeScope, date, editing = false) {
-    const day = recipeDayFor(recipeScope, date);
+  function recipeRows(recipeScope, date2, editing = false) {
+    const day = recipeDayFor(recipeScope, date2);
     return RECIPE_MEAL_TYPES.flatMap((mealType) => day[mealType]?.text ? [
       `<article class="pm-calendar-event is-recipe" data-recipe-meal="${mealType}"><div><b>${RECIPE_MEAL_LABELS[mealType]}</b><span>${escapeHtml(day[mealType].text)}</span></div>${editing ? `<span class="pm-calendar-inline-actions"><button type="button" data-action="calendar-recipe-edit" data-meal-type="${mealType}" aria-label="\u7F16\u8F91${RECIPE_MEAL_LABELS[mealType]}" title="\u7F16\u8F91">${EDIT_ICON_SVG}</button><button type="button" class="is-danger" data-action="calendar-recipe-delete" data-meal-type="${mealType}" aria-label="\u5220\u9664${RECIPE_MEAL_LABELS[mealType]}" title="\u5220\u9664">${TRASH_ICON_SVG}</button></span>` : ""}</article>`
     ] : []).join("");
@@ -3978,8 +3978,8 @@ ${userPrompt}` : userPrompt;
     const custom = repeat === "custom";
     return `<div class="pm-modal pm-calendar-entry-dialog"><div class="pm-modal-header"><span></span><b>\u65E5\u7A0B</b><button type="button" class="pm-modal-close" data-calendar-entry-close aria-label="\u5173\u95ED">${CLOSE_ICON_SVG}</button></div><form data-calendar-entry-form><label>\u91CD\u590D<select name="repeat" data-calendar-repeat-select aria-label="\u65E5\u7A0B\u91CD\u590D\u89C4\u5219"><option value="none" ${repeat === "none" ? "selected" : ""}>\u4E0D\u91CD\u590D</option><option value="daily" ${repeat === "daily" ? "selected" : ""}>\u6BCF\u65E5\u91CD\u590D</option><option value="weekly" ${repeat === "weekly" ? "selected" : ""}>\u6BCF\u5468\uFF08\u540C\u661F\u671F\uFF09</option><option value="biweekly" ${repeat === "biweekly" ? "selected" : ""}>\u6BCF\u4E24\u5468\uFF08\u540C\u661F\u671F\uFF09</option><option value="monthly" ${repeat === "monthly" ? "selected" : ""}>\u6BCF\u6708\uFF08\u540C\u65E5\uFF09</option><option value="yearly" ${yearly ? "selected" : ""}>\u6BCF\u5E74\u91CD\u590D</option><option value="custom" ${custom ? "selected" : ""}>\u81EA\u5B9A\u4E49</option></select></label><label class="pm-calendar-repeat-interval" data-calendar-interval-days ${custom ? "" : 'hidden aria-hidden="true"'}>\u6BCF<input name="intervalDays" type="number" min="1" max="9999" step="1" inputmode="numeric" value="${custom ? Number(entry2?.intervalDays) || 1 : 1}" ${custom ? "" : "disabled"} aria-label="\u6BCF\u51E0\u5929\u91CD\u590D\u4E00\u6B21">\u5929\u91CD\u590D\u4E00\u6B21</label><input name="title" maxlength="120" placeholder="\u540D\u79F0" aria-label="\u5B89\u6392\u540D\u79F0"><textarea name="note" maxlength="1000" placeholder="\u5907\u6CE8\uFF08\u53EF\u9009\uFF09" aria-label="\u5B89\u6392\u5907\u6CE8"></textarea><div data-calendar-occasion-fields ${yearly ? "" : 'hidden aria-hidden="true"'}><label>\u957F\u671F\u7C7B\u578B<select name="occasionType" ${yearly ? "" : "disabled"}><option value="anniversary">\u7EAA\u5FF5\u65E5</option><option value="birthday">\u751F\u65E5</option></select></label><label>2 \u6708 29 \u65E5\u5728\u975E\u95F0\u5E74<select name="leapDayRule" ${yearly ? "" : "disabled"}><option value="feb28">\u6309 2 \u6708 28 \u65E5\u663E\u793A</option><option value="mar1">\u6309 3 \u6708 1 \u65E5\u663E\u793A</option><option value="skip">\u8BE5\u5E74\u4E0D\u663E\u793A</option></select></label></div><p class="pm-calendar-entry-error" data-calendar-entry-error role="status" aria-live="polite"></p><div class="pm-calendar-entry-actions"><button type="submit" class="is-primary">\u4FDD\u5B58</button></div></form></div>`;
   }
-  function renderCalendarRepeatDeleteDialog(title, date) {
-    return `<div class="pm-modal pm-calendar-entry-dialog"><div class="pm-modal-header"><span></span><b>\u6E05\u7406\u91CD\u590D\u65E5\u7A0B</b><button type="button" class="pm-modal-close" data-calendar-repeat-delete-cancel aria-label="\u5173\u95ED">${CLOSE_ICON_SVG}</button></div><p>\u201C${escapeHtml(title)}\u201D\u662F\u91CD\u590D\u65E5\u7A0B\u3002\u8BF7\u9009\u62E9\u6E05\u7406\u8303\u56F4\u3002</p><p class="pm-cfg-tip">\u5F53\u5929\uFF1A\u4EC5\u79FB\u9664 ${escapeHtml(date)} \u7684\u8FD9\u4E00\u9879\uFF1B\u5168\u90E8\uFF1A\u5220\u9664\u6574\u6761\u91CD\u590D\u65E5\u7A0B\u3002</p><div class="pm-calendar-entry-actions"><button type="button" data-calendar-repeat-delete="day">\u4EC5\u6E05\u7406\u5F53\u5929</button><button type="button" class="is-danger" data-calendar-repeat-delete="all">\u6E05\u7406\u5168\u90E8\u91CD\u590D</button></div></div>`;
+  function renderCalendarRepeatDeleteDialog(title, date2) {
+    return `<div class="pm-modal pm-calendar-entry-dialog"><div class="pm-modal-header"><span></span><b>\u6E05\u7406\u91CD\u590D\u65E5\u7A0B</b><button type="button" class="pm-modal-close" data-calendar-repeat-delete-cancel aria-label="\u5173\u95ED">${CLOSE_ICON_SVG}</button></div><p>\u201C${escapeHtml(title)}\u201D\u662F\u91CD\u590D\u65E5\u7A0B\u3002\u8BF7\u9009\u62E9\u6E05\u7406\u8303\u56F4\u3002</p><p class="pm-cfg-tip">\u5F53\u5929\uFF1A\u4EC5\u79FB\u9664 ${escapeHtml(date2)} \u7684\u8FD9\u4E00\u9879\uFF1B\u5168\u90E8\uFF1A\u5220\u9664\u6574\u6761\u91CD\u590D\u65E5\u7A0B\u3002</p><div class="pm-calendar-entry-actions"><button type="button" data-calendar-repeat-delete="day">\u4EC5\u6E05\u7406\u5F53\u5929</button><button type="button" class="is-danger" data-calendar-repeat-delete="all">\u6E05\u7406\u5168\u90E8\u91CD\u590D</button></div></div>`;
   }
   function renderRecipeMealDialog(selectedDate, mealType = "breakfast", meal = null) {
     const normalizedType = RECIPE_MEAL_TYPES.includes(mealType) ? mealType : "breakfast";
@@ -4008,10 +4008,10 @@ ${userPrompt}` : userPrompt;
     if (day < 30) return `\u5EFF${["\u4E00", "\u4E8C", "\u4E09", "\u56DB", "\u4E94", "\u516D", "\u4E03", "\u516B", "\u4E5D"][day - 21]}`;
     return "\u4E09\u5341";
   }
-  function lunarLabel(date) {
+  function lunarLabel(date2) {
     if (!lunarFormatter) return "";
     try {
-      const parts = lunarFormatter.formatToParts(date);
+      const parts = lunarFormatter.formatToParts(date2);
       const month = parts.find((part) => part.type === "month")?.value || "";
       const day = Number(parts.find((part) => part.type === "day")?.value);
       return day === 1 ? month : lunarDayLabel(day);
@@ -4019,17 +4019,17 @@ ${userPrompt}` : userPrompt;
       return "";
     }
   }
-  function dateMeta(scope, occasionsByDate, holidayCache, weatherStore, cycleScope, recipeScope, outfitProfile, date, viewMode) {
-    const parsed = parseCalendarDate(date);
-    const events = scope.events[date] || [];
-    const occasions = occasionsByDate.get(date) || [];
+  function dateMeta(scope, occasionsByDate, holidayCache, weatherStore, cycleScope, recipeScope, outfitProfile, date2, viewMode) {
+    const parsed = parseCalendarDate(date2);
+    const events = scope.events[date2] || [];
+    const occasions = occasionsByDate.get(date2) || [];
     const holidayYear = holidayYearFromCache(holidayCache, holidayCache?.selectedCountry, parsed.getFullYear());
-    const holidays = (holidayYear?.entries || []).filter((item) => item.date === date);
-    const weather = resolveWeatherForDate(weatherStore, date, { storyWeatherEvent: scope.weatherEvent, storyWeatherEventEnabled: scope.weatherEventEnabled });
-    const cycle = predictCyclePhase(cycleScope, date);
-    const recipe = recipeDayFor(recipeScope, date);
+    const holidays = (holidayYear?.entries || []).filter((item) => item.date === date2);
+    const weather = resolveWeatherForDate(weatherStore, date2, { storyWeatherEvent: scope.weatherEvent, storyWeatherEventEnabled: scope.weatherEventEnabled });
+    const cycle = predictCyclePhase(cycleScope, date2);
+    const recipe = recipeDayFor(recipeScope, date2);
     const firstMeal = RECIPE_MEAL_TYPES.find((type) => recipe[type]?.text);
-    const outfit = outfitForDate(outfitProfile, date);
+    const outfit = outfitForDate(outfitProfile, date2);
     const summary = viewMode === "weather" ? (weather.status === "available" ? `${weatherCodeLabel(weather.day.weatherCode)} ${weather.day.tempMax}\xB0` : "") || lunarLabel(parsed) : viewMode === "cycle" ? (cycle.phase ? cycleLabels[cycle.phase] || "" : "") || lunarLabel(parsed) : viewMode === "recipe" ? (firstMeal ? `${RECIPE_MEAL_LABELS[firstMeal]} ${recipe[firstMeal].text}` : "") || lunarLabel(parsed) : viewMode === "outfit" ? outfit?.text || lunarLabel(parsed) : holidays[0]?.name || occasions[0]?.title || events[0]?.title || lunarLabel(parsed);
     return {
       parsed,
@@ -4078,12 +4078,12 @@ ${userPrompt}` : userPrompt;
     }
     const days = monthCells.map((cell) => {
       if (cell.isPlaceholder) return '<span class="pm-calendar-day is-placeholder" aria-hidden="true"></span>';
-      const date = cell.date;
-      const meta = dateMeta(scope, occasionsByDate, holidayCache, weatherStore, cycleScope, recipeScope, outfitProfile, date, viewMode);
+      const date2 = cell.date;
+      const meta = dateMeta(scope, occasionsByDate, holidayCache, weatherStore, cycleScope, recipeScope, outfitProfile, date2, viewMode);
       const classes = ["pm-calendar-day"];
       if (meta.parsed.getMonth() !== viewMonth - 1) classes.push("is-other-month");
-      if (date === todayKey) classes.push("is-today");
-      if (date === selectedDate) classes.push("is-selected");
+      if (date2 === todayKey) classes.push("is-today");
+      if (date2 === selectedDate) classes.push("is-selected");
       if (viewMode === "weather" && meta.weather.status === "available") classes.push("has-weather");
       else if (viewMode === "cycle" && ["period", "ovulatory"].includes(meta.cycle.phase)) classes.push(`has-cycle is-cycle-${meta.cycle.phase}`);
       else if (viewMode === "recipe" && meta.hasRecipe) classes.push("has-recipe");
@@ -4098,7 +4098,7 @@ ${userPrompt}` : userPrompt;
         meta.summary,
         viewMode === "weather" && meta.weather.status === "available" ? meta.weather.sourceLabel : ""
       ].filter(Boolean).join("\uFF0C");
-      return `<button type="button" class="${classes.join(" ")}" data-action="calendar-select-date" data-calendar-date="${date}" aria-pressed="${date === selectedDate}" aria-label="${escapeAttr(labels)}"><b>${meta.parsed.getDate()}</b><span>${escapeHtml(meta.summary)}</span><i aria-hidden="true"></i></button>`;
+      return `<button type="button" class="${classes.join(" ")}" data-action="calendar-select-date" data-calendar-date="${date2}" aria-pressed="${date2 === selectedDate}" aria-label="${escapeAttr(labels)}"><b>${meta.parsed.getDate()}</b><span>${escapeHtml(meta.summary)}</span><i aria-hidden="true"></i></button>`;
     }).join("");
     const relativeLabel = relativeCalendarLabel(today, selectedDate) || "";
     const detailRegenerating = viewMode === "recipe" ? view.recipeGenerating === true && view.recipeGenerationTask?.mode === "recipe-regenerate" : viewMode === "outfit" ? view.outfitGenerating === true && view.outfitGenerationTask?.mode === "outfit-regenerate" : viewMode === "schedule" && view.generating === true && view.generationTask?.mode === "regenerate";
@@ -4121,7 +4121,7 @@ ${userPrompt}` : userPrompt;
     const headerActionLabel = viewMode === "weather" ? "\u5237\u65B0\u5929\u6C14" : viewMode === "recipe" ? `AI \u751F\u6210${recipeWindow.label}\u83DC\u8C31` : viewMode === "outfit" ? `AI \u751F\u6210${recipeWindow.label} OOTD` : calendarGenerationCopy(today).actionLabel;
     const holidayCountry = normalizeHolidayCache(holidayCache).selectedCountry;
     const holidayRange = holidayYearRange(holidayCountry);
-    const holidayAvailable = monthKeys.some((date) => isHolidayYearSupported(holidayCountry, Number(date.slice(0, 4))));
+    const holidayAvailable = monthKeys.some((date2) => isHolidayYearSupported(holidayCountry, Number(date2.slice(0, 4))));
     const management = renderCalendarManagement({
       scope,
       holidayCache,
@@ -4171,10 +4171,10 @@ ${userPrompt}` : userPrompt;
         return false;
       }
       const profileSnapshot = structuredClone(getProfile(storageId, subject));
-      const existing = window2.dates.map((date) => profileSnapshot.days[date]).filter(Boolean);
+      const existing = window2.dates.map((date2) => profileSnapshot.days[date2]).filter(Boolean);
       const hasExistingAi = existing.some((outfit) => outfit.source === "ai");
       if (hasExistingAi && (typeof confirmImpl !== "function" || !confirmImpl(`${window2.label}\u5DF2\u6709 AI \u751F\u6210\u7684\u7A7F\u642D\uFF0C\u91CD\u65B0\u751F\u6210\u5C06\u8986\u76D6\u8FD9\u4E9B\u5185\u5BB9\uFF1B\u624B\u52A8\u8BB0\u5F55\u4F1A\u4FDD\u7559\u3002\u662F\u5426\u7EE7\u7EED\uFF1F`))) return false;
-      const windowSnapshot = JSON.stringify(window2.dates.map((date) => [date, profileSnapshot.days[date] || null]));
+      const windowSnapshot = JSON.stringify(window2.dates.map((date2) => [date2, profileSnapshot.days[date2] || null]));
       const preferencesSnapshot = JSON.stringify({
         colorPreference: profileSnapshot.colorPreference,
         preference: profileSnapshot.preference,
@@ -4200,7 +4200,7 @@ ${userPrompt}` : userPrompt;
             generationRule: current.generationRule
           });
           if (currentPreferences !== preferencesSnapshot) throw new Error("\u7A7F\u642D\u504F\u597D\u6216\u751F\u6210\u89C4\u5219\u5DF2\u5728\u751F\u6210\u671F\u95F4\u6539\u53D8\uFF0C\u8BF7\u91CD\u65B0\u751F\u6210");
-          if (JSON.stringify(window2.dates.map((date) => [date, current.days[date] || null])) !== windowSnapshot) throw new Error("\u5F85\u8986\u76D6\u7A7F\u642D\u5DF2\u5728\u751F\u6210\u671F\u95F4\u6539\u53D8\uFF0C\u8BF7\u91CD\u65B0\u786E\u8BA4\u540E\u751F\u6210");
+          if (JSON.stringify(window2.dates.map((date2) => [date2, current.days[date2] || null])) !== windowSnapshot) throw new Error("\u5F85\u8986\u76D6\u7A7F\u642D\u5DF2\u5728\u751F\u6210\u671F\u95F4\u6539\u53D8\uFF0C\u8BF7\u91CD\u65B0\u786E\u8BA4\u540E\u751F\u6210");
           return updateOutfitProfile(store, storageId, subject, (value) => replaceOutfitsInWindow(value, generated, { start, now: Date.now(), days }));
         }, task);
         if (!committed || !tasks.active(task)) return false;
@@ -4226,13 +4226,13 @@ ${userPrompt}` : userPrompt;
     }
     function showEditor(storageId) {
       if (typeof makeOverlay !== "function") throw new Error("\u7A7F\u642D\u7F16\u8F91\u5668\u4E0D\u53EF\u7528");
-      const subject = getView(storageId).outfitSubject, date = getView(storageId).selectedDate, existing = outfitForDate(getProfile(storageId, subject), date);
-      const overlay = makeOverlay(renderOutfitDialog(date, existing)), form = overlay.querySelector("[data-outfit-entry-form]"), errorNode = overlay.querySelector("[data-outfit-entry-error]");
+      const subject = getView(storageId).outfitSubject, date2 = getView(storageId).selectedDate, existing = outfitForDate(getProfile(storageId, subject), date2);
+      const overlay = makeOverlay(renderOutfitDialog(date2, existing)), form = overlay.querySelector("[data-outfit-entry-form]"), errorNode = overlay.querySelector("[data-outfit-entry-error]");
       overlay.querySelector("[data-outfit-entry-close]")?.addEventListener("click", () => closeOverlay?.("close"));
       form?.addEventListener("submit", async (event) => {
         event.preventDefault();
         try {
-          await commitOutfits(storageId, (store) => updateOutfitProfile(store, storageId, subject, (value) => upsertOutfit(value, { date, text: form.elements.text.value, source: "manual" })));
+          await commitOutfits(storageId, (store) => updateOutfitProfile(store, storageId, subject, (value) => upsertOutfit(value, { date: date2, text: form.elements.text.value, source: "manual" })));
           status(storageId, "OOTD \u5DF2\u4FDD\u5B58\u3002");
           closeOverlay?.("saved");
           rerender(storageId);
@@ -4251,9 +4251,9 @@ ${userPrompt}` : userPrompt;
         return true;
       }
       if (action === "calendar-outfit-delete") {
-        const subject = getView(storageId).outfitSubject, date = getView(storageId).selectedDate;
-        if (!outfitForDate(getProfile(storageId, subject), date) || !confirmImpl?.("\u5220\u9664\u5F53\u5929 OOTD\uFF1F")) return true;
-        await commitOutfits(storageId, (store) => updateOutfitProfile(store, storageId, subject, (value) => deleteOutfit(value, date).profile));
+        const subject = getView(storageId).outfitSubject, date2 = getView(storageId).selectedDate;
+        if (!outfitForDate(getProfile(storageId, subject), date2) || !confirmImpl?.("\u5220\u9664\u5F53\u5929 OOTD\uFF1F")) return true;
+        await commitOutfits(storageId, (store) => updateOutfitProfile(store, storageId, subject, (value) => deleteOutfit(value, date2).profile));
         status(storageId, "OOTD \u5DF2\u5220\u9664\u3002");
         rerender(storageId);
         return true;
@@ -4350,9 +4350,9 @@ ${userPrompt}` : userPrompt;
       if (!start) throw new Error("\u91CD\u65B0\u751F\u6210\u83DC\u8C31\u7684\u9009\u4E2D\u65E5\u671F\u65E0\u6548");
       const generationDays = replaceWindow ? 1 : 7;
       const generationWindow = calendarWindowDescription(start, generationDays);
-      const windowSnapshot = (value) => JSON.stringify(generationWindow.dates.map((date) => ({
-        date,
-        meals: value.days[date] || {}
+      const windowSnapshot = (value) => JSON.stringify(generationWindow.dates.map((date2) => ({
+        date: date2,
+        meals: value.days[date2] || {}
       })));
       if (replaceWindow) {
         if (formatCalendarDate(start) < formatCalendarDate(referenceDate)) {
@@ -4363,7 +4363,7 @@ ${userPrompt}` : userPrompt;
         if (typeof confirmImpl !== "function" || !confirmImpl(`\u91CD\u65B0\u751F\u6210 ${generationWindow.label}\u83DC\u8C31\uFF1F\u8FD9\u4F1A\u8986\u76D6\u5F53\u65E5\u6240\u6709\u9910\u98DF\u3002`)) return false;
       } else {
         const currentScope = getRecipeScope(storageId);
-        const hasExistingMeals = calendarDateRangeKeys(start, 0, generationDays - 1).some((date) => Object.keys(currentScope.days[date] || {}).length > 0);
+        const hasExistingMeals = calendarDateRangeKeys(start, 0, generationDays - 1).some((date2) => Object.keys(currentScope.days[date2] || {}).length > 0);
         if (hasExistingMeals && (typeof confirmImpl !== "function" || !confirmImpl(`${generationWindow.label}\u5DF2\u6709\u83DC\u8C31\uFF0C\u91CD\u65B0\u751F\u6210\u5C06\u8986\u76D6\u5DF2\u6709\u5185\u5BB9\u3002\u662F\u5426\u7EE7\u7EED\uFF1F`))) return false;
       }
       const requestedWindowSnapshot = windowSnapshot(getRecipeScope(storageId));
@@ -4431,13 +4431,13 @@ ${userPrompt}` : userPrompt;
     }
     function showMealEditor(storageId, mealType = "", editing = false) {
       if (typeof makeOverlay !== "function") throw new Error("\u83DC\u8C31\u7F16\u8F91\u5668\u4E0D\u53EF\u7528");
-      const date = getView(storageId).selectedDate;
-      const day = recipeDayFor(getRecipeScope(storageId), date);
+      const date2 = getView(storageId).selectedDate;
+      const day = recipeDayFor(getRecipeScope(storageId), date2);
       const selectedType = mealType || ["breakfast", "lunch", "dinner", "snack"].find((type) => !day[type]);
       if (!selectedType) throw new Error("\u8FD9\u4E00\u5929\u7684\u56DB\u4E2A\u9910\u6B21\u90FD\u5DF2\u6709\u5185\u5BB9\uFF0C\u8BF7\u4F7F\u7528\u9910\u98DF\u53F3\u4FA7\u7684\u7F16\u8F91\u6309\u94AE");
       const existing = editing ? day[selectedType] || null : null;
       if (editing && !existing) throw new Error("\u8981\u7F16\u8F91\u7684\u9910\u98DF\u4E0D\u5B58\u5728\u6216\u5DF2\u88AB\u79FB\u9664");
-      const overlay = makeOverlay(renderRecipeMealDialog(date, selectedType, existing));
+      const overlay = makeOverlay(renderRecipeMealDialog(date2, selectedType, existing));
       const form = overlay.querySelector("[data-recipe-entry-form]");
       const errorNode = overlay.querySelector("[data-recipe-entry-error]");
       overlay.querySelector("[data-recipe-entry-close]")?.addEventListener("click", () => closeOverlay?.("close"));
@@ -4448,12 +4448,12 @@ ${userPrompt}` : userPrompt;
           const text9 = form.elements.text?.value || "";
           await commitRecipe(storageId, (current) => {
             let next = current;
-            const currentDay = recipeDayFor(current, date);
+            const currentDay = recipeDayFor(current, date2);
             if (nextType !== selectedType && currentDay[nextType]) {
               throw new Error("\u76EE\u6807\u9910\u6B21\u5DF2\u6709\u5185\u5BB9\uFF0C\u8BF7\u5148\u7F16\u8F91\u6216\u79FB\u9664\u539F\u9910\u98DF");
             }
-            if (existing && nextType !== selectedType) next = deleteRecipeMeal(next, date, selectedType).scope;
-            return upsertRecipeMeal(next, { date, mealType: nextType, text: text9, source: "manual" });
+            if (existing && nextType !== selectedType) next = deleteRecipeMeal(next, date2, selectedType).scope;
+            return upsertRecipeMeal(next, { date: date2, mealType: nextType, text: text9, source: "manual" });
           });
           status(storageId, existing ? "\u9910\u98DF\u5DF2\u66F4\u65B0\u3002" : "\u9910\u98DF\u5DF2\u6DFB\u52A0\u3002");
           closeOverlay?.("saved");
@@ -4499,11 +4499,11 @@ ${userPrompt}` : userPrompt;
         return true;
       }
       if (action === "calendar-recipe-delete") {
-        const date = getView(storageId).selectedDate;
+        const date2 = getView(storageId).selectedDate;
         const mealType = button.dataset.mealType || "";
-        const meal = recipeDayFor(getRecipeScope(storageId), date)[mealType];
+        const meal = recipeDayFor(getRecipeScope(storageId), date2)[mealType];
         if (!meal || !confirmImpl?.(`\u5220\u9664\u8FD9\u4EFD\u9910\u98DF\u201C${meal.text}\u201D\uFF1F`)) return true;
-        await commitRecipe(storageId, (current) => deleteRecipeMeal(current, date, mealType).scope);
+        await commitRecipe(storageId, (current) => deleteRecipeMeal(current, date2, mealType).scope);
         status(storageId, "\u9910\u98DF\u5DF2\u5220\u9664\u3002");
         rerender(storageId);
         return true;
@@ -4738,7 +4738,7 @@ ${userPrompt}` : userPrompt;
       try {
         const view = viewFor(storageId);
         const range = holidayYearRange(country);
-        const years = [...new Set(calendarMonthKeys(view.viewYear, view.viewMonth).map((date) => Number(date.slice(0, 4))).filter((year) => isHolidayYearSupported(country, year)))];
+        const years = [...new Set(calendarMonthKeys(view.viewYear, view.viewMonth).map((date2) => Number(date2.slice(0, 4))).filter((year) => isHolidayYearSupported(country, year)))];
         if (!years.length) throw new Error(
           `\u8BE5\u56FD\u5BB6\u5728\u5F53\u524D\u5E74\u4EE3\u65E0\u5916\u90E8\u8282\u5047\u65E5\u6570\u636E\u6E90\uFF08\u4EC5\u652F\u6301 ${range?.min ?? "\u672A\u77E5"}\u2013${range?.max ?? "\u672A\u77E5"} \u5E74\uFF09`
         );
@@ -4838,9 +4838,9 @@ ${userPrompt}` : userPrompt;
       if (!start) throw new Error("\u91CD\u65B0\u751F\u6210\u65E5\u7A0B\u7684\u9009\u4E2D\u65E5\u671F\u65E0\u6548");
       const generationDays = mode === "regenerate" ? 1 : 7;
       const generationWindow = calendarWindowDescription(start, generationDays);
-      const windowSnapshot = (value) => JSON.stringify(generationWindow.dates.map((date) => ({
-        date,
-        events: value.events[date] || []
+      const windowSnapshot = (value) => JSON.stringify(generationWindow.dates.map((date2) => ({
+        date: date2,
+        events: value.events[date2] || []
       })));
       const confirmGeneration = deps.confirmImpl || globalThis.confirm;
       if (mode === "regenerate") {
@@ -4851,7 +4851,7 @@ ${userPrompt}` : userPrompt;
         }
         if (typeof confirmGeneration !== "function" || !confirmGeneration(`\u91CD\u65B0\u751F\u6210 ${generationWindow.label}\u65E5\u7A0B\uFF1F\u8FD9\u4F1A\u8986\u76D6\u5F53\u65E5\u6240\u6709\u65E5\u7A0B\u3002`)) return false;
       } else if (mode === "generate") {
-        const hasExistingEvents = generationWindow.dates.some((date) => (scope(storageId).events[date] || []).length > 0);
+        const hasExistingEvents = generationWindow.dates.some((date2) => (scope(storageId).events[date2] || []).length > 0);
         if (hasExistingEvents && (typeof confirmGeneration !== "function" || !confirmGeneration(`${generationWindow.label}\u5DF2\u6709\u65E5\u7A0B\uFF0C\u91CD\u65B0\u751F\u6210\u5C06\u8986\u76D6\u5DF2\u6709\u5185\u5BB9\u3002\u662F\u5426\u7EE7\u7EED\uFF1F`))) return false;
       }
       const requestedWindowSnapshot = mode === "generate" || mode === "regenerate" ? windowSnapshot(scope(storageId)) : "";
@@ -4871,17 +4871,17 @@ ${userPrompt}` : userPrompt;
         const requestedGenerationRule = current.generationRule;
         const historicalDates = calendarDateRangeKeys(start, -3, -1);
         const currentDates = calendarDateRangeKeys(start, 0, generationDays - 1);
-        const historicalEvents = historicalDates.flatMap((date) => current.events[date] || []).map(({ date, title, note, source }) => ({ date, title, note, source }));
-        const existing = currentDates.flatMap((date) => current.events[date] || []).map(({ date, title, note, source }) => ({ date, title, note, source }));
+        const historicalEvents = historicalDates.flatMap((date2) => current.events[date2] || []).map(({ date: date2, title, note, source }) => ({ date: date2, title, note, source }));
+        const existing = currentDates.flatMap((date2) => current.events[date2] || []).map(({ date: date2, title, note, source }) => ({ date: date2, title, note, source }));
         const holidayStore = normalizeHolidayCache(runtime.holidayStore);
         const contextFestivals = extractContextFestivals(context);
-        const years = [...new Set(currentDates.map((date) => Number(date.slice(0, 4))))];
+        const years = [...new Set(currentDates.map((date2) => Number(date2.slice(0, 4))))];
         const knownDateFacts = years.flatMap((year) => {
           const legal = holidayYearFromCache(holidayStore, holidayStore.selectedCountry, year)?.entries || [];
           const cultural = year >= HOLIDAY_YEAR_RANGE.min && year <= HOLIDAY_YEAR_RANGE.max ? buildCulturalFestivals(year) : [];
           return mergeCalendarDateFacts(legal, cultural);
         });
-        const dateFacts = mergeCalendarDateFacts(knownDateFacts, contextFestivals).filter((item) => currentDates.includes(item.date)).map(({ date, name, kind }) => ({ date, name, kind }));
+        const dateFacts = mergeCalendarDateFacts(knownDateFacts, contextFestivals).filter((item) => currentDates.includes(item.date)).map(({ date: date2, name, kind }) => ({ date: date2, name, kind }));
         const payload = contextPayload(context, start, {
           dateTags: current.dateTags,
           historicalEvents,
@@ -4940,7 +4940,7 @@ ${userPrompt}` : userPrompt;
         await scanContext(storageId, { silent: true, task });
         if (!tasks.active(task)) return false;
         const reference = calendarReferenceDate(scope(storageId));
-        const hasFutureEvents = calendarWeekKeys(reference, 7).some((date) => (scope(storageId).events[date] || []).length);
+        const hasFutureEvents = calendarWeekKeys(reference, 7).some((date2) => (scope(storageId).events[date2] || []).length);
         rerender(storageId);
         return hasFutureEvents;
       } finally {
@@ -5041,10 +5041,10 @@ ${userPrompt}` : userPrompt;
       rerender(storageId);
     }
     function selectedDateEntries(storageId) {
-      const date = viewFor(storageId).selectedDate, parsed = parseCalendarDate(date);
+      const date2 = viewFor(storageId).selectedDate, parsed = parseCalendarDate(date2);
       return {
-        date,
-        events: scope(storageId).events[date] || [],
+        date: date2,
+        events: scope(storageId).events[date2] || [],
         occasions: parsed ? expandOccasions(occasions(storageId), { start: parsed, days: 1 }) : []
       };
     }
@@ -5061,14 +5061,14 @@ ${userPrompt}` : userPrompt;
         await commitScope(storageId, (current) => deleteCalendarEvent(current, entry2.id).scope);
         status(storageId, "\u65E5\u7A0B\u5DF2\u5220\u9664\u3002");
       } else if (kind === "occasion") {
-        const date = viewFor(storageId).selectedDate;
+        const date2 = viewFor(storageId).selectedDate;
         if (typeof makeOverlay !== "function") throw new Error("\u91CD\u590D\u65E5\u7A0B\u5220\u9664\u786E\u8BA4\u4E0D\u53EF\u7528");
-        const overlay = makeOverlay(renderCalendarRepeatDeleteDialog(entry2.title, date));
+        const overlay = makeOverlay(renderCalendarRepeatDeleteDialog(entry2.title, date2));
         const close = (reason) => closeOverlay?.(reason);
         overlay.querySelector("[data-calendar-repeat-delete-cancel]")?.addEventListener("click", () => close("cancel"));
         overlay.querySelector('[data-calendar-repeat-delete="day"]')?.addEventListener("click", async () => {
           try {
-            await commitOccasions(storageId, (current) => excludeOccasionDate(current, entry2.id, date));
+            await commitOccasions(storageId, (current) => excludeOccasionDate(current, entry2.id, date2));
             status(storageId, "\u5F53\u5929\u91CD\u590D\u65E5\u7A0B\u5DF2\u6E05\u7406\u3002");
             close("saved");
             rerender(storageId);
@@ -5220,16 +5220,16 @@ ${userPrompt}` : userPrompt;
         return;
       }
       if (action === "calendar-select-date") {
-        const date = button.dataset.calendarDate;
+        const date2 = button.dataset.calendarDate;
         const current = viewFor(storageId);
-        if (!calendarMonthKeys(current.viewYear, current.viewMonth).includes(date)) {
+        if (!calendarMonthKeys(current.viewYear, current.viewMonth).includes(date2)) {
           throw new Error("\u9009\u62E9\u7684\u65E5\u5386\u65E5\u671F\u65E0\u6548");
         }
         if (current.monthPanelOpen === true) {
-          await saveBaseDate(storageId, date);
+          await saveBaseDate(storageId, date2);
           return;
         }
-        runtime.viewByStorage.set(storageId, { ...current, selectedDate: date, detailEditing: false });
+        runtime.viewByStorage.set(storageId, { ...current, selectedDate: date2, detailEditing: false });
         rerender(storageId);
         return;
       }
@@ -9724,9 +9724,15 @@ ${entry2.content}` : entry2.content;
     return value.trim();
   };
   var nullableText = (value, label, max = 120) => value === null ? null : text5(value, label, max);
+  var timePattern = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
+  var nullableTime = (value, label) => {
+    if (value !== null && (typeof value !== "string" || !timePattern.test(value))) fail2("TT_HISTORY_SCHEMA_INVALID", `${label} \u5FC5\u987B\u662F HH:mm \u6216 null`);
+    return value;
+  };
   var datePattern = /^\d{4}-\d{2}-\d{2}$/;
   var validDate = (value) => typeof value === "string" && datePattern.test(value) && Number.isFinite((/* @__PURE__ */ new Date(`${value}T12:00:00Z`)).getTime()) && (/* @__PURE__ */ new Date(`${value}T12:00:00Z`)).toISOString().slice(0, 10) === value;
   var projectionText = (stage) => ["day-summary", "period-summary", "span-stage"].includes(stage.kind) ? stage.summary : stage.text;
+  var DETAIL_CAPACITY = 80;
   var availableState = (entityType, entityId, eventId) => ({
     entityType,
     entityId,
@@ -9747,7 +9753,7 @@ ${entry2.content}` : entry2.content;
     exact(value, ["text", "time", "timeLabel"], "history stage");
     return {
       text: text5(value.text, "history stage.text", 600),
-      time: nullableText(value.time, "history stage.time", 5),
+      time: nullableTime(value.time, "history stage.time"),
       timeLabel: nullableText(value.timeLabel, "history stage.timeLabel", 40)
     };
   }
@@ -9885,6 +9891,58 @@ ${entry2.content}` : entry2.content;
     payload.removableEntityStateById[dayId] = availableState("day-summary", dayId, event.id);
     return true;
   }
+  function governDetailCapacity(event, payload, assistantCount) {
+    const details = payload.stageDetailsByEvent[event.id] || [];
+    if (details.length <= DETAIL_CAPACITY) return false;
+    const detailsByDate = /* @__PURE__ */ new Map();
+    for (const detail of details) {
+      if (!validDate(detail.storyDate)) continue;
+      const group = detailsByDate.get(detail.storyDate) || [];
+      group.push(detail);
+      detailsByDate.set(detail.storyDate, group);
+    }
+    const openStoryDates = new Set(event.stages.filter((stage) => stage.kind === "live-stage").map((stage) => stage.storyDate));
+    const summariesByDate = new Map(event.stages.filter((stage) => stage.kind === "day-summary" && stage.status === "closed").map((stage) => [stage.storyDate, stage]));
+    const groups = [...detailsByDate.entries()].sort(([left], [right]) => left.localeCompare(right)).flatMap(([storyDate, group]) => {
+      if (openStoryDates.has(storyDate)) return [];
+      const summary = summariesByDate.get(storyDate);
+      if (!summary) return [];
+      const refs = new Set(summary.detailRefs);
+      if (group.some((detail) => !refs.has(detail.id))) return [];
+      return [{ storyDate, details: [...group].sort((left, right) => left.sourceStageSequence - right.sourceStageSequence || left.id.localeCompare(right.id)) }];
+    });
+    let requiredSlots = details.length - DETAIL_CAPACITY;
+    const removedDetails = [];
+    for (const group of groups) {
+      removedDetails.push(...group.details);
+      requiredSlots -= group.details.length;
+      if (requiredSlots <= 0) break;
+    }
+    if (requiredSlots > 0) {
+      fail2("TT_DETAIL_CAPACITY_NO_SAFE_GROUP", `event ${event.id} \u6CA1\u6709\u8DB3\u591F\u7684\u5DF2\u6458\u8981\u5B8C\u6574\u65E5\u671F\u53EF\u5B89\u5168\u6E05\u7406`);
+    }
+    const removedAtAssistantCount = Number.isSafeInteger(assistantCount) && assistantCount >= 0 ? assistantCount : null;
+    const removedIds = new Set(removedDetails.map((detail) => detail.id));
+    for (const detail of removedDetails) {
+      const state = payload.removableEntityStateById[detail.id];
+      if (!state || state.state !== "available" || state.entityType !== "detail" || state.eventId !== event.id) {
+        fail2("TT_HISTORY_SCHEMA_INVALID", "detail capacity lifecycle \u65E0\u6548");
+      }
+      const removed = {
+        ...state,
+        state: "removed",
+        removalReason: "detail-pool-capacity",
+        removedAtAssistantCount
+      };
+      payload.removableEntityStateById[detail.id] = removed;
+      payload.removableEntityTombstonesById[detail.id] = clone4(removed);
+    }
+    const retained = details.filter((detail) => !removedIds.has(detail.id));
+    if (retained.length > DETAIL_CAPACITY) fail2("TT_DETAIL_CAPACITY_NO_SAFE_GROUP", `event ${event.id} detail \u5BB9\u91CF\u6CBB\u7406\u5931\u8D25`);
+    if (retained.length) payload.stageDetailsByEvent[event.id] = retained;
+    else delete payload.stageDetailsByEvent[event.id];
+    return true;
+  }
   function latestKnownDate(event) {
     const dates = event.stages.flatMap((stage) => {
       if (stage.kind === "live-stage" || stage.kind === "day-summary") return [stage.storyDate];
@@ -9905,6 +9963,144 @@ ${entry2.content}` : entry2.content;
       fail2("TT_HISTORY_STAGE_MISMATCH", "history producer \u4E0E dynamics stage \u8FFD\u52A0\u4E0D\u4E00\u81F4");
     }
   }
+  var periodBoundary = (stage) => stage.kind === "day-summary" ? {
+    startDate: stage.storyDate,
+    startTime: stage.timeRange.start,
+    endDate: stage.storyDate,
+    endTime: stage.timeRange.end
+  } : {
+    startDate: stage.startDate,
+    startTime: stage.startTime,
+    endDate: stage.endDate,
+    endTime: stage.endTime
+  };
+  var periodChildRefs = (stage) => stage.kind === "day-summary" ? [stage.id] : stage.childSummaryRefs;
+  var periodChildCount = (stage) => stage.kind === "day-summary" ? 1 : stage.childSummaryCount;
+  var periodDetailCount = (stage) => stage.kind === "day-summary" ? stage.detailCount : stage.historicalDetailCount;
+  var daySpan = (startDate, endDate) => Math.floor((/* @__PURE__ */ new Date(`${endDate}T12:00:00Z`) - /* @__PURE__ */ new Date(`${startDate}T12:00:00Z`)) / 864e5) + 1;
+  function periodCandidate(stages, start, end) {
+    const children = stages.slice(start, end + 1);
+    if (children.length < 2 || children.some((stage) => !["day-summary", "period-summary"].includes(stage.kind))) return null;
+    for (let index = 1; index < children.length; index += 1) {
+      if (children[index].sourceStageStart !== children[index - 1].sourceStageEnd + 1) return null;
+    }
+    const first = periodBoundary(children[0]);
+    const last = periodBoundary(children.at(-1));
+    if (daySpan(first.startDate, last.endDate) > 7) return null;
+    const childSummaryRefs = children.flatMap(periodChildRefs);
+    if (childSummaryRefs.length > 24 || new Set(childSummaryRefs).size !== childSummaryRefs.length) return null;
+    if (first.startTime === null !== (last.endTime === null)) return null;
+    return {
+      start,
+      end,
+      children,
+      childSummaryRefs,
+      startDate: first.startDate,
+      startTime: first.startTime,
+      endDate: last.endDate,
+      endTime: last.endTime,
+      gain: children.length - 1,
+      childSummaryCount: children.reduce((count, stage) => count + periodChildCount(stage), 0),
+      historicalDetailCount: children.reduce((count, stage) => count + periodDetailCount(stage), 0),
+      sourceStageStart: children[0].sourceStageStart,
+      sourceStageEnd: children.at(-1).sourceStageEnd,
+      sortId: children.map((stage) => stage.id).join("\0")
+    };
+  }
+  function periodCandidates(stages) {
+    const result = [];
+    for (let start = 0; start < stages.length - 1; start += 1) {
+      for (let end = start + 1; end < stages.length; end += 1) {
+        const candidate = periodCandidate(stages, start, end);
+        if (candidate) result.push(candidate);
+        else if (!["day-summary", "period-summary"].includes(stages[end].kind)) break;
+      }
+    }
+    return result;
+  }
+  function exactAiPeriod(candidate, summaries) {
+    return summaries.find((summary) => summary.startDate === candidate.startDate && summary.endDate === candidate.endDate && same(summary.childSummaryRefs, candidate.childSummaryRefs)) || null;
+  }
+  function reusableSummary(candidate) {
+    const combined = candidate.children.map((stage) => stage.summary).join("\n---\n");
+    return combined.length <= 240 ? combined : null;
+  }
+  function choosePeriodCandidate(event, summaries, requiredGain, optional) {
+    const candidates = periodCandidates(event.stages).map((candidate) => ({
+      ...candidate,
+      ai: exactAiPeriod(candidate, summaries),
+      fallback: optional ? null : reusableSummary(candidate)
+    })).filter((candidate) => candidate.ai || candidate.fallback);
+    if (optional) {
+      const matched = candidates.filter((candidate) => candidate.ai);
+      if (!matched.length) return null;
+      candidates.length = 0;
+      candidates.push(...matched);
+    }
+    candidates.sort((left, right) => {
+      const start = left.sourceStageStart - right.sourceStageStart;
+      if (start) return start;
+      const leftSatisfies = left.gain >= requiredGain;
+      const rightSatisfies = right.gain >= requiredGain;
+      if (leftSatisfies !== rightSatisfies) return leftSatisfies ? -1 : 1;
+      if (leftSatisfies) {
+        const projectionChildCount = left.children.length - right.children.length;
+        if (projectionChildCount) return projectionChildCount;
+      }
+      return left.sourceStageEnd - right.sourceStageEnd || left.sortId.localeCompare(right.sortId);
+    });
+    return candidates[0] || null;
+  }
+  function compactPeriod(event, payload, candidate, periodSequence, assistantCount) {
+    const removedAtAssistantCount = Number.isSafeInteger(assistantCount) && assistantCount >= 0 ? assistantCount : null;
+    for (const stage of candidate.children) {
+      if (stage.kind !== "day-summary") continue;
+      const state = payload.removableEntityStateById[stage.id];
+      if (!state || state.state !== "available" || state.entityType !== "day-summary" || state.eventId !== event.id) {
+        fail2("TT_HISTORY_SCHEMA_INVALID", "period compaction day-summary lifecycle \u65E0\u6548");
+      }
+      const removed = {
+        ...state,
+        state: "removed",
+        removalReason: "period-compaction",
+        removedAtAssistantCount
+      };
+      payload.removableEntityStateById[stage.id] = removed;
+      payload.removableEntityTombstonesById[stage.id] = clone4(removed);
+    }
+    const period = {
+      id: `period:${event.id}:${periodSequence}`,
+      kind: "period-summary",
+      periodSequence,
+      startDate: candidate.startDate,
+      startTime: candidate.startTime,
+      endDate: candidate.endDate,
+      endTime: candidate.endTime,
+      summary: candidate.ai?.summaryText || candidate.fallback,
+      childSummaryRefs: candidate.childSummaryRefs,
+      childSummaryCount: candidate.childSummaryCount,
+      historicalDetailCount: candidate.historicalDetailCount,
+      sourceStageStart: candidate.sourceStageStart,
+      sourceStageEnd: candidate.sourceStageEnd,
+      revision: 1
+    };
+    event.stages.splice(candidate.start, candidate.children.length, period);
+  }
+  function planPeriodCompaction(event, payload, summaries, assistantCount) {
+    let periodSequence = event.stages.reduce((maximum, stage) => Math.max(
+      maximum,
+      stage.kind === "period-summary" ? stage.periodSequence : 0
+    ), 0) + 1;
+    if (event.stages.length >= 36 && event.stages.length <= 38) {
+      const candidate = choosePeriodCandidate(event, summaries, 1, true);
+      if (candidate) compactPeriod(event, payload, candidate, periodSequence++, assistantCount);
+    }
+    while (event.stages.length >= 40) {
+      const candidate = choosePeriodCandidate(event, summaries, event.stages.length - 39, false);
+      if (!candidate) fail2("TT_CAPACITY_NO_COMPACTION_CANDIDATE", `event ${event.id} \u65E0\u53EF\u5B89\u5168\u6298\u53E0\u5386\u53F2`);
+      compactPeriod(event, payload, candidate, periodSequence++, assistantCount);
+    }
+  }
   function applyTodayTrendHistoryProducer(payloadValue, producerValue, {
     trustedStoryDate = null,
     assistantCount = null,
@@ -9912,6 +10108,7 @@ ${entry2.content}` : entry2.content;
   } = {}) {
     if (trustedStoryDate !== null && !validDate(trustedStoryDate)) fail2("TT_DATE_CONFLICT", "\u53EF\u4FE1 storyDate \u683C\u5F0F\u65E0\u6548");
     const payload = clone4(payloadValue);
+    let detailPoolChanged = false;
     const producer = normalizeTodayTrendHistoryProducer(producerValue);
     assertProducerLimits(producer, payload);
     const candidates = mapEvents(payload.dynamics);
@@ -9953,18 +10150,65 @@ ${entry2.content}` : entry2.content;
       if (item.daySummaries.length !== (requiresSummary ? 1 : 0)) {
         fail2("TT_DATE_CONFLICT", requiresSummary ? "\u65E5\u671F\u524D\u8FDB\u5FC5\u987B\u6070\u597D\u63D0\u4F9B\u4E00\u4E2A day summary" : "\u5F53\u524D\u65E5\u671F\u6CA1\u6709\u53EF\u5C01\u95ED\u7684 live-stage");
       }
-      if (requiresSummary) closeLiveDate(event, openDate, item.daySummaries[0], payload, knownEventIds);
+      if (requiresSummary) detailPoolChanged = closeLiveDate(event, openDate, item.daySummaries[0], payload, knownEventIds) || detailPoolChanged;
       appendStageProjections(event, item.stages, trustedStoryDate, Number.isSafeInteger(assistantCount) ? assistantCount : null);
       if (!event.stages.length) fail2("TT_HISTORY_SCHEMA_INVALID", "history producer \u4E0D\u5F97\u4EA7\u751F\u7A7A event \u5386\u53F2");
+      planPeriodCompaction(event, payload, item.periodSummaries, assistantCount);
       event.latestStage = projectionText(event.stages.at(-1));
       event.capacityCompatibilityPending = event.stages.length === 40;
     }
+    for (const event of payload.dynamics.active) {
+      detailPoolChanged = governDetailCapacity(event, payload, assistantCount) || detailPoolChanged;
+    }
+    if (detailPoolChanged) {
+      payload.historyRetentionState.detailPoolRevision += 1;
+    }
     return payload;
   }
-  function snapshotFromPayload(payload, assistantCount, generatedAt) {
+  function snapshotDetailManifestRefs(payload, visibleFromAssistantCount, storeRevision) {
+    const result = [];
+    const manifestRevision = Math.max(1, storeRevision);
+    for (const event of allEvents(payload.dynamics)) {
+      const availableDetailIds = new Set((payload.stageDetailsByEvent[event.id] || []).filter((detail) => payload.removableEntityStateById[detail.id]?.state === "available").map((detail) => detail.id));
+      const summaries = event.lifecycle === "archived" ? Object.values(payload.archivedRemovableDataByEvent[event.id]?.daySummariesById || {}) : event.stages.filter((stage) => stage.kind === "day-summary");
+      const detailRefs = [...new Set(summaries.flatMap((summary) => summary.detailRefs || []).filter((id2) => availableDetailIds.has(id2)))].sort();
+      if (!detailRefs.length) continue;
+      const container = payload.archivedRemovableDataByEvent[event.id] || {
+        daySummariesById: {},
+        manifestsById: {}
+      };
+      payload.archivedRemovableDataByEvent[event.id] = container;
+      const existingManifestId = Object.keys(container.manifestsById).sort().find((id2) => {
+        const state = payload.removableEntityStateById[id2];
+        return state?.state === "available" && state.entityType === "manifest" && state.eventId === event.id;
+      });
+      const manifestId = existingManifestId || `manifest:${event.id}:${manifestRevision}`;
+      if (!existingManifestId) {
+        container.manifestsById[manifestId] = { id: manifestId };
+        payload.removableEntityStateById[manifestId] = {
+          entityType: "manifest",
+          entityId: manifestId,
+          eventId: event.id,
+          state: "available",
+          removalReason: null,
+          removedAtAssistantCount: null,
+          policyRevision: payload.historyRetentionState.retentionPolicyRevision
+        };
+      }
+      result.push({ eventId: event.id, manifestId, detailRefs, visibleFromAssistantCount });
+    }
+    return result;
+  }
+  function snapshotFromPayload(payload, assistantCount, generatedAt, storeRevision) {
+    const detailManifestRefs = snapshotDetailManifestRefs(payload, assistantCount, storeRevision);
     return {
       assistantCount,
       generatedAt,
+      storeRevision,
+      detailPoolRevision: payload.historyRetentionState.detailPoolRevision,
+      visibleFromAssistantCount: assistantCount,
+      detailManifestRefs,
+      retentionPolicyRevision: payload.historyRetentionState.retentionPolicyRevision,
       world: clone4(payload.world),
       reputation: clone4(payload.reputation),
       factions: clone4(payload.factions),
@@ -9972,11 +10216,12 @@ ${entry2.content}` : entry2.content;
       dynamics: clone4(payload.dynamics)
     };
   }
-  function appendTodayTrendCanonicalSnapshot(payloadValue, assistantCount, generatedAt) {
+  function appendTodayTrendCanonicalSnapshot(payloadValue, assistantCount, generatedAt, storeRevision = 0) {
     const payload = clone4(payloadValue);
     const floor = Number.isSafeInteger(assistantCount) && assistantCount >= 0 ? assistantCount : 0;
     const timestamp5 = Number.isFinite(generatedAt) && generatedAt >= 0 ? Math.floor(generatedAt) : 0;
-    const snapshots = [...payload.generationSnapshots.filter((item) => item.assistantCount !== floor), snapshotFromPayload(payload, floor, timestamp5)].sort((left, right) => left.assistantCount - right.assistantCount);
+    const revision = Number.isSafeInteger(storeRevision) && storeRevision >= 0 ? storeRevision : 0;
+    const snapshots = [...payload.generationSnapshots.filter((item) => item.assistantCount !== floor), snapshotFromPayload(payload, floor, timestamp5, revision)].sort((left, right) => left.assistantCount - right.assistantCount);
     const baseline = snapshots.find((item) => item.assistantCount === 0);
     payload.generationSnapshots = baseline ? [baseline, ...snapshots.filter((item) => item.assistantCount !== 0).slice(-11)] : snapshots.slice(-12);
     return payload;
@@ -9984,6 +10229,7 @@ ${entry2.content}` : entry2.content;
   function alignRollbackRemovableContainers(payload) {
     const events = allEvents(payload.dynamics);
     const eventIds = new Set(events.map((event) => event.id));
+    const activeIds = new Set(payload.dynamics.active.map((event) => event.id));
     const archivedIds = new Set(payload.dynamics.archived.map((event) => event.id));
     const bodyIds = /* @__PURE__ */ new Set();
     const detailRefsByEvent = /* @__PURE__ */ new Map();
@@ -9991,7 +10237,7 @@ ${entry2.content}` : entry2.content;
       const refs = /* @__PURE__ */ new Set();
       for (const stage of event.stages) {
         if (stage.kind !== "day-summary") continue;
-        bodyIds.add(stage.id);
+        if (activeIds.has(event.id)) bodyIds.add(stage.id);
         for (const ref of stage.detailRefs) refs.add(ref);
       }
       detailRefsByEvent.set(event.id, refs);
@@ -10003,7 +10249,8 @@ ${entry2.content}` : entry2.content;
       for (const detail of retained) bodyIds.add(detail.id);
       return retained.length ? [[eventId, retained]] : [];
     }));
-    payload.archivedRemovableDataByEvent = Object.fromEntries(Object.entries(payload.archivedRemovableDataByEvent || {}).filter(([eventId]) => archivedIds.has(eventId)).map(([eventId, container]) => {
+    payload.archivedRemovableDataByEvent = Object.fromEntries(Object.entries(payload.archivedRemovableDataByEvent || {}).filter(([eventId]) => eventIds.has(eventId)).map(([eventId, container]) => {
+      if (!archivedIds.has(eventId)) container.daySummariesById = {};
       for (const id2 of Object.keys(container.daySummariesById || {})) bodyIds.add(id2);
       for (const id2 of Object.keys(container.manifestsById || {})) bodyIds.add(id2);
       return [eventId, container];
@@ -10023,12 +10270,14 @@ ${entry2.content}` : entry2.content;
     const floor = Number.isSafeInteger(assistantCount) && assistantCount >= 0 ? assistantCount : 0;
     const snapshot = payload.generationSnapshots.filter((item) => item.assistantCount <= floor).at(-1);
     if (!snapshot) return payload;
+    const currentArchived = clone4(payload.dynamics.archived);
+    const archivedIds = new Set(currentArchived.map((event) => event.id));
     Object.assign(payload, {
       world: clone4(snapshot.world),
       reputation: clone4(snapshot.reputation),
       factions: clone4(snapshot.factions),
       dynamicsSettings: clone4(snapshot.dynamicsSettings),
-      dynamics: clone4(snapshot.dynamics),
+      dynamics: { active: clone4(snapshot.dynamics.active).filter((event) => !archivedIds.has(event.id)), archived: currentArchived },
       operation: { ...payload.operation, lastSuccessfulAssistantCount: snapshot.assistantCount, lastSuccessfulRunAt: snapshot.generatedAt },
       generationSnapshots: payload.generationSnapshots.filter((item) => item.assistantCount <= snapshot.assistantCount)
     });
@@ -10037,8 +10286,10 @@ ${entry2.content}` : entry2.content;
 
   // src/today-trend-v2-model.js
   var TODAY_TREND_V2_STORE_VERSION = 2;
-  var GLOBAL_ENVELOPE_VERSION = 1;
-  var SCOPE_ENVELOPE_VERSION = 1;
+  var LEGACY_GLOBAL_ENVELOPE_VERSION = 1;
+  var LEGACY_SCOPE_ENVELOPE_VERSION = 1;
+  var GLOBAL_ENVELOPE_VERSION = 2;
+  var SCOPE_ENVELOPE_VERSION = 2;
   var PROJECTION_KINDS = /* @__PURE__ */ new Set([
     "live-stage",
     "undated-stage",
@@ -10048,7 +10299,7 @@ ${entry2.content}` : entry2.content;
     "span-stage"
   ]);
   var REMOVABLE_PREFIXES = { detail: "detail", "day-summary": "day", manifest: "manifest" };
-  var REMOVAL_REASONS = /* @__PURE__ */ new Set(["detail-pool-capacity", "archived-retention"]);
+  var REMOVAL_REASONS = /* @__PURE__ */ new Set(["detail-pool-capacity", "period-compaction", "archived-retention"]);
   var LEGACY_STAGE_KIND = "legacy-stage";
   var clone5 = (value) => structuredClone(value);
   var plainRecord9 = (value) => value && typeof value === "object" && !Array.isArray(value);
@@ -10084,6 +10335,17 @@ ${entry2.content}` : entry2.content;
   }
   function nullableString(value, field) {
     if (value !== null && typeof value !== "string") invalid(`${field} \u5FC5\u987B\u662F\u5B57\u7B26\u4E32\u6216 null`);
+  }
+  var timePattern2 = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
+  function nullableTime2(value, field) {
+    if (value !== null && (typeof value !== "string" || !timePattern2.test(value))) invalid(`${field} \u5FC5\u987B\u662F HH:mm \u6216 null`);
+  }
+  var datePattern2 = /^\d{4}-\d{2}-\d{2}$/;
+  function date(value, field) {
+    const parsed = typeof value === "string" && datePattern2.test(value) ? /* @__PURE__ */ new Date(`${value}T12:00:00Z`) : null;
+    if (!parsed || !Number.isFinite(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== value) {
+      invalid(`${field} \u5FC5\u987B\u662F\u6709\u6548 YYYY-MM-DD \u65E5\u671F`);
+    }
   }
   function nullableInteger(value, field) {
     if (value !== null) safeInteger2(value, field);
@@ -10132,8 +10394,8 @@ ${entry2.content}` : entry2.content;
     normalizeSourceRange(value, "live-stage");
     normalizeFloorRange(value, "live-stage");
     if (!String(value.id).startsWith(`live:${eventId}:`) || value.kind !== "live-stage") invalid("live-stage ID \u6216 kind \u65E0\u6548");
-    nonEmptyString(value.storyDate, "live-stage.storyDate");
-    nullableString(value.time, "live-stage.time");
+    date(value.storyDate, "live-stage.storyDate");
+    nullableTime2(value.time, "live-stage.time");
     nullableString(value.timeLabel, "live-stage.timeLabel");
     nonEmptyString(value.text, "live-stage.text");
     return clone5(value);
@@ -10146,23 +10408,27 @@ ${entry2.content}` : entry2.content;
     if (value.id !== `undated:${eventId}:${value.undatedSequence}` || value.kind !== "undated-stage" || value.storyDate !== null) {
       invalid("undated-stage ID\u3001kind \u6216 storyDate \u65E0\u6548");
     }
-    nullableString(value.time, "undated-stage.time");
+    nullableTime2(value.time, "undated-stage.time");
     nullableString(value.timeLabel, "undated-stage.timeLabel");
     nonEmptyString(value.text, "undated-stage.text");
     return clone5(value);
   }
   function normalizeTimeRange(value, field) {
     exact2(value, ["start", "end", "label"], field);
-    nullableString(value.start, `${field}.start`);
-    nullableString(value.end, `${field}.end`);
+    nullableTime2(value.start, `${field}.start`);
+    nullableTime2(value.end, `${field}.end`);
     nullableString(value.label, `${field}.label`);
+    if (value.start === null !== (value.end === null) || value.start !== null && value.start > value.end) {
+      invalid(`${field} \u949F\u70B9\u533A\u95F4\u65E0\u6548`);
+    }
+    if (value.start !== null && value.label !== null) invalid(`${field} \u53EF\u9760\u949F\u70B9\u4E0E\u81EA\u7136\u8BED\u8A00\u6807\u7B7E\u4E0D\u5F97\u5E76\u5B58`);
   }
   function normalizeDaySummary2(value, eventId) {
     exact2(value, ["id", "kind", "status", "storyDate", "timeRange", "summary", "keyStages", "detailRefs", "detailCount", "sourceStageStart", "sourceStageEnd", "sourceFloorStart", "sourceFloorEnd", "revision"], "day-summary");
     normalizeSourceRange(value, "day-summary");
     normalizeFloorRange(value, "day-summary");
     if (value.id !== `day:${eventId}:${value.storyDate}` || value.kind !== "day-summary" || value.status !== "closed") invalid("day-summary ID\u3001kind \u6216 status \u65E0\u6548");
-    nonEmptyString(value.storyDate, "day-summary.storyDate");
+    date(value.storyDate, "day-summary.storyDate");
     normalizeTimeRange(value.timeRange, "day-summary.timeRange");
     nonEmptyString(value.summary, "day-summary.summary");
     stringArray(value.keyStages, "day-summary.keyStages");
@@ -10175,10 +10441,12 @@ ${entry2.content}` : entry2.content;
     normalizeSourceRange(value, "period-summary");
     safeInteger2(value.periodSequence, "period-summary.periodSequence", 1);
     if (value.id !== `period:${eventId}:${value.periodSequence}` || value.kind !== "period-summary") invalid("period-summary ID \u6216 kind \u65E0\u6548");
-    nonEmptyString(value.startDate, "period-summary.startDate");
-    nullableString(value.startTime, "period-summary.startTime");
-    nonEmptyString(value.endDate, "period-summary.endDate");
-    nullableString(value.endTime, "period-summary.endTime");
+    date(value.startDate, "period-summary.startDate");
+    nullableTime2(value.startTime, "period-summary.startTime");
+    date(value.endDate, "period-summary.endDate");
+    nullableTime2(value.endTime, "period-summary.endTime");
+    if (value.startTime === null !== (value.endTime === null)) invalid("period-summary \u949F\u70B9\u533A\u95F4\u5FC5\u987B\u540C\u65F6\u5B58\u5728\u6216\u540C\u65F6\u4E3A\u7A7A");
+    if (value.startDate > value.endDate || value.startDate === value.endDate && value.startTime !== null && value.endTime !== null && value.startTime > value.endTime) invalid("period-summary \u65F6\u95F4\u533A\u95F4\u65E0\u6548");
     nonEmptyString(value.summary, "period-summary.summary");
     stringArray(value.childSummaryRefs, "period-summary.childSummaryRefs");
     safeInteger2(value.childSummaryCount, "period-summary.childSummaryCount");
@@ -10190,10 +10458,12 @@ ${entry2.content}` : entry2.content;
     normalizeSourceRange(value, "span-stage");
     normalizeFloorRange(value, "span-stage");
     if (!String(value.id).startsWith(`span:${eventId}:`) || value.kind !== "span-stage") invalid("span-stage ID \u6216 kind \u65E0\u6548");
-    nonEmptyString(value.startDate, "span-stage.startDate");
-    nullableString(value.startTime, "span-stage.startTime");
-    nonEmptyString(value.endDate, "span-stage.endDate");
-    nullableString(value.endTime, "span-stage.endTime");
+    date(value.startDate, "span-stage.startDate");
+    nullableTime2(value.startTime, "span-stage.startTime");
+    date(value.endDate, "span-stage.endDate");
+    nullableTime2(value.endTime, "span-stage.endTime");
+    if (value.startTime === null !== (value.endTime === null)) invalid("span-stage \u949F\u70B9\u533A\u95F4\u5FC5\u987B\u540C\u65F6\u5B58\u5728\u6216\u540C\u65F6\u4E3A\u7A7A");
+    if (value.startDate > value.endDate || value.startDate === value.endDate && value.startTime !== null && value.endTime !== null && value.startTime > value.endTime) invalid("span-stage \u65F6\u95F4\u533A\u95F4\u65E0\u6548");
     nonEmptyString(value.summary, "span-stage.summary");
     return clone5(value);
   }
@@ -10222,6 +10492,268 @@ ${entry2.content}` : entry2.content;
   }
   function projectionText2(stage) {
     return ["day-summary", "period-summary", "span-stage"].includes(stage.kind) ? stage.summary : stage.text;
+  }
+  function projectFixedCore(stage) {
+    const common = {
+      id: stage.id,
+      kind: stage.kind,
+      sourceStageStart: stage.sourceStageStart,
+      sourceStageEnd: stage.sourceStageEnd,
+      revision: stage.revision
+    };
+    if (stage.kind === "legacy-stage") return {
+      ...common,
+      text: stage.text,
+      legacyIndex: stage.legacyIndex
+    };
+    if (stage.kind === "live-stage") return {
+      ...common,
+      storyDate: stage.storyDate,
+      time: stage.time,
+      timeLabel: stage.timeLabel,
+      text: stage.text,
+      sourceFloorStart: stage.sourceFloorStart,
+      sourceFloorEnd: stage.sourceFloorEnd
+    };
+    if (stage.kind === "undated-stage") return {
+      ...common,
+      storyDate: stage.storyDate,
+      time: stage.time,
+      timeLabel: stage.timeLabel,
+      text: stage.text,
+      undatedSequence: stage.undatedSequence,
+      sourceFloorStart: stage.sourceFloorStart,
+      sourceFloorEnd: stage.sourceFloorEnd
+    };
+    if (stage.kind === "day-summary") return {
+      ...common,
+      status: stage.status,
+      storyDate: stage.storyDate,
+      timeRange: clone5(stage.timeRange),
+      summary: stage.summary,
+      keyStages: clone5(stage.keyStages),
+      detailCount: stage.detailCount,
+      sourceFloorStart: stage.sourceFloorStart,
+      sourceFloorEnd: stage.sourceFloorEnd
+    };
+    if (stage.kind === "period-summary") return {
+      ...common,
+      periodSequence: stage.periodSequence,
+      startDate: stage.startDate,
+      startTime: stage.startTime,
+      endDate: stage.endDate,
+      endTime: stage.endTime,
+      summary: stage.summary,
+      childSummaryCount: stage.childSummaryCount,
+      historicalDetailCount: stage.historicalDetailCount
+    };
+    if (stage.kind === "span-stage") return {
+      ...common,
+      startDate: stage.startDate,
+      startTime: stage.startTime,
+      endDate: stage.endDate,
+      endTime: stage.endTime,
+      summary: stage.summary,
+      sourceFloorStart: stage.sourceFloorStart,
+      sourceFloorEnd: stage.sourceFloorEnd
+    };
+    invalid("fixed core StageProjection kind \u65E0\u6548");
+  }
+  var promptText = (value, maximum) => typeof value === "string" ? value.trim().slice(0, maximum) : "";
+  var promptStageProjection = (stage) => {
+    const common = { id: stage.id, kind: stage.kind, sourceStageStart: stage.sourceStageStart, sourceStageEnd: stage.sourceStageEnd };
+    if (stage.kind === "day-summary") return {
+      ...common,
+      storyDate: stage.storyDate,
+      timeRange: clone5(stage.timeRange),
+      summary: promptText(stage.summary, 240),
+      keyStages: stage.keyStages.map((item) => promptText(item, 120)),
+      detailCount: stage.detailCount,
+      sourceFloorStart: stage.sourceFloorStart,
+      sourceFloorEnd: stage.sourceFloorEnd
+    };
+    if (stage.kind === "period-summary") return {
+      ...common,
+      periodSequence: stage.periodSequence,
+      startDate: stage.startDate,
+      startTime: stage.startTime,
+      endDate: stage.endDate,
+      endTime: stage.endTime,
+      summary: promptText(stage.summary, 240),
+      childSummaryCount: stage.childSummaryCount,
+      historicalDetailCount: stage.historicalDetailCount
+    };
+    if (stage.kind === "span-stage") return {
+      ...common,
+      startDate: stage.startDate,
+      startTime: stage.startTime,
+      endDate: stage.endDate,
+      endTime: stage.endTime,
+      summary: promptText(stage.summary, 240),
+      sourceFloorStart: stage.sourceFloorStart,
+      sourceFloorEnd: stage.sourceFloorEnd
+    };
+    return {
+      ...common,
+      storyDate: stage.storyDate,
+      time: stage.time,
+      timeLabel: stage.timeLabel,
+      text: promptText(stage.text, 240),
+      sourceFloorStart: stage.sourceFloorStart,
+      sourceFloorEnd: stage.sourceFloorEnd
+    };
+  };
+  var promptEventProjection = (event) => ({
+    id: event.id,
+    type: event.type,
+    title: promptText(event.title, 120),
+    stageLabel: promptText(event.stageLabel, 32),
+    origin: promptText(event.origin, 240),
+    participants: event.participants.map((item) => promptText(item, 120)),
+    stages: event.stages.map(promptStageProjection),
+    latestStage: promptText(event.latestStage, 240),
+    outcome: event.outcome,
+    finalResult: event.finalResult === null ? null : promptText(event.finalResult, 240),
+    relatedEventIds: clone5(event.relatedEventIds),
+    createdAt: event.createdAt,
+    updatedAt: event.updatedAt
+  });
+  function fitGenerationPromptProjection(value, maximum) {
+    const result = clone5(value);
+    const encoded = () => JSON.stringify(result);
+    while (encoded().length > maximum) {
+      const eventWithHistory = [...result.dynamics.archived, ...result.dynamics.active].find((event) => event.stages.length > 1);
+      if (eventWithHistory) {
+        eventWithHistory.stages.shift();
+        continue;
+      }
+      const eventWithLongText = [...result.dynamics.archived, ...result.dynamics.active].find((event) => event.stages.some((stage) => typeof stage.summary === "string" && stage.summary.length > 32));
+      if (eventWithLongText) {
+        const stage = eventWithLongText.stages.find((item) => typeof item.summary === "string" && item.summary.length > 32);
+        stage.summary = stage.summary.slice(0, Math.max(32, Math.floor(stage.summary.length / 2)));
+        continue;
+      }
+      if (result.dynamics.archived.length) {
+        result.dynamics.archived.shift();
+        continue;
+      }
+      if (result.dynamics.active.length > 1) {
+        result.dynamics.active.shift();
+        continue;
+      }
+      if (result.factions.length) {
+        result.factions.shift();
+        continue;
+      }
+      if (result.reputation.circles.length) {
+        result.reputation.circles.shift();
+        continue;
+      }
+      if (result.world.items.length) {
+        result.world.items.shift();
+        continue;
+      }
+      return JSON.stringify({ world: { items: [] }, reputation: { circles: [] }, factions: [], dynamics: { active: [], archived: [] }, truncated: true });
+    }
+    return encoded();
+  }
+  function serializeTodayTrendV2ScopeForGeneration(currentValue, storageId, { maxChars = 12e3 } = {}) {
+    const maximum = Number.isSafeInteger(maxChars) && maxChars > 0 ? maxChars : 12e3;
+    const store = normalizeTodayTrendV2Store(currentValue);
+    const payload = store.globalEnvelope.payload.scopes[storageId]?.payload;
+    if (!payload) return null;
+    return fitGenerationPromptProjection({
+      world: clone5(payload.world),
+      reputation: clone5(payload.reputation),
+      factions: clone5(payload.factions),
+      dynamics: {
+        active: payload.dynamics.active.map(promptEventProjection),
+        archived: payload.dynamics.archived.map(promptEventProjection)
+      }
+    }, maximum);
+  }
+  function resolveTodayTrendV2UiScope(currentValue, storageId) {
+    if (typeof storageId !== "string" || !storageId) return null;
+    const store = normalizeTodayTrendV2Store(currentValue);
+    const envelope = store.globalEnvelope.payload.scopes[storageId];
+    const payload = envelope?.payload;
+    if (!payload) return null;
+    return clone5({
+      storageId: payload.storageId,
+      characterId: payload.characterId,
+      characterName: payload.characterName,
+      presetId: payload.presetId,
+      operation: payload.operation,
+      injection: payload.injection,
+      world: payload.world,
+      reputation: payload.reputation,
+      factions: payload.factions,
+      dynamicsSettings: payload.dynamicsSettings,
+      historyRetentionSettings: payload.historyRetentionSettings,
+      dynamics: {
+        active: payload.dynamics.active.map((event) => uiEventProjection(event)),
+        archived: payload.dynamics.archived.map((event) => uiEventProjection(event))
+      }
+    });
+  }
+  function resolveTodayTrendV2RetentionSettingsState(currentValue, storageId) {
+    if (typeof storageId !== "string" || !storageId) return null;
+    const store = normalizeTodayTrendV2Store(currentValue);
+    const envelope = store.globalEnvelope.payload.scopes[storageId];
+    if (!envelope) return null;
+    return clone5({
+      scopeRevision: envelope.revision,
+      settingsRevision: envelope.payload.historyRetentionSettings.revision
+    });
+  }
+  function uiStageProjection(stage) {
+    const projected = promptStageProjection(stage);
+    return {
+      id: projected.id,
+      kind: projected.kind,
+      displayText: projected.summary || projected.text || "",
+      storyDate: projected.storyDate ?? null,
+      time: projected.time ?? null,
+      timeLabel: projected.timeLabel ?? null,
+      startDate: projected.startDate ?? null,
+      startTime: projected.startTime ?? null,
+      endDate: projected.endDate ?? null,
+      endTime: projected.endTime ?? null,
+      timeRange: projected.timeRange ?? null,
+      keyStages: projected.keyStages ?? [],
+      detailCount: projected.detailCount ?? 0,
+      detailRefs: stage.kind === "day-summary" ? [...stage.detailRefs] : []
+    };
+  }
+  function uiEventProjection(event) {
+    return {
+      id: event.id,
+      type: event.type,
+      title: event.title,
+      stageLabel: event.stageLabel,
+      origin: event.origin,
+      participants: [...event.participants],
+      stages: event.stages.map(uiStageProjection),
+      latestStage: event.latestStage,
+      outcome: event.outcome,
+      finalResult: event.finalResult,
+      relatedEventIds: [...event.relatedEventIds],
+      createdAt: event.createdAt,
+      updatedAt: event.updatedAt
+    };
+  }
+  function reliableAssistantCount(value) {
+    return Number.isSafeInteger(value) && value >= 0 ? value : null;
+  }
+  function parseRetentionInteger(value, field, maximum) {
+    if (typeof value !== "string" || !/^\d+$/.test(value.trim())) {
+      failure2("TT_RETENTION_SETTINGS_INVALID", `${field} \u5FC5\u987B\u662F\u5341\u8FDB\u5236\u6574\u6570\u5B57\u7B26\u4E32`);
+    }
+    const parsed = Number(value.trim());
+    if (!Number.isSafeInteger(parsed) || parsed < 0 || parsed > maximum) {
+      failure2("TT_RETENTION_SETTINGS_INVALID", `${field} \u5FC5\u987B\u5728 0..${maximum} \u8303\u56F4\u5185`);
+    }
+    return parsed;
   }
   function projectEventToV1(event) {
     return {
@@ -10258,12 +10790,11 @@ ${entry2.content}` : entry2.content;
     return clone5({
       id: event.id,
       type: event.type,
-      lifecycle: event.lifecycle,
       title: event.title,
       stageLabel: event.stageLabel,
       origin: event.origin,
       participants: event.participants,
-      stages: event.stages,
+      stages: event.stages.map(projectFixedCore),
       latestStage: event.latestStage,
       outcome: event.outcome,
       finalResult: event.finalResult,
@@ -10292,6 +10823,11 @@ ${entry2.content}` : entry2.content;
     const dynamics = migrateDynamics(scope.dynamics);
     const generationSnapshots = scope.generationSnapshots.map((snapshot) => ({
       ...clone5(snapshot),
+      storeRevision: 0,
+      detailPoolRevision: 0,
+      visibleFromAssistantCount: snapshot.assistantCount,
+      detailManifestRefs: [],
+      retentionPolicyRevision: 1,
       dynamics: migrateDynamics(snapshot.dynamics)
     }));
     const fixedCoreBaselineByEvent = {};
@@ -10352,7 +10888,9 @@ ${entry2.content}` : entry2.content;
     exact2(value, ["archivedDetailLatestEventCount", "archivedDetailRetentionFloors", "revision"], "historyRetentionSettings");
     safeInteger2(value.archivedDetailLatestEventCount, "archivedDetailLatestEventCount");
     safeInteger2(value.archivedDetailRetentionFloors, "archivedDetailRetentionFloors");
-    if (value.revision !== 1) invalid("historyRetentionSettings.revision \u65E0\u6548");
+    if (value.archivedDetailLatestEventCount > 80) invalid("archivedDetailLatestEventCount \u5FC5\u987B\u5728 0..80 \u8303\u56F4\u5185");
+    if (value.archivedDetailRetentionFloors > 1e3) invalid("archivedDetailRetentionFloors \u5FC5\u987B\u5728 0..1000 \u8303\u56F4\u5185");
+    safeInteger2(value.revision, "historyRetentionSettings.revision", 1);
     return clone5(value);
   }
   function normalizeRetentionState(value) {
@@ -10412,9 +10950,12 @@ ${entry2.content}` : entry2.content;
     }
     const archivedRemovableDataByEvent = {};
     for (const [eventId, container] of Object.entries(payload.archivedRemovableDataByEvent)) {
-      if (!archivedEventIds.has(eventId)) invalid("archived removable data \u53EA\u80FD\u5C5E\u4E8E archived event");
+      if (!eventIds.has(eventId)) invalid("archived removable data \u6307\u5411\u672A\u77E5 event");
       exact2(container, ["daySummariesById", "manifestsById"], "archived removable data");
       if (!plainRecord9(container.daySummariesById) || !plainRecord9(container.manifestsById)) invalid("archived removable data \u96C6\u5408\u65E0\u6548");
+      if (!archivedEventIds.has(eventId) && Object.keys(container.daySummariesById).length) {
+        invalid("active event \u7684 removable \u5BB9\u5668\u53EA\u80FD\u4FDD\u5B58 snapshot manifest");
+      }
       const daySummariesById = {};
       for (const [id2, summary] of Object.entries(container.daySummariesById)) {
         if (summary.id !== id2) invalid("day summary key \u4E0E ID \u4E0D\u4E00\u81F4");
@@ -10436,7 +10977,7 @@ ${entry2.content}` : entry2.content;
     for (const event of [...payload.dynamics.active, ...payload.dynamics.archived]) {
       for (const stage of event.stages) {
         if (stage.kind === "day-summary") {
-          registerBody(stage.id, stage, "day-summary", event.id);
+          if (event.lifecycle === "active") registerBody(stage.id, stage, "day-summary", event.id);
           addRefs(stage.detailRefs, `detail:${event.id}:`);
         } else if (stage.kind === "period-summary") addRefs(stage.childSummaryRefs, `day:${event.id}:`);
       }
@@ -10463,7 +11004,7 @@ ${entry2.content}` : entry2.content;
       if (removableEntityTombstonesById[id2]) invalid("available \u6B63\u6587\u4E0D\u5F97\u5B58\u5728 tombstone");
     }
     for (const [id2, state] of Object.entries(removableEntityStateById)) {
-      if (state.state === "available" && !bodies.has(id2)) invalid("available state \u7F3A\u5C11\u6B63\u6587");
+      if (state.state === "available" && !bodies.has(id2)) invalid(`available state \u7F3A\u5C11\u6B63\u6587\uFF1A${id2}`);
       if (state.state === "removed") {
         if (bodies.has(id2)) invalid("removed state \u4E0D\u5F97\u4FDD\u7559\u6B63\u6587");
         if (!same2(removableEntityTombstonesById[id2], state)) invalid("removed state \u4E0E tombstone \u4E0D\u4E00\u81F4");
@@ -10504,6 +11045,34 @@ ${entry2.content}` : entry2.content;
       }
       const oldEntities = entityIndex(previousPayload);
       const newEntities = entityIndex(nextPayload);
+      const nextEvents = eventMap(nextPayload.dynamics);
+      const previousArchivedIds = new Set(previousPayload.dynamics.archived.map((event) => event.id));
+      for (const archived of previousPayload.dynamics.archived) {
+        const next = nextEvents.get(archived.id);
+        if (!next) continue;
+        if (next.lifecycle !== "archived" || !same2(extractArchivedFixedCore(archived), extractArchivedFixedCore(next))) {
+          invalid("archived fixed core \u4E0D\u53EF\u6539\u5199\u6216\u91CD\u65B0\u6FC0\u6D3B");
+        }
+      }
+      let expectedArchivedSequence = previousPayload.historyRetentionState.nextArchivedSequence;
+      for (const archived of nextPayload.dynamics.archived) {
+        if (previousArchivedIds.has(archived.id)) continue;
+        const previousActive = previousPayload.dynamics.active.find((event) => event.id === archived.id);
+        if (!previousActive || archived.archivedSequence !== expectedArchivedSequence) {
+          invalid("\u65B0\u5F52\u6863\u4E8B\u4EF6\u5FC5\u987B\u6309 nextArchivedSequence \u8FDE\u7EED\u5206\u914D");
+        }
+        expectedArchivedSequence += 1;
+      }
+      if (nextPayload.historyRetentionState.nextArchivedSequence !== expectedArchivedSequence) {
+        invalid("nextArchivedSequence \u4E0E\u5F52\u6863\u4E8B\u52A1\u4E0D\u4E00\u81F4");
+      }
+      if (nextPayload.historyRetentionSettings.revision < previousPayload.historyRetentionSettings.revision || nextPayload.historyRetentionState.retentionPolicyRevision < previousPayload.historyRetentionState.retentionPolicyRevision) {
+        invalid("retention revision \u4E0D\u5F97\u964D\u4F4E");
+      }
+      const previousHighWater = previousPayload.historyRetentionState.highWaterAssistantCount;
+      const nextHighWater = nextPayload.historyRetentionState.highWaterAssistantCount;
+      if (previousHighWater !== null && (nextHighWater === null || nextHighWater < previousHighWater)) invalid("highWaterAssistantCount \u4E0D\u5F97\u964D\u4F4E");
+      if (nextPayload.historyRetentionState.nextArchivedSequence < previousPayload.historyRetentionState.nextArchivedSequence) invalid("nextArchivedSequence \u4E0D\u5F97\u964D\u4F4E");
       for (const [id2, state] of Object.entries(previousPayload.removableEntityStateById)) {
         const nextState = nextPayload.removableEntityStateById[id2];
         if (state.state === "removed" && !same2(nextState, state)) invalid("removed lifecycle \u4E0D\u53EF\u9006\u6216\u5220\u9664");
@@ -10521,6 +11090,9 @@ ${entry2.content}` : entry2.content;
     const payload = clone5(value.payload);
     exact2(payload, ["storageId", "characterId", "characterName", "presetId", "operation", "injection", "world", "reputation", "factions", "dynamicsSettings", "dynamics", "generationSnapshots", "historyRetentionSettings", "historyRetentionState", "stageDetailsByEvent", "archivedRemovableDataByEvent", "removableEntityStateById", "removableEntityTombstonesById", "fixedCoreBaselineByEvent", "commitJournal"], "scope payload");
     if (!plainRecord9(payload.dynamics) || !Array.isArray(payload.generationSnapshots)) invalid("scope payload \u65E0\u6548");
+    if (payload.generationSnapshots.length > TODAY_TREND_LIMITS.generationSnapshots) {
+      failure2("TT_SNAPSHOT_LIMIT", "canonical snapshot \u6570\u91CF\u8D85\u9650");
+    }
     payload.dynamics = {
       active: payload.dynamics.active.map((event) => normalizeEventProjection(event, "active")),
       archived: payload.dynamics.archived.map((event) => normalizeEventProjection(event, "archived"))
@@ -10537,13 +11109,52 @@ ${entry2.content}` : entry2.content;
         archivedEventIds.add(event.id);
       }
     }
-    payload.generationSnapshots = payload.generationSnapshots.map((snapshot) => ({
-      ...clone5(snapshot),
-      dynamics: {
-        active: snapshot.dynamics.active.map((event) => normalizeEventProjection(event, "active")),
-        archived: snapshot.dynamics.archived.map((event) => normalizeEventProjection(event, "archived"))
-      }
-    }));
+    const maximumArchivedSequence = payload.dynamics.archived.reduce((maximum, event) => Math.max(maximum, event.archivedSequence), 0);
+    if (payload.historyRetentionState?.nextArchivedSequence <= maximumArchivedSequence) {
+      invalid("nextArchivedSequence \u5FC5\u987B\u5927\u4E8E\u65E2\u6709 archivedSequence");
+    }
+    payload.generationSnapshots = payload.generationSnapshots.map((snapshot) => {
+      const normalizedSnapshot = clone5(snapshot);
+      const assistantCount = safeInteger2(normalizedSnapshot.assistantCount, "snapshot assistantCount");
+      normalizedSnapshot.storeRevision = Object.hasOwn(normalizedSnapshot, "storeRevision") ? safeInteger2(normalizedSnapshot.storeRevision, "snapshot storeRevision") : 0;
+      normalizedSnapshot.detailPoolRevision = Object.hasOwn(normalizedSnapshot, "detailPoolRevision") ? safeInteger2(normalizedSnapshot.detailPoolRevision, "snapshot detailPoolRevision") : 0;
+      normalizedSnapshot.visibleFromAssistantCount = Object.hasOwn(normalizedSnapshot, "visibleFromAssistantCount") ? reliableAssistantCount(normalizedSnapshot.visibleFromAssistantCount) : assistantCount;
+      if (normalizedSnapshot.visibleFromAssistantCount === null) invalid("snapshot visibleFromAssistantCount \u65E0\u6548");
+      normalizedSnapshot.retentionPolicyRevision = Object.hasOwn(normalizedSnapshot, "retentionPolicyRevision") ? safeInteger2(normalizedSnapshot.retentionPolicyRevision, "snapshot retentionPolicyRevision", 1) : 1;
+      const refs = Object.hasOwn(normalizedSnapshot, "detailManifestRefs") ? normalizedSnapshot.detailManifestRefs : [];
+      if (!Array.isArray(refs)) invalid("snapshot detailManifestRefs \u5FC5\u987B\u662F\u6570\u7EC4");
+      normalizedSnapshot.detailManifestRefs = refs.map((entry2, index) => {
+        exact2(entry2, ["eventId", "manifestId", "detailRefs", "visibleFromAssistantCount"], `snapshot detailManifestRefs.${index}`);
+        nonEmptyString(entry2.eventId, "snapshot manifest eventId");
+        if (!entry2.manifestId.startsWith(`manifest:${entry2.eventId}:`)) invalid("snapshot manifest ID \u4E0E event \u4E0D\u4E00\u81F4");
+        if (!Array.isArray(entry2.detailRefs) || entry2.detailRefs.some((id2) => typeof id2 !== "string" || !id2.startsWith(`detail:${entry2.eventId}:`))) invalid("snapshot detail refs \u65E0\u6548");
+        if (new Set(entry2.detailRefs).size !== entry2.detailRefs.length) invalid("snapshot detail refs \u4E0D\u5F97\u91CD\u590D");
+        safeInteger2(entry2.visibleFromAssistantCount, "snapshot manifest visibleFromAssistantCount");
+        if (entry2.visibleFromAssistantCount > normalizedSnapshot.visibleFromAssistantCount) {
+          invalid("snapshot manifest \u53EF\u89C1\u8FB9\u754C\u4E0D\u5F97\u665A\u4E8E snapshot \u8FB9\u754C");
+        }
+        return clone5(entry2);
+      });
+      normalizedSnapshot.dynamics = {
+        active: normalizedSnapshot.dynamics.active.map((event) => normalizeEventProjection(event, "active")),
+        archived: normalizedSnapshot.dynamics.archived.map((event) => normalizeEventProjection(event, "archived"))
+      };
+      exact2(normalizedSnapshot, [
+        "assistantCount",
+        "generatedAt",
+        "storeRevision",
+        "detailPoolRevision",
+        "visibleFromAssistantCount",
+        "detailManifestRefs",
+        "retentionPolicyRevision",
+        "world",
+        "reputation",
+        "factions",
+        "dynamicsSettings",
+        "dynamics"
+      ], "snapshot");
+      return normalizedSnapshot;
+    });
     const v1Store = normalizeTodayTrendStore({ version: 1, presets, scopes: { [payload.storageId]: projectScopePayloadToV1(payload) } });
     const facade = v1Store.scopes[payload.storageId];
     payload.operation = clone5(facade.operation);
@@ -10567,6 +11178,223 @@ ${entry2.content}` : entry2.content;
     payload.fixedCoreBaselineByEvent = fixedCoreBaselineByEvent;
     if (payload.commitJournal !== null) invalid("scope payload commitJournal \u5FC5\u987B\u4E3A null");
     return { schemaVersion: SCOPE_ENVELOPE_VERSION, revision: value.revision, payload };
+  }
+  function legacyMigrationFailure(path, reason) {
+    const error = new Error(`\u65E7\u7248 Today Trend v2 \u6570\u636E\u65E0\u6CD5\u65E0\u635F\u8FC1\u79FB\uFF1A${path} ${reason}`);
+    error.code = "TT_V2_LEGACY_MIGRATION_FAILED";
+    error.cause = { diagnostics: [{ path, reason }] };
+    throw error;
+  }
+  function canonicalLegacyDate(value, path, { nullable = false } = {}) {
+    if (nullable && value === null) return null;
+    if (typeof value !== "string") legacyMigrationFailure(path, nullable ? "\u5FC5\u987B\u662F\u65E5\u671F\u6216 null" : "\u5FC5\u987B\u662F\u65E5\u671F");
+    const match = /^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/.exec(value);
+    if (!match) legacyMigrationFailure(path, "\u4E0D\u662F\u65E0\u6B67\u4E49\u7684\u5E74-\u6708-\u65E5\u683C\u5F0F");
+    const normalized = `${match[1]}-${match[2].padStart(2, "0")}-${match[3].padStart(2, "0")}`;
+    const parsed = /* @__PURE__ */ new Date(`${normalized}T12:00:00Z`);
+    if (!Number.isFinite(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== normalized) {
+      legacyMigrationFailure(path, "\u4E0D\u662F\u6709\u6548\u81EA\u7136\u65E5");
+    }
+    return normalized;
+  }
+  function canonicalLegacyTime(value, path) {
+    if (value === null) return null;
+    if (typeof value !== "string") legacyMigrationFailure(path, "\u5FC5\u987B\u662F\u949F\u70B9\u6216 null");
+    const match = /^(\d{1,2}):(\d{2})$/.exec(value);
+    if (!match) legacyMigrationFailure(path, "\u4E0D\u662F\u65E0\u6B67\u4E49\u7684 24 \u5C0F\u65F6\u5236\u949F\u70B9");
+    const hour = Number(match[1]);
+    const minute = Number(match[2]);
+    if (hour > 23 || minute > 59) legacyMigrationFailure(path, "\u8D85\u51FA\u6709\u6548\u949F\u70B9\u8303\u56F4");
+    return `${String(hour).padStart(2, "0")}:${match[2]}`;
+  }
+  function setLegacyIdMapping(idMap, oldId, nextId, path) {
+    const existing = idMap.get(oldId);
+    if (existing && existing !== nextId) legacyMigrationFailure(path, "\u540C\u4E00\u65E7 ID \u6620\u5C04\u5230\u591A\u4E2A\u65B0 ID");
+    idMap.set(oldId, nextId);
+  }
+  function migrateLegacyProjection(value, eventId, path, idMap) {
+    if (!plainRecord9(value)) legacyMigrationFailure(path, "\u5FC5\u987B\u662F\u5BF9\u8C61");
+    const stage = clone5(value);
+    if (stage.kind === "live-stage") {
+      stage.storyDate = canonicalLegacyDate(stage.storyDate, `${path}.storyDate`);
+      stage.time = canonicalLegacyTime(stage.time, `${path}.time`);
+    } else if (stage.kind === "undated-stage") {
+      stage.time = canonicalLegacyTime(stage.time, `${path}.time`);
+    } else if (stage.kind === "day-summary") {
+      const oldId = stage.id;
+      stage.storyDate = canonicalLegacyDate(stage.storyDate, `${path}.storyDate`);
+      stage.id = `day:${eventId}:${stage.storyDate}`;
+      setLegacyIdMapping(idMap, oldId, stage.id, `${path}.id`);
+      if (!plainRecord9(stage.timeRange)) legacyMigrationFailure(`${path}.timeRange`, "\u5FC5\u987B\u662F\u5BF9\u8C61");
+      stage.timeRange.start = canonicalLegacyTime(stage.timeRange.start, `${path}.timeRange.start`);
+      stage.timeRange.end = canonicalLegacyTime(stage.timeRange.end, `${path}.timeRange.end`);
+    } else if (stage.kind === "period-summary" || stage.kind === "span-stage") {
+      stage.startDate = canonicalLegacyDate(stage.startDate, `${path}.startDate`);
+      stage.startTime = canonicalLegacyTime(stage.startTime, `${path}.startTime`);
+      stage.endDate = canonicalLegacyDate(stage.endDate, `${path}.endDate`);
+      stage.endTime = canonicalLegacyTime(stage.endTime, `${path}.endTime`);
+    } else if (stage.kind !== "legacy-stage") legacyMigrationFailure(`${path}.kind`, "\u4E0D\u53D7\u652F\u6301");
+    return stage;
+  }
+  function migrateLegacyEvent(eventValue, path, idMap) {
+    if (!plainRecord9(eventValue) || !Array.isArray(eventValue.stages)) legacyMigrationFailure(path, "\u4E8B\u4EF6\u6216 stages \u65E0\u6548");
+    const event = clone5(eventValue);
+    event.stages = event.stages.map((stage, index) => migrateLegacyProjection(stage, event.id, `${path}.stages.${index}`, idMap));
+    event.latestStage = resolveTodayTrendV2LatestStage(event);
+    return event;
+  }
+  function remapLegacyRef(value, idMap, path) {
+    if (typeof value !== "string") legacyMigrationFailure(path, "\u5F15\u7528\u5FC5\u987B\u662F\u5B57\u7B26\u4E32");
+    return idMap.get(value) || value;
+  }
+  function migrateLegacyScopeEnvelope(value, storageId) {
+    const root = `globalEnvelope.payload.scopes.${storageId}`;
+    if (!plainRecord9(value) || value.schemaVersion !== LEGACY_SCOPE_ENVELOPE_VERSION || !plainRecord9(value.payload)) {
+      legacyMigrationFailure(root, "\u65E7\u7248 scope envelope \u7248\u672C\u6216\u7ED3\u6784\u65E0\u6548");
+    }
+    const scope = clone5(value);
+    const payload = scope.payload;
+    if (!plainRecord9(payload.dynamics) || !Array.isArray(payload.dynamics.active) || !Array.isArray(payload.dynamics.archived)) {
+      legacyMigrationFailure(`${root}.payload.dynamics`, "\u5FC5\u987B\u5305\u542B active \u4E0E archived \u6570\u7EC4");
+    }
+    const idMap = /* @__PURE__ */ new Map();
+    for (const bucket of ["active", "archived"]) {
+      payload.dynamics[bucket] = payload.dynamics[bucket].map((event, index) => migrateLegacyEvent(event, `${root}.payload.dynamics.${bucket}.${index}`, idMap));
+    }
+    if (!Array.isArray(payload.generationSnapshots)) legacyMigrationFailure(`${root}.payload.generationSnapshots`, "\u5FC5\u987B\u662F\u6570\u7EC4");
+    payload.generationSnapshots = payload.generationSnapshots.map((snapshot, snapshotIndex) => {
+      const migrated = clone5(snapshot);
+      for (const bucket of ["active", "archived"]) {
+        if (!Array.isArray(migrated.dynamics?.[bucket])) {
+          legacyMigrationFailure(`${root}.payload.generationSnapshots.${snapshotIndex}.dynamics.${bucket}`, "\u5FC5\u987B\u662F\u6570\u7EC4");
+        }
+        migrated.dynamics[bucket] = migrated.dynamics[bucket].map((event, eventIndex) => migrateLegacyEvent(
+          event,
+          `${root}.payload.generationSnapshots.${snapshotIndex}.dynamics.${bucket}.${eventIndex}`,
+          idMap
+        ));
+      }
+      return migrated;
+    });
+    if (!plainRecord9(payload.stageDetailsByEvent)) legacyMigrationFailure(`${root}.payload.stageDetailsByEvent`, "\u5FC5\u987B\u662F\u5BF9\u8C61");
+    for (const [eventId, details] of Object.entries(payload.stageDetailsByEvent)) {
+      if (!Array.isArray(details)) legacyMigrationFailure(`${root}.payload.stageDetailsByEvent.${eventId}`, "\u5FC5\u987B\u662F\u6570\u7EC4");
+      details.forEach((detail, index) => {
+        detail.storyDate = canonicalLegacyDate(
+          detail.storyDate,
+          `${root}.payload.stageDetailsByEvent.${eventId}.${index}.storyDate`,
+          { nullable: true }
+        );
+      });
+    }
+    if (!plainRecord9(payload.archivedRemovableDataByEvent)) {
+      legacyMigrationFailure(`${root}.payload.archivedRemovableDataByEvent`, "\u5FC5\u987B\u662F\u5BF9\u8C61");
+    }
+    for (const [eventId, container] of Object.entries(payload.archivedRemovableDataByEvent)) {
+      if (!plainRecord9(container?.daySummariesById)) {
+        legacyMigrationFailure(`${root}.payload.archivedRemovableDataByEvent.${eventId}.daySummariesById`, "\u5FC5\u987B\u662F\u5BF9\u8C61");
+      }
+      const migratedSummaries = {};
+      for (const [oldId, summary] of Object.entries(container.daySummariesById)) {
+        const migrated = migrateLegacyProjection(
+          summary,
+          eventId,
+          `${root}.payload.archivedRemovableDataByEvent.${eventId}.daySummariesById.${oldId}`,
+          idMap
+        );
+        if (Object.hasOwn(migratedSummaries, migrated.id)) legacyMigrationFailure(`${root}.payload.archivedRemovableDataByEvent.${eventId}.daySummariesById.${oldId}`, "\u89C4\u8303\u5316\u540E ID \u51B2\u7A81");
+        migratedSummaries[migrated.id] = migrated;
+      }
+      container.daySummariesById = migratedSummaries;
+    }
+    const remapProjectionRefs = (event, eventPath) => event.stages.forEach((stage, index) => {
+      if (stage.kind === "period-summary") stage.childSummaryRefs = stage.childSummaryRefs.map((ref, refIndex) => remapLegacyRef(ref, idMap, `${eventPath}.stages.${index}.childSummaryRefs.${refIndex}`));
+    });
+    for (const bucket of ["active", "archived"]) payload.dynamics[bucket].forEach((event, index) => remapProjectionRefs(event, `${root}.payload.dynamics.${bucket}.${index}`));
+    payload.generationSnapshots.forEach((snapshot, snapshotIndex) => {
+      for (const bucket of ["active", "archived"]) snapshot.dynamics[bucket].forEach((event, eventIndex) => remapProjectionRefs(event, `${root}.payload.generationSnapshots.${snapshotIndex}.dynamics.${bucket}.${eventIndex}`));
+    });
+    for (const [eventId, container] of Object.entries(payload.archivedRemovableDataByEvent)) {
+      for (const [summaryId, summary] of Object.entries(container.daySummariesById)) {
+        summary.detailRefs = summary.detailRefs.map((ref, index) => remapLegacyRef(
+          ref,
+          idMap,
+          `${root}.payload.archivedRemovableDataByEvent.${eventId}.daySummariesById.${summaryId}.detailRefs.${index}`
+        ));
+      }
+    }
+    for (const field of ["removableEntityStateById", "removableEntityTombstonesById"]) {
+      if (!plainRecord9(payload[field])) legacyMigrationFailure(`${root}.payload.${field}`, "\u5FC5\u987B\u662F\u5BF9\u8C61");
+      const remapped = {};
+      for (const [oldId, recordValue] of Object.entries(payload[field])) {
+        const nextId = idMap.get(oldId) || oldId;
+        if (Object.hasOwn(remapped, nextId)) legacyMigrationFailure(`${root}.payload.${field}.${oldId}`, "\u89C4\u8303\u5316\u540E ID \u51B2\u7A81");
+        const record2 = clone5(recordValue);
+        record2.entityId = idMap.get(record2.entityId) || record2.entityId;
+        remapped[nextId] = record2;
+      }
+      payload[field] = remapped;
+    }
+    const removableIds = /* @__PURE__ */ new Set([
+      ...Object.keys(payload.removableEntityStateById),
+      ...Object.keys(payload.removableEntityTombstonesById)
+    ]);
+    const productionResolvableIds = new Set(removableIds);
+    for (const details of Object.values(payload.stageDetailsByEvent)) {
+      for (const detail of details) if (typeof detail?.id === "string") productionResolvableIds.add(detail.id);
+    }
+    for (const container of Object.values(payload.archivedRemovableDataByEvent)) {
+      for (const id2 of Object.keys(container.daySummariesById)) productionResolvableIds.add(id2);
+      for (const id2 of Object.keys(container.manifestsById || {})) productionResolvableIds.add(id2);
+    }
+    for (const event of [...payload.dynamics.active, ...payload.dynamics.archived]) {
+      for (const stage of event.stages) if (typeof stage?.id === "string") productionResolvableIds.add(stage.id);
+    }
+    const assertResolvableRefs = (event, eventPath, resolvableIds) => event.stages.forEach((stage, stageIndex) => {
+      if (stage.kind !== "period-summary") return;
+      stage.childSummaryRefs.forEach((ref, refIndex) => {
+        const path = `${eventPath}.stages.${stageIndex}.childSummaryRefs.${refIndex}`;
+        if (!ref.startsWith(`day:${event.id}:`)) legacyMigrationFailure(path, `\u5FC5\u987B\u5F15\u7528\u4E8B\u4EF6 ${event.id} \u7684 day-summary`);
+        if (!resolvableIds.has(ref)) legacyMigrationFailure(path, `\u6307\u5411\u65E0\u6CD5\u65E0\u635F\u8FC1\u79FB\u7684\u5B9E\u4F53 ${ref}`);
+      });
+    });
+    for (const bucket of ["active", "archived"]) payload.dynamics[bucket].forEach((event, index) => assertResolvableRefs(event, `${root}.payload.dynamics.${bucket}.${index}`, productionResolvableIds));
+    payload.generationSnapshots.forEach((snapshot, snapshotIndex) => {
+      const snapshotResolvableIds = new Set(removableIds);
+      for (const event of [...snapshot.dynamics.active, ...snapshot.dynamics.archived]) {
+        for (const stage of event.stages) {
+          if (typeof stage?.id === "string") snapshotResolvableIds.add(stage.id);
+        }
+      }
+      for (const bucket of ["active", "archived"]) snapshot.dynamics[bucket].forEach((event, eventIndex) => assertResolvableRefs(
+        event,
+        `${root}.payload.generationSnapshots.${snapshotIndex}.dynamics.${bucket}.${eventIndex}`,
+        snapshotResolvableIds
+      ));
+    });
+    for (const [eventId, container] of Object.entries(payload.archivedRemovableDataByEvent)) {
+      for (const [summaryId, summary] of Object.entries(container.daySummariesById)) summary.detailRefs.forEach((ref, index) => {
+        const path = `${root}.payload.archivedRemovableDataByEvent.${eventId}.daySummariesById.${summaryId}.detailRefs.${index}`;
+        if (!ref.startsWith(`detail:${eventId}:`)) legacyMigrationFailure(path, `\u5FC5\u987B\u5F15\u7528\u4E8B\u4EF6 ${eventId} \u7684 detail`);
+        if (!productionResolvableIds.has(ref)) legacyMigrationFailure(path, `\u6307\u5411\u65E0\u6CD5\u65E0\u635F\u8FC1\u79FB\u7684\u5B9E\u4F53 ${ref}`);
+      });
+    }
+    payload.fixedCoreBaselineByEvent = Object.fromEntries(payload.dynamics.archived.map((event) => [event.id, extractArchivedFixedCore(event)]));
+    scope.schemaVersion = SCOPE_ENVELOPE_VERSION;
+    return scope;
+  }
+  function migrateLegacyTodayTrendV2Store(value) {
+    if (!plainRecord9(value) || value.version !== TODAY_TREND_V2_STORE_VERSION || !plainRecord9(value.globalEnvelope)) {
+      legacyMigrationFailure("v2Store", "\u65E7\u7248 store \u7ED3\u6784\u65E0\u6548");
+    }
+    if (value.globalEnvelope.schemaVersion !== LEGACY_GLOBAL_ENVELOPE_VERSION) {
+      legacyMigrationFailure("globalEnvelope.schemaVersion", "\u4E0D\u662F\u53D7\u652F\u6301\u7684\u65E7\u7248 envelope");
+    }
+    const migrated = clone5(value);
+    if (!plainRecord9(migrated.globalEnvelope.payload?.scopes)) legacyMigrationFailure("globalEnvelope.payload.scopes", "\u5FC5\u987B\u662F\u5BF9\u8C61");
+    migrated.globalEnvelope.payload.scopes = Object.fromEntries(Object.entries(migrated.globalEnvelope.payload.scopes).map(([storageId, scope]) => [storageId, migrateLegacyScopeEnvelope(scope, storageId)]));
+    migrated.globalEnvelope.schemaVersion = GLOBAL_ENVELOPE_VERSION;
+    return normalizeTodayTrendV2Store(migrated);
   }
   function migrateTodayTrendStoreToV2(value, { globalRevision = 1, scopeRevisionByStorageId = {} } = {}) {
     if (value?.version === TODAY_TREND_V2_STORE_VERSION && Object.hasOwn(value, "globalEnvelope")) {
@@ -10637,33 +11465,162 @@ ${entry2.content}` : entry2.content;
     }
     return continuous;
   }
+  function snapshotV1Comparable(snapshot) {
+    return {
+      assistantCount: snapshot.assistantCount,
+      generatedAt: snapshot.generatedAt,
+      world: snapshot.world,
+      reputation: snapshot.reputation,
+      factions: snapshot.factions,
+      dynamicsSettings: snapshot.dynamicsSettings,
+      dynamics: projectDynamicsToV1(snapshot.dynamics)
+    };
+  }
   function preserveUnchangedSnapshots(previousPayload, nextPayload) {
-    nextPayload.generationSnapshots = nextPayload.generationSnapshots.map((snapshot, index) => {
-      const existing = previousPayload.generationSnapshots[index];
+    const previousByFloor = new Map(previousPayload.generationSnapshots.map((snapshot) => [snapshot.assistantCount, snapshot]));
+    nextPayload.generationSnapshots = nextPayload.generationSnapshots.map((snapshot) => {
+      const existing = previousByFloor.get(snapshot.assistantCount);
       if (!existing) return snapshot;
-      const previousV1 = { ...clone5(existing), dynamics: projectDynamicsToV1(existing.dynamics) };
-      const nextV1 = { ...clone5(snapshot), dynamics: projectDynamicsToV1(snapshot.dynamics) };
-      return same2(previousV1, nextV1) ? clone5(existing) : snapshot;
+      return same2(snapshotV1Comparable(existing), snapshotV1Comparable(snapshot)) ? clone5(existing) : snapshot;
     });
   }
-  function preserveScopeMetadata(previousPayload, nextPayload, continuous) {
+  function archiveNewEvents(previousPayload, nextPayload, continuous, assistantCount = null) {
+    const previousActive = new Map(previousPayload.dynamics.active.map((event) => [event.id, event]));
+    let sequence = previousPayload.historyRetentionState.nextArchivedSequence;
+    const archivedAtAssistantCount = reliableAssistantCount(assistantCount);
+    nextPayload.dynamics.archived = nextPayload.dynamics.archived.map((event) => {
+      if (continuous.has(event.id) || !previousActive.has(event.id)) return event;
+      const prior = previousActive.get(event.id);
+      event = {
+        ...event,
+        stages: clone5(prior.stages),
+        capacityCompatibilityPending: prior.capacityCompatibilityPending,
+        archivedSequence: sequence++,
+        archivedAtAssistantCount
+      };
+      continuous.add(event.id);
+      return event;
+    });
+    nextPayload.historyRetentionState.nextArchivedSequence = sequence;
+  }
+  function migrateArchivedRemovable(previousPayload, nextPayload, continuous) {
+    const archivedIds = new Set(nextPayload.dynamics.archived.map((event) => event.id));
+    for (const eventId of archivedIds) {
+      if (!continuous.has(eventId)) continue;
+      const details = previousPayload.stageDetailsByEvent[eventId];
+      if (details) nextPayload.stageDetailsByEvent[eventId] = clone5(details);
+      const event = nextPayload.dynamics.archived.find((item) => item.id === eventId);
+      const existing = previousPayload.archivedRemovableDataByEvent[eventId];
+      const daySummariesById = { ...existing?.daySummariesById ? clone5(existing.daySummariesById) : {} };
+      for (const stage of event.stages) if (stage.kind === "day-summary") daySummariesById[stage.id] = clone5(stage);
+      nextPayload.archivedRemovableDataByEvent[eventId] = {
+        daySummariesById,
+        manifestsById: clone5(existing?.manifestsById || {})
+      };
+    }
+  }
+  function preserveScopeMetadata(previousPayload, nextPayload, continuous, assistantCount = null) {
     const previousEvents = eventMap(previousPayload.dynamics);
-    const archivedIds = new Set(nextPayload.dynamics.archived.filter((event) => continuous.has(event.id)).map((event) => event.id));
     const preserve = (source, accept) => Object.fromEntries(Object.entries(source).filter(accept).map(([id2, value]) => [id2, clone5(value)]));
     nextPayload.historyRetentionSettings = clone5(previousPayload.historyRetentionSettings);
     nextPayload.historyRetentionState = clone5(previousPayload.historyRetentionState);
+    archiveNewEvents(previousPayload, nextPayload, continuous, assistantCount);
     nextPayload.stageDetailsByEvent = preserve(previousPayload.stageDetailsByEvent, ([id2]) => continuous.has(id2));
-    nextPayload.archivedRemovableDataByEvent = preserve(previousPayload.archivedRemovableDataByEvent, ([id2]) => archivedIds.has(id2));
+    nextPayload.archivedRemovableDataByEvent = preserve(previousPayload.archivedRemovableDataByEvent, ([id2]) => continuous.has(id2));
     const eventRecord = ([, value]) => continuous.has(value.eventId);
     nextPayload.removableEntityStateById = preserve(previousPayload.removableEntityStateById, eventRecord);
     nextPayload.removableEntityTombstonesById = preserve(previousPayload.removableEntityTombstonesById, eventRecord);
+    migrateArchivedRemovable(previousPayload, nextPayload, continuous);
     nextPayload.fixedCoreBaselineByEvent = Object.fromEntries(nextPayload.dynamics.archived.map((event) => {
       const existing = previousEvents.get(event.id);
-      const baseline = existing && same2(projectEventToV1(existing), projectEventToV1(event)) ? previousPayload.fixedCoreBaselineByEvent[event.id] : extractArchivedFixedCore(event);
+      const baseline = existing?.lifecycle === "archived" && same2(projectEventToV1(existing), projectEventToV1(event)) ? previousPayload.fixedCoreBaselineByEvent[event.id] : extractArchivedFixedCore(event);
       return [event.id, clone5(baseline)];
     }));
   }
-  function mergeTodayTrendV1StoreIntoV2(currentValue, facadeValue) {
+  function evaluateTodayTrendArchivedRetention(payloadValue) {
+    const payload = clone5(payloadValue);
+    const { archivedDetailLatestEventCount: n, archivedDetailRetentionFloors: l } = normalizeRetentionSettings(payload.historyRetentionSettings);
+    const highWater = payload.historyRetentionState.highWaterAssistantCount;
+    const ranked = [...payload.dynamics.archived].sort((left, right) => right.archivedSequence - left.archivedSequence || left.id.localeCompare(right.id));
+    return ranked.map((event, index) => {
+      const rankProtected = n > 0 && index < n;
+      const floorProtected = l > 0 && (highWater === null || event.archivedAtAssistantCount === null || highWater - event.archivedAtAssistantCount <= l);
+      return {
+        eventId: event.id,
+        rank: index + 1,
+        rankProtected,
+        floorProtected,
+        protected: rankProtected || floorProtected,
+        deletable: !rankProtected && !floorProtected
+      };
+    });
+  }
+  function applyArchivedRetention(payloadValue, assistantCount) {
+    const payload = clone5(payloadValue);
+    const before = Object.fromEntries(payload.dynamics.archived.map((event) => [event.id, extractArchivedFixedCore(event)]));
+    const decisions = evaluateTodayTrendArchivedRetention(payload);
+    const policyRevision = payload.historyRetentionState.retentionPolicyRevision;
+    let changed = false;
+    for (const decision of decisions) {
+      if (!decision.deletable) continue;
+      const eventId = decision.eventId;
+      const entries = [
+        ...(payload.stageDetailsByEvent[eventId] || []).map((item) => [item.id, "detail"]),
+        ...Object.keys(payload.archivedRemovableDataByEvent[eventId]?.daySummariesById || {}).map((id2) => [id2, "day-summary"]),
+        ...Object.keys(payload.archivedRemovableDataByEvent[eventId]?.manifestsById || {}).map((id2) => [id2, "manifest"])
+      ];
+      const uniqueEntries = [...new Map(entries.map((entry2) => [entry2[0], entry2])).values()];
+      for (const [id2, entityType] of uniqueEntries) {
+        const state = payload.removableEntityStateById[id2];
+        if (!state || state.state !== "available" || state.entityType !== entityType || state.eventId !== eventId || payload.removableEntityTombstonesById[id2]) {
+          failure2("TT_ARCHIVED_RETENTION_LIFECYCLE_INVALID", `archived retention lifecycle \u65E0\u6548\uFF1A${id2}`);
+        }
+      }
+      delete payload.stageDetailsByEvent[eventId];
+      delete payload.archivedRemovableDataByEvent[eventId];
+      for (const [id2] of uniqueEntries) {
+        const state = payload.removableEntityStateById[id2];
+        const removed = {
+          ...state,
+          state: "removed",
+          removalReason: "archived-retention",
+          removedAtAssistantCount: reliableAssistantCount(assistantCount),
+          policyRevision
+        };
+        payload.removableEntityStateById[id2] = removed;
+        payload.removableEntityTombstonesById[id2] = clone5(removed);
+        changed = true;
+      }
+    }
+    const after = Object.fromEntries(payload.dynamics.archived.map((event) => [event.id, extractArchivedFixedCore(event)]));
+    if (!same2(before, after)) failure2("TT_ARCHIVED_FIXED_CORE_CHANGED", "archived retention \u6539\u5199\u4E86 fixed core");
+    if (changed) payload.historyRetentionState.detailPoolRevision += 1;
+    return payload;
+  }
+  function saveTodayTrendRetentionSettingsToV2(currentValue, storageId, values, {
+    expectedScopeRevision,
+    expectedSettingsRevision
+  } = {}) {
+    const current = normalizeTodayTrendV2Store(currentValue);
+    const envelope = current.globalEnvelope.payload.scopes[storageId];
+    if (!envelope) failure2("TT_V2_SCHEMA_INVALID", "canonical scope \u4E0D\u5B58\u5728");
+    if (!Number.isSafeInteger(expectedScopeRevision) || expectedScopeRevision < 0 || !Number.isSafeInteger(expectedSettingsRevision) || expectedSettingsRevision < 1) {
+      failure2("TT_RETENTION_SETTINGS_INVALID", "\u8BBE\u7F6E\u4FDD\u5B58\u7F3A\u5C11\u6709\u6548 base revision");
+    }
+    if (envelope.revision !== expectedScopeRevision || envelope.payload.historyRetentionSettings.revision !== expectedSettingsRevision) {
+      failure2("TT_SETTINGS_REVISION_CONFLICT", "\u5F52\u6863\u4FDD\u7559\u8BBE\u7F6E\u5DF2\u88AB\u5176\u4ED6\u4E8B\u52A1\u4FEE\u6539\uFF0C\u8BF7\u91CD\u65B0\u52A0\u8F7D");
+    }
+    const n = parseRetentionInteger(values?.archivedDetailLatestEventCount, "N", 80);
+    const l = parseRetentionInteger(values?.archivedDetailRetentionFloors, "L", 1e3);
+    envelope.payload.historyRetentionSettings = {
+      archivedDetailLatestEventCount: n,
+      archivedDetailRetentionFloors: l,
+      revision: envelope.payload.historyRetentionSettings.revision + 1
+    };
+    envelope.payload.historyRetentionState.retentionPolicyRevision += 1;
+    return normalizeTodayTrendV2Store(current);
+  }
+  function mergeTodayTrendV1StoreIntoV2(currentValue, facadeValue, { assistantCount = null } = {}) {
     const current = normalizeTodayTrendV2Store(currentValue);
     const facade = normalizeTodayTrendStore(facadeValue);
     const revisions2 = Object.fromEntries(Object.entries(current.globalEnvelope.payload.scopes).map(([storageId, envelope]) => [storageId, envelope.revision]));
@@ -10676,7 +11633,7 @@ ${entry2.content}` : entry2.content;
       if (!previousEnvelope) continue;
       const continuousEventIds = preserveUnchangedEvents(previousEnvelope.payload, nextEnvelope.payload);
       preserveUnchangedSnapshots(previousEnvelope.payload, nextEnvelope.payload);
-      preserveScopeMetadata(previousEnvelope.payload, nextEnvelope.payload, continuousEventIds);
+      preserveScopeMetadata(previousEnvelope.payload, nextEnvelope.payload, continuousEventIds, assistantCount);
     }
     return normalizeTodayTrendV2Store(migrated);
   }
@@ -10691,15 +11648,20 @@ ${entry2.content}` : entry2.content;
     if (!previousEnvelope) failure2("TT_V2_SCHEMA_INVALID", "canonical scope \u4E0D\u5B58\u5728");
     const facade = buildReadOnlyShadow(current);
     facade.scopes[storageId] = clone5(generatedScope);
-    const merged = mergeTodayTrendV1StoreIntoV2(current, facade);
+    const merged = mergeTodayTrendV1StoreIntoV2(current, facade, { assistantCount });
     const envelope = merged.globalEnvelope.payload.scopes[storageId];
     let payload = applyTodayTrendHistoryProducer(envelope.payload, history, {
       trustedStoryDate,
       assistantCount,
       previousPayload: previousEnvelope.payload
     });
+    const reliableCount = reliableAssistantCount(assistantCount);
+    if (reliableCount !== null && (payload.historyRetentionState.highWaterAssistantCount === null || reliableCount > payload.historyRetentionState.highWaterAssistantCount)) {
+      payload.historyRetentionState.highWaterAssistantCount = reliableCount;
+    }
+    payload = applyArchivedRetention(payload, reliableCount);
     payload.fixedCoreBaselineByEvent = Object.fromEntries(payload.dynamics.archived.map((event) => [event.id, extractArchivedFixedCore(event)]));
-    if (snapshot) payload = appendTodayTrendCanonicalSnapshot(payload, assistantCount, generatedAt);
+    if (snapshot) payload = appendTodayTrendCanonicalSnapshot(payload, assistantCount, generatedAt, current.globalEnvelope.revision + 1);
     envelope.payload = payload;
     return normalizeTodayTrendV2Store(merged);
   }
@@ -10711,12 +11673,122 @@ ${entry2.content}` : entry2.content;
     envelope.payload.fixedCoreBaselineByEvent = Object.fromEntries(envelope.payload.dynamics.archived.map((event) => [event.id, extractArchivedFixedCore(event)]));
     return normalizeTodayTrendV2Store(current);
   }
+  function resolveTodayTrendV2DetailForTarget(currentValue, storageId, eventId, detailId, targetAssistantCount) {
+    const target = reliableAssistantCount(targetAssistantCount);
+    if (target === null || typeof storageId !== "string" || typeof eventId !== "string" || typeof detailId !== "string") return null;
+    const store = normalizeTodayTrendV2Store(currentValue);
+    const payload = store.globalEnvelope.payload.scopes[storageId]?.payload;
+    if (!payload) return null;
+    const detail = (payload.stageDetailsByEvent[eventId] || []).find((item) => item.id === detailId);
+    if (!detail) return null;
+    const detailState = payload.removableEntityStateById[detailId];
+    if (detailState?.state !== "available" || detailState.entityType !== "detail" || detailState.eventId !== eventId) return null;
+    const event = [...payload.dynamics.active, ...payload.dynamics.archived].find((item) => item.id === eventId);
+    if (!event) return null;
+    const sourceSummary = [
+      ...event.stages.filter((stage) => stage.kind === "day-summary"),
+      ...Object.values(payload.archivedRemovableDataByEvent[eventId]?.daySummariesById || {})
+    ].find((summary) => summary.detailRefs.includes(detailId) && summary.sourceFloorEnd !== null && summary.sourceFloorEnd <= target);
+    if (!sourceSummary) return null;
+    const manifestContainer = payload.archivedRemovableDataByEvent[eventId]?.manifestsById || {};
+    const manifestVisible = payload.generationSnapshots.some((snapshot) => {
+      if (snapshot.visibleFromAssistantCount > target) return false;
+      return snapshot.detailManifestRefs.some((entry2) => {
+        if (entry2.eventId !== eventId || entry2.visibleFromAssistantCount > target || !entry2.detailRefs.includes(detailId)) return false;
+        const manifest = manifestContainer[entry2.manifestId];
+        const state = payload.removableEntityStateById[entry2.manifestId];
+        return manifest?.id === entry2.manifestId && state?.state === "available" && state.entityType === "manifest" && state.eventId === eventId;
+      });
+    });
+    return manifestVisible ? clone5(detail) : null;
+  }
   function normalizeTodayTrendV2Candidate(value, currentValue = null) {
     if (value?.version === TODAY_TREND_V2_STORE_VERSION && Object.hasOwn(value, "globalEnvelope")) {
       return normalizeTodayTrendV2Store(value);
     }
     if (currentValue) return mergeTodayTrendV1StoreIntoV2(currentValue, value);
     return migrateTodayTrendStoreToV2(value).store;
+  }
+  function translateBranchFloor(value, offset) {
+    return value === null ? null : Math.max(0, value + offset);
+  }
+  function translateBranchProjection(stage, offset) {
+    const translated = clone5(stage);
+    if (Object.hasOwn(translated, "sourceFloorStart")) {
+      translated.sourceFloorStart = translateBranchFloor(translated.sourceFloorStart, offset);
+      translated.sourceFloorEnd = translateBranchFloor(translated.sourceFloorEnd, offset);
+    }
+    return translated;
+  }
+  function translateBranchEvent(event, offset) {
+    const translated = clone5(event);
+    translated.stages = translated.stages.map((stage) => translateBranchProjection(stage, offset));
+    if (translated.lifecycle === "archived") {
+      translated.archivedAtAssistantCount = translateBranchFloor(translated.archivedAtAssistantCount, offset);
+    }
+    return translated;
+  }
+  function copyTodayTrendV2ScopeForBranch(sourceEnvelopeValue, targetStorageId, targetAssistantCount = 0, presetsValue) {
+    if (typeof targetStorageId !== "string" || !targetStorageId) throw new TypeError("\u76EE\u6807 storageId \u5FC5\u987B\u662F\u975E\u7A7A\u5B57\u7B26\u4E32");
+    if (!plainRecord9(presetsValue)) throw new TypeError("\u5206\u652F\u590D\u5236\u5FC5\u987B\u63D0\u4F9B canonical \u4E16\u754C\u9884\u8BBE\u96C6\u5408");
+    const targetFloor = safeInteger2(targetAssistantCount, "\u5206\u652F\u76EE\u6807 assistantCount");
+    const presets = clone5(presetsValue);
+    const sourceEnvelope = normalizeScopeEnvelope(sourceEnvelopeValue, presets);
+    if (sourceEnvelope.payload.storageId === targetStorageId) invalid("\u5206\u652F\u76EE\u6807\u4E0D\u5F97\u4E0E\u6765\u6E90 scope \u76F8\u540C");
+    const sourceFloor = reliableAssistantCount(sourceEnvelope.payload.operation.lastSuccessfulAssistantCount) ?? 0;
+    const offset = targetFloor - sourceFloor;
+    const payload = clone5(sourceEnvelope.payload);
+    payload.storageId = targetStorageId;
+    payload.commitJournal = null;
+    payload.operation = {
+      ...payload.operation,
+      lastSuccessfulAssistantCount: targetFloor,
+      lastSuccessfulRunAt: 0
+    };
+    payload.dynamics = {
+      active: payload.dynamics.active.map((event) => translateBranchEvent(event, offset)),
+      archived: payload.dynamics.archived.map((event) => translateBranchEvent(event, offset))
+    };
+    for (const container of Object.values(payload.archivedRemovableDataByEvent)) {
+      container.daySummariesById = Object.fromEntries(Object.entries(container.daySummariesById).map(([id2, summary]) => [id2, translateBranchProjection(summary, offset)]));
+    }
+    for (const field of ["removableEntityStateById", "removableEntityTombstonesById"]) {
+      payload[field] = Object.fromEntries(Object.entries(payload[field]).map(([id2, state]) => [id2, {
+        ...state,
+        removedAtAssistantCount: translateBranchFloor(state.removedAtAssistantCount, offset)
+      }]));
+    }
+    payload.historyRetentionState.highWaterAssistantCount = translateBranchFloor(
+      payload.historyRetentionState.highWaterAssistantCount,
+      offset
+    );
+    const translatedSnapshots = [];
+    let baselineSnapshot = null;
+    for (const snapshot of payload.generationSnapshots) {
+      const assistantCount = translateBranchFloor(snapshot.assistantCount, offset);
+      const translated = {
+        ...clone5(snapshot),
+        assistantCount,
+        visibleFromAssistantCount: translateBranchFloor(snapshot.visibleFromAssistantCount, offset),
+        detailManifestRefs: snapshot.detailManifestRefs.map((entry2) => ({
+          ...clone5(entry2),
+          visibleFromAssistantCount: translateBranchFloor(entry2.visibleFromAssistantCount, offset)
+        })),
+        dynamics: {
+          active: snapshot.dynamics.active.map((event) => translateBranchEvent(event, offset)),
+          archived: snapshot.dynamics.archived.map((event) => translateBranchEvent(event, offset))
+        }
+      };
+      if (assistantCount === 0) {
+        if (baselineSnapshot === null || snapshot.assistantCount > baselineSnapshot.sourceAssistantCount) {
+          baselineSnapshot = { sourceAssistantCount: snapshot.assistantCount, value: translated };
+        }
+      } else translatedSnapshots.push(translated);
+    }
+    if (baselineSnapshot) translatedSnapshots.push(baselineSnapshot.value);
+    payload.generationSnapshots = translatedSnapshots.sort((left, right) => left.assistantCount - right.assistantCount).slice(-TODAY_TREND_LIMITS.generationSnapshots);
+    payload.fixedCoreBaselineByEvent = Object.fromEntries(payload.dynamics.archived.map((event) => [event.id, extractArchivedFixedCore(event)]));
+    return normalizeScopeEnvelope({ ...sourceEnvelope, revision: 0, payload }, presets);
   }
   function rebaseTodayTrendV2Store(value, globalRevision, scopeRevisionByStorageId = null) {
     const store = normalizeTodayTrendV2Store(value);
@@ -10748,7 +11820,8 @@ ${entry2.content}` : entry2.content;
 
   // src/today-trend-v2-authority.js
   var AUTHORITY_VERSION = 1;
-  var ENVELOPE_VERSION = 2;
+  var LEGACY_V2_ENVELOPE_VERSION = 2;
+  var ENVELOPE_VERSION = 3;
   var MIGRATION_BACKUP_VERSION = 1;
   var CHANNEL_NAME = "pm-today-trend-v2-authority";
   var clone6 = (value) => structuredClone(value);
@@ -10771,6 +11844,11 @@ ${entry2.content}` : entry2.content;
     if (!Number.isSafeInteger(value) || value < 0) throw failure3("TT_V2_SCHEMA_INVALID", `${field} \u5FC5\u987B\u662F\u975E\u8D1F\u5B89\u5168\u6574\u6570`);
     return value;
   }
+  function exactFields(value, keys, field) {
+    if (Object.keys(value).length !== keys.length || keys.some((key) => !Object.hasOwn(value, key))) {
+      throw failure3("TT_V2_SCHEMA_INVALID", `${field} \u5B57\u6BB5\u96C6\u5408\u65E0\u6548`);
+    }
+  }
   function normalizeScopeRevisions(value) {
     if (!value || typeof value !== "object" || Array.isArray(value)) throw failure3("TT_V2_SCHEMA_INVALID", "scopeRevisionByStorageId \u5FC5\u987B\u662F\u5BF9\u8C61");
     const result = /* @__PURE__ */ Object.create(null);
@@ -10785,6 +11863,17 @@ ${entry2.content}` : entry2.content;
   function normalizeTodayTrendV2Authority(value) {
     if (!value || typeof value !== "object" || Array.isArray(value)) throw failure3("TT_V2_SCHEMA_INVALID", "v2 authority \u5FC5\u987B\u662F\u5BF9\u8C61");
     if (value.schemaVersion > AUTHORITY_VERSION) throw failure3("TT_V2_FUTURE_VERSION", `v2 authority \u7248\u672C ${value.schemaVersion} \u9AD8\u4E8E\u5F53\u524D\u652F\u6301\u7248\u672C ${AUTHORITY_VERSION}`);
+    exactFields(value, [
+      "schemaVersion",
+      "epoch",
+      "authorityRevision",
+      "storeRevision",
+      "scopeRevisionByStorageId",
+      "ownerTabId",
+      "readV2",
+      "writeV2",
+      "serveV2"
+    ], "v2 authority");
     if (value.schemaVersion !== AUTHORITY_VERSION) throw failure3("TT_V2_SCHEMA_INVALID", "v2 authority \u7248\u672C\u65E0\u6548");
     if (value.ownerTabId !== null && (typeof value.ownerTabId !== "string" || !value.ownerTabId)) throw failure3("TT_V2_SCHEMA_INVALID", "ownerTabId \u5FC5\u987B\u662F\u975E\u7A7A\u5B57\u7B26\u4E32\u6216 null");
     for (const key of ["readV2", "writeV2", "serveV2"]) if (typeof value[key] !== "boolean") throw failure3("TT_V2_SCHEMA_INVALID", `${key} \u5FC5\u987B\u662F\u5E03\u5C14\u503C`);
@@ -10808,7 +11897,12 @@ ${entry2.content}` : entry2.content;
   function normalizeTodayTrendV2Envelope(value) {
     if (!value || typeof value !== "object" || Array.isArray(value)) throw failure3("TT_V2_SCHEMA_INVALID", "v2 store envelope \u5FC5\u987B\u662F\u5BF9\u8C61");
     if (value.schemaVersion > ENVELOPE_VERSION) throw failure3("TT_V2_FUTURE_VERSION", `v2 store \u7248\u672C ${value.schemaVersion} \u9AD8\u4E8E\u5F53\u524D\u652F\u6301\u7248\u672C ${ENVELOPE_VERSION}`);
+    exactFields(value, ["schemaVersion", "revision", "payload"], "v2 store envelope");
     if (value.schemaVersion === 1) return createTodayTrendV2Envelope(normalizeTodayTrendStore(value.payload), value.revision);
+    if (value.schemaVersion === LEGACY_V2_ENVELOPE_VERSION) {
+      const revision = nonNegativeInteger(value.revision, "revision");
+      return { schemaVersion: ENVELOPE_VERSION, revision, payload: migrateLegacyTodayTrendV2Store(value.payload) };
+    }
     if (value.schemaVersion !== ENVELOPE_VERSION) throw failure3("TT_V2_SCHEMA_INVALID", "v2 store \u7248\u672C\u65E0\u6548");
     return createTodayTrendV2Envelope(value.payload, value.revision);
   }
@@ -10822,7 +11916,7 @@ ${entry2.content}` : entry2.content;
     const sourcePayload = normalizeTodayTrendStore(value.sourcePayload);
     const storeRevision = nonNegativeInteger(value.storeRevision, "migration backup storeRevision");
     if (storeRevision < 1) throw failure3("TT_V2_SCHEMA_INVALID", "migration backup storeRevision \u5FC5\u987B\u5927\u4E8E 0");
-    const migratedStore = normalizeTodayTrendV2Store(value.migratedStore);
+    const migratedStore = value.migratedStore?.globalEnvelope?.schemaVersion === 1 ? migrateLegacyTodayTrendV2Store(value.migratedStore) : normalizeTodayTrendV2Store(value.migratedStore);
     const comparison = diffReadOnlyShadow(sourcePayload, migratedStore);
     if (!comparison.equal) throw failure3("TT_V2_SCHEMA_INVALID", "migration backup \u4E0E migratedStore \u7528\u6237\u53EF\u89C1\u8BED\u4E49\u4E0D\u4E00\u81F4");
     return {
@@ -11880,7 +12974,7 @@ ${entry2.content}` : entry2.content;
       completeDirectoryBranchScope(store, token);
     }
   }
-  async function commitTodayTrendScope({ desired, expected, targetId, commitScope }) {
+  async function commitTodayTrendScope({ desired, expected, sourceId, targetId, targetAssistantCount, commitScope }) {
     if (typeof commitScope !== "function") throw new TypeError("\u5206\u652F\u7EE7\u627F\u7F3A\u5C11 Today Trend \u7EDF\u4E00 scope \u63D0\u4EA4\u5668");
     const token = markDirectoryBranchScope("todayTrend", targetId);
     try {
@@ -11893,6 +12987,9 @@ ${entry2.content}` : entry2.content;
           throw new Error("\u5206\u652F\u7EE7\u627F\u8865\u507F\u53D6\u6D88\uFF1A\u76EE\u6807 scope \u5DF2\u5728\u4E8B\u52A1\u540E\u88AB\u66F4\u65B0 (\u4ECA\u65E5\u98CE\u5411)");
         }
         return restoring ? null : clone8(desired.scopes[targetId]);
+      }, null, {
+        branchSourceId: sourceId,
+        targetAssistantCount
       });
     } finally {
       completeDirectoryBranchScope("todayTrend", token);
@@ -11901,6 +12998,7 @@ ${entry2.content}` : entry2.content;
   async function inheritPhoneDataOnBranch({ context, loadStores, saveStores, loadLineage, saveLineage, commitLineage, now: now2 = Date.now, force = false }) {
     const branch = resolveBranchInheritance(context);
     if (!branch) return { status: "skipped", reason: "not-branch" };
+    const transactionBranch = { ...branch, targetAssistantCount: getLastMessageId(() => context) };
     if (pendingByTarget.has(branch.targetId)) return pendingByTarget.get(branch.targetId);
     const operation = (async () => {
       const lineage = await loadLineage();
@@ -11925,7 +13023,7 @@ ${entry2.content}` : entry2.content;
       };
       let storesSaved = false;
       try {
-        await saveStores(candidate, { branch, previous: stores });
+        await saveStores(candidate, { branch: transactionBranch, previous: stores });
         storesSaved = true;
         if (commitLineage) await commitLineage(branch.targetId, nextLineage[branch.targetId]);
         else await saveLineage(nextLineage);
@@ -11933,7 +13031,7 @@ ${entry2.content}` : entry2.content;
       } catch (error) {
         if (storesSaved) {
           try {
-            await saveStores(stores, { branch, previous: candidate });
+            await saveStores(stores, { branch: transactionBranch, previous: candidate });
           } catch (rollbackError) {
             const combined = new Error(`${error.message}\uFF1B\u5206\u652F\u7EE7\u627F\u6570\u636E\u56DE\u6EDA\u5931\u8D25\uFF1A${rollbackError.message}`);
             combined.cause = error;
@@ -12059,7 +13157,9 @@ ${entry2.content}` : entry2.content;
         globalThis.window.__pmTodayTrend = await commitTodayTrendScope({
           desired: desired.todayTrend,
           expected: expected.todayTrend,
+          sourceId: branch.sourceId,
           targetId,
+          targetAssistantCount: branch.targetAssistantCount,
           commitScope
         });
       } else {
@@ -13577,8 +14677,8 @@ ${dataBlock("known_actor_names_data", roster, 1600)}`;
     if (typeof createdAt !== "number" || !Number.isFinite(createdAt) || createdAt < MIN_PLAUSIBLE_POST_TIMESTAMP) {
       return { label: "\u65F6\u95F4\u672A\u77E5", datetime: "", title: "" };
     }
-    const date = new Date(createdAt);
-    if (Number.isNaN(date.getTime())) return { label: "\u65F6\u95F4\u672A\u77E5", datetime: "", title: "" };
+    const date2 = new Date(createdAt);
+    if (Number.isNaN(date2.getTime())) return { label: "\u65F6\u95F4\u672A\u77E5", datetime: "", title: "" };
     const referenceNow = typeof now2 === "number" && Number.isFinite(now2) && now2 >= createdAt ? now2 : createdAt;
     const elapsed = referenceNow - createdAt;
     let label;
@@ -13586,10 +14686,10 @@ ${dataBlock("known_actor_names_data", roster, 1600)}`;
     else if (elapsed < 36e5) label = `${Math.floor(elapsed / 6e4)}\u5206\u949F\u524D`;
     else if (elapsed < 864e5) label = `${Math.floor(elapsed / 36e5)}\u5C0F\u65F6\u524D`;
     else if (elapsed < 6048e5) label = `${Math.floor(elapsed / 864e5)}\u5929\u524D`;
-    else if (date.getFullYear() === new Date(referenceNow).getFullYear()) label = `${date.getMonth() + 1}\u6708${date.getDate()}\u65E5`;
-    else label = `${date.getFullYear()}\u5E74${date.getMonth() + 1}\u6708${date.getDate()}\u65E5`;
-    const title = `${date.getFullYear()}\u5E74${date.getMonth() + 1}\u6708${date.getDate()}\u65E5 ${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
-    return { label, datetime: date.toISOString(), title };
+    else if (date2.getFullYear() === new Date(referenceNow).getFullYear()) label = `${date2.getMonth() + 1}\u6708${date2.getDate()}\u65E5`;
+    else label = `${date2.getFullYear()}\u5E74${date2.getMonth() + 1}\u6708${date2.getDate()}\u65E5`;
+    const title = `${date2.getFullYear()}\u5E74${date2.getMonth() + 1}\u6708${date2.getDate()}\u65E5 ${String(date2.getHours()).padStart(2, "0")}:${String(date2.getMinutes()).padStart(2, "0")}`;
+    return { label, datetime: date2.toISOString(), title };
   }
   function renderPostTime(createdAt, now2) {
     const time = formatCommunityPostTime(createdAt, now2);
@@ -19245,31 +20345,31 @@ ${kept.join("\n")}`;
     const calendarScope = calendarScopeFor(calendarStore, currentStorageId);
     const windowStart = calendarReferenceDate(calendarScope, start);
     const linesByDate = /* @__PURE__ */ new Map();
-    const addFact = (date, fact) => {
+    const addFact = (date2, fact) => {
       if (!fact) return;
-      if (!linesByDate.has(date)) linesByDate.set(date, /* @__PURE__ */ new Set());
-      linesByDate.get(date).add(fact);
+      if (!linesByDate.has(date2)) linesByDate.set(date2, /* @__PURE__ */ new Set());
+      linesByDate.get(date2).add(fact);
     };
     const scheduleDates = calendarDateRangeKeys(windowStart, -3, 6);
     const weatherDates = calendarDateRangeKeys(windowStart, -1, 3);
     const cycleDates = new Set(calendarDateRangeKeys(windowStart, -1, 3));
     if (calendarScope.injectionWeatherEnabled && weatherStore?.location) {
-      for (const date of weatherDates) {
-        const weather = resolveWeatherForDate(weatherStore, date, {
+      for (const date2 of weatherDates) {
+        const weather = resolveWeatherForDate(weatherStore, date2, {
           storyWeatherEvent: calendarScope.weatherEvent,
           storyWeatherEventEnabled: calendarScope.weatherEventEnabled
         });
         if (weather.status === "available") {
           const eventNote = weather.source === "story_weather_event" ? `\uFF08${weather.sourceLabel}\uFF09` : "";
-          addFact(date, `\u5929\u6C14\uFF1A${weatherCodeLabel(weather.day.weatherCode)}\uFF0C${weather.day.tempMin}\xB0/${weather.day.tempMax}\xB0C${eventNote}`);
+          addFact(date2, `\u5929\u6C14\uFF1A${weatherCodeLabel(weather.day.weatherCode)}\uFF0C${weather.day.tempMin}\xB0/${weather.day.tempMax}\xB0C${eventNote}`);
         }
       }
     }
     if (calendarScope.injectionScheduleEnabled) {
-      for (const date of scheduleDates) {
-        for (const event of calendarScope.events[date] || []) {
+      for (const date2 of scheduleDates) {
+        for (const event of calendarScope.events[date2] || []) {
           const note = event.note ? `\uFF08${event.note.replace(/\s+/g, " ").slice(0, 180)}\uFF09` : "";
-          addFact(date, `\u65E5\u7A0B\uFF1A${event.title}${note}`);
+          addFact(date2, `\u65E5\u7A0B\uFF1A${event.title}${note}`);
         }
       }
     }
@@ -19288,7 +20388,7 @@ ${kept.join("\n")}`;
       }
     }
     const holidays = normalizeHolidayCache(holidayStore);
-    const holidayYears = [...new Set(scheduleDates.map((date) => Number(date.slice(0, 4))))];
+    const holidayYears = [...new Set(scheduleDates.map((date2) => Number(date2.slice(0, 4))))];
     if (calendarScope.injectionScheduleEnabled) for (const year of holidayYears) {
       const legal = holidayYearFromCache(holidays, holidays.selectedCountry, year)?.entries || [];
       const cultural = year >= HOLIDAY_YEAR_RANGE.min && year <= HOLIDAY_YEAR_RANGE.max ? buildCulturalFestivals(year) : [];
@@ -19310,11 +20410,11 @@ ${kept.join("\n")}`;
       }
     }
     const outputDates = [...linesByDate.keys()].sort();
-    const datedLines = outputDates.flatMap((date) => {
-      const facts = [...linesByDate.get(date) || []];
+    const datedLines = outputDates.flatMap((date2) => {
+      const facts = [...linesByDate.get(date2) || []];
       if (!facts.length) return [];
-      const relative = relativeCalendarLabel(windowStart, date);
-      return `${relative ? `${relative} ` : ""}${date}\uFF5C${facts.join("\uFF1B")}`;
+      const relative = relativeCalendarLabel(windowStart, date2);
+      return `${relative ? `${relative} ` : ""}${date2}\uFF5C${facts.join("\uFF1B")}`;
     });
     return fitCompleteLines(datedLines, 6e3);
   }
@@ -20560,10 +21660,10 @@ ${lines}`;
     isSuspended = () => false,
     setTimer = (callback, delay) => setInterval(callback, delay),
     clearTimer = (timer) => clearInterval(timer),
-    formatTime = (date) => new Intl.DateTimeFormat([], {
+    formatTime = (date2) => new Intl.DateTimeFormat([], {
       hour: "2-digit",
       minute: "2-digit"
-    }).format(date),
+    }).format(date2),
     now: now2 = () => /* @__PURE__ */ new Date()
   }) {
     let timer = null;
@@ -23576,13 +24676,21 @@ ${error.message}`);
   var assertTodayTrendV2Backup = (value) => {
     if (value === null) return null;
     const backup = objectValue(value, "todayTrendV2");
+    const legacyStore = backup.v2Store?.globalEnvelope?.schemaVersion === 1;
     const normalized = {
-      v2Store: normalizeTodayTrendV2Store(backup.v2Store),
+      v2Store: legacyStore ? migrateLegacyTodayTrendV2Store(backup.v2Store) : normalizeTodayTrendV2Store(backup.v2Store),
       migrationBackup: backup.migrationBackup === null ? null : normalizeTodayTrendMigrationBackup(backup.migrationBackup),
       storeRevision: backup.storeRevision
     };
     const v2StoreRevision = normalized.v2Store.globalEnvelope.revision;
-    if (!Number.isSafeInteger(normalized.storeRevision) || normalized.storeRevision < 1 || normalized.storeRevision !== v2StoreRevision || JSON.stringify(backup) !== JSON.stringify(normalized)) throw new Error("\u5907\u4EFD\u5B57\u6BB5 todayTrendV2 \u5185\u5BB9\u65E0\u6548\u6216\u4E0D\u662F\u89C4\u8303\u683C\u5F0F");
+    if (!Number.isSafeInteger(normalized.storeRevision) || normalized.storeRevision < 1 || normalized.storeRevision !== v2StoreRevision) throw new Error("\u5907\u4EFD\u5B57\u6BB5 todayTrendV2 \u5185\u5BB9\u65E0\u6548\u6216\u4E0D\u662F\u89C4\u8303\u683C\u5F0F");
+    if (legacyStore) {
+      if (Object.keys(backup).length !== 3 || !Object.hasOwn(backup, "migrationBackup")) {
+        throw new Error("\u5907\u4EFD\u5B57\u6BB5 todayTrendV2 \u5185\u5BB9\u65E0\u6548\u6216\u4E0D\u662F\u89C4\u8303\u683C\u5F0F");
+      }
+    } else if (JSON.stringify(backup) !== JSON.stringify(normalized)) {
+      throw new Error("\u5907\u4EFD\u5B57\u6BB5 todayTrendV2 \u5185\u5BB9\u65E0\u6548\u6216\u4E0D\u662F\u89C4\u8303\u683C\u5F0F");
+    }
     return normalized;
   };
   function parseBackupData(data, current) {
@@ -24138,6 +25246,31 @@ ${error.message}`);
     };
     const commitScope = (storageId, mutate, task = null, options2 = {}) => commitStore(async (store) => {
       if (typeof storageId !== "string" || !storageId) throw new TypeError("\u4ECA\u65E5\u98CE\u5411\u89D2\u8272\u8D44\u6599 ID \u5FC5\u987B\u662F\u975E\u7A7A\u5B57\u7B26\u4E32");
+      if (options2.branchSourceId !== void 0 && loadCanonical) {
+        if (typeof options2.branchSourceId !== "string" || !options2.branchSourceId) {
+          throw new TypeError("\u4ECA\u65E5\u98CE\u5411\u5206\u652F\u6765\u6E90 ID \u5FC5\u987B\u662F\u975E\u7A7A\u5B57\u7B26\u4E32");
+        }
+        const scopes = store.globalEnvelope.payload.scopes;
+        const envelope = scopes[storageId];
+        const currentScope = envelope ? facadeStore(store).scopes[storageId] : void 0;
+        const scope2 = await mutate(clone15(currentScope));
+        if (scope2 === null) delete scopes[storageId];
+        else {
+          if (envelope) throw new Error("\u5206\u652F\u7EE7\u627F\u4E0D\u5F97\u8986\u76D6\u5DF2\u5B58\u5728\u7684 canonical scope");
+          if (!Number.isSafeInteger(options2.targetAssistantCount) || options2.targetAssistantCount < 0) {
+            throw new TypeError("\u4ECA\u65E5\u98CE\u5411\u5206\u652F\u76EE\u6807\u697C\u5C42\u5FC5\u987B\u662F\u975E\u8D1F\u5B89\u5168\u6574\u6570");
+          }
+          const sourceEnvelope = scopes[options2.branchSourceId];
+          if (!sourceEnvelope) throw new Error("\u5206\u652F\u7EE7\u627F\u6765\u6E90 canonical scope \u4E0D\u5B58\u5728");
+          scopes[storageId] = copyTodayTrendV2ScopeForBranch(
+            sourceEnvelope,
+            storageId,
+            options2.targetAssistantCount,
+            store.globalEnvelope.payload.presets
+          );
+        }
+        return store;
+      }
       if (options2.canonical) {
         const scopes = store.globalEnvelope.payload.scopes;
         const envelope = scopes[storageId];
@@ -24153,8 +25286,19 @@ ${error.message}`);
       if (scope === null) delete store.scopes[storageId];
       else store.scopes[storageId] = scope;
       return store;
-    }, task, { ...options2, scopeId: storageId });
-    const api = { commitStore, commitScope, invalidateCommits, recover, supportsCanonical: typeof loadCanonical === "function" };
+    }, task, {
+      ...options2,
+      canonical: options2.canonical === true || options2.branchSourceId !== void 0 && !!loadCanonical,
+      scopeId: storageId
+    });
+    const api = {
+      commitStore,
+      commitScope,
+      invalidateCommits,
+      recover,
+      loadCanonical,
+      supportsCanonical: typeof loadCanonical === "function"
+    };
     if (journal) Object.assign(api, { ready: recover, isBlocked: () => journal.blocked() === true });
     return api;
   }
@@ -24250,7 +25394,7 @@ ${context.user?.description || ""}`, 720),
     ].filter(Boolean).join("\n\n");
     return { systemPrompt, userPrompt };
   }
-  function buildTodayTrendGenerationEnvelope({ context, preset, scope, assistantCount = 0, allowIncident = false, target = null, storyDate = null, summaryOnly = false } = {}) {
+  function buildTodayTrendGenerationEnvelope({ context, preset, scope, promptScope = null, assistantCount = 0, allowIncident = false, target = null, storyDate = null, summaryOnly = false } = {}) {
     if (!context || typeof context !== "object") throw new TypeError("\u4ECA\u65E5\u98CE\u5411\u751F\u6210\u63D0\u793A\u8BCD\u7F3A\u5C11\u4E0A\u4E0B\u6587");
     if (!preset || typeof preset !== "object") throw new TypeError("\u4ECA\u65E5\u98CE\u5411\u751F\u6210\u63D0\u793A\u8BCD\u7F3A\u5C11\u4E16\u754C\u9884\u8BBE");
     if (!scope || typeof scope !== "object") throw new TypeError("\u4ECA\u65E5\u98CE\u5411\u751F\u6210\u63D0\u793A\u8BCD\u7F3A\u5C11\u89D2\u8272\u8D44\u6599");
@@ -24274,7 +25418,7 @@ ${context.user?.description || ""}`, 720),
       block("reputation_rule", preset.moduleRules?.reputation, 600),
       block("faction_rule", preset.moduleRules?.faction, 600),
       block("dynamics_rule", [preset.moduleRules?.dynamics, preset.dynamicsRules?.general, preset.dynamicsRules?.incident, preset.dynamicsRules?.rumor, preset.dynamicsRules?.underground].filter(Boolean).join("\n"), 2400),
-      block("current_today_trend", JSON.stringify({ world: scope.world, reputation: scope.reputation, factions: scope.factions, dynamics: scope.dynamics }), 12e3),
+      block("current_today_trend", typeof promptScope === "string" && promptScope.trim() ? promptScope : JSON.stringify({ world: scope.world, reputation: scope.reputation, factions: scope.factions, dynamics: scope.dynamics }), 12e3),
       block("story_date", storyDate, 10),
       `\u76EE\u6807\u89D2\u8272\uFF1A${context.characterName}
 \u76EE\u6807\u804A\u5929\uFF1A${context.storageId}
@@ -24599,6 +25743,7 @@ ${targetInstruction}`
           context,
           preset: input.preset,
           scope: input.scope,
+          promptScope: input.promptScope,
           assistantCount: input.assistantCount,
           allowIncident: input.allowIncident === true,
           target: input.target,
@@ -24721,12 +25866,14 @@ ${targetInstruction}`
     random = Math.random,
     now: now2 = () => Date.now(),
     getCalendarStore = () => null,
+    getPromptScope = null,
     wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
     commitFeedbackMs = 240
   } = {}) {
     if (!controller || typeof controller.generate !== "function") throw new TypeError("\u4ECA\u65E5\u98CE\u5411\u8C03\u5EA6\u5668\u7F3A\u5C11\u751F\u6210\u63A7\u5236\u5668");
     if (!committer || typeof committer.commitStore !== "function" || typeof committer.invalidateCommits !== "function") throw new TypeError("\u4ECA\u65E5\u98CE\u5411\u8C03\u5EA6\u5668\u7F3A\u5C11\u4E8B\u52A1\u63D0\u4EA4\u5668");
     if (typeof getStore !== "function" || typeof getStorageId2 !== "function") throw new TypeError("\u4ECA\u65E5\u98CE\u5411\u8C03\u5EA6\u5668\u7F3A\u5C11\u5B58\u50A8\u6216\u804A\u5929\u8BFB\u53D6\u5668");
+    if (getPromptScope !== null && typeof getPromptScope !== "function") throw new TypeError("\u4ECA\u65E5\u98CE\u5411\u8C03\u5EA6\u5668 prompt scope \u8BFB\u53D6\u5668\u65E0\u6548");
     let sequence = 0;
     let accessSequence = 0;
     let activeTask = null;
@@ -24906,6 +26053,9 @@ ${targetInstruction}`
         const trustedStoryDate = trustedStoryDateFor(id2);
         const configuredProbability = scope.dynamicsSettings?.incident?.enabled ? scope.dynamicsSettings.incident.probability : 0;
         const effectiveIncidentProbability = incidentProbability === void 0 ? configuredProbability : incidentProbability;
+        const promptScope = getPromptScope ? await getPromptScope(id2) : null;
+        if (getPromptScope && typeof promptScope !== "string") throw new Error("\u4ECA\u65E5\u98CE\u5411 canonical prompt scope \u4E0D\u53EF\u7528");
+        if (!isActive(task)) throw cancelled();
         const generated = await controller.generate({
           signal: task.abortController.signal,
           scope,
@@ -24918,6 +26068,7 @@ ${targetInstruction}`
           target: task.target,
           summaryOnly: task.summaryOnly,
           storyDate: trustedStoryDate,
+          promptScope,
           onPhase: (next) => {
             if (isActive(task)) setPhase(next, null);
           }
@@ -25202,7 +26353,11 @@ ${targetInstruction}`
       getStorageId: getStorageId2,
       getChat: () => getCtx()?.chat || [],
       getFloor: getHostFloor,
-      getCalendarStore: deps.getCalendarStore
+      getCalendarStore: deps.getCalendarStore,
+      getPromptScope: typeof committer.loadCanonical === "function" ? async (storageId) => serializeTodayTrendV2ScopeForGeneration(
+        await committer.loadCanonical(),
+        storageId
+      ) : null
     });
     const reloadStore = () => loadStore2({ force: true });
     const nextPresetId = (store, storageId) => {
@@ -25355,6 +26510,36 @@ ${targetInstruction}`
       else scheduler.cancel("today-trend-stopped");
       return committed;
     };
+    const retentionSettingsState = async (storageId) => {
+      if (typeof committer.loadCanonical !== "function") return null;
+      return resolveTodayTrendV2RetentionSettingsState(await committer.loadCanonical(), storageId);
+    };
+    const saveRetentionSettings = async ({
+      storageId,
+      archivedDetailLatestEventCount,
+      archivedDetailRetentionFloors,
+      expectedScopeRevision,
+      expectedSettingsRevision
+    } = {}) => {
+      const identity = currentIdentity(String(storageId || ""));
+      if (typeof committer.loadCanonical !== "function") {
+        throw Object.assign(new Error("\u5F52\u6863\u4FDD\u7559\u8BBE\u7F6E\u9700\u8981 canonical \u5B58\u50A8\u80FD\u529B"), { code: "TT_V2_CANONICAL_REQUIRED" });
+      }
+      const committed = await committer.commitStore((current) => saveTodayTrendRetentionSettingsToV2(
+        current,
+        identity.storageId,
+        { archivedDetailLatestEventCount, archivedDetailRetentionFloors },
+        { expectedScopeRevision, expectedSettingsRevision }
+      ), null, { canonical: true, scopeId: identity.storageId });
+      if (!committed) throw Object.assign(new Error("\u5F52\u6863\u4FDD\u7559\u8BBE\u7F6E\u4FDD\u5B58\u5DF2\u53D6\u6D88"), { name: "AbortError" });
+      const canonical2 = await committer.loadCanonical();
+      const scope = resolveTodayTrendV2UiScope(canonical2, identity.storageId);
+      const revisions2 = resolveTodayTrendV2RetentionSettingsState(canonical2, identity.storageId);
+      if (!scope || !revisions2) {
+        throw Object.assign(new Error("\u5F52\u6863\u4FDD\u7559\u8BBE\u7F6E\u4FDD\u5B58\u540E\u65E0\u6CD5\u91CD\u65B0\u8BFB\u53D6 committed scope"), { code: "TT_V2_SCHEMA_INVALID" });
+      }
+      return { scope, revisions: revisions2 };
+    };
     const renamePreset = async (presetId, name) => {
       const selected = String(presetId || "").trim(), nextName = String(name || "").trim();
       if (!nextName) throw new Error("\u4E16\u754C\u9884\u8BBE\u540D\u79F0\u4E0D\u80FD\u4E3A\u7A7A");
@@ -25382,7 +26567,22 @@ ${targetInstruction}`
     };
     Object.assign(deps, {
       getTodayTrendStore: loadStore2,
+      getTodayTrendUiScope: async (storageId) => {
+        if (typeof committer.loadCanonical !== "function") return (await loadStore2()).scopes?.[storageId] || null;
+        return resolveTodayTrendV2UiScope(await committer.loadCanonical(), storageId);
+      },
+      getTodayTrendRetentionSettingsState: retentionSettingsState,
       reloadTodayTrendStore: reloadStore,
+      resolveTodayTrendDetail: async (eventId, detailId, targetAssistantCount = getHostFloor()) => {
+        if (typeof committer.loadCanonical !== "function" || targetAssistantCount === null) return null;
+        return resolveTodayTrendV2DetailForTarget(
+          await committer.loadCanonical(),
+          getStorageId2(),
+          eventId,
+          detailId,
+          targetAssistantCount
+        );
+      },
       observeTodayTrendTurn: (chat, options2) => scheduler.observe(chat, options2),
       armTodayTrendGeneration: (storageId, chat) => scheduler.arm(storageId, chat),
       cancelTodayTrendGeneration: (reason, reset) => scheduler.cancel(reason, reset),
@@ -25399,6 +26599,7 @@ ${targetInstruction}`
       saveTodayTrendRule: saveRule,
       bindTodayTrendPreset: bindPreset,
       saveTodayTrendSettings: saveSettings,
+      saveTodayTrendRetentionSettings: saveRetentionSettings,
       renameTodayTrendPreset: renamePreset,
       deleteTodayTrendPreset: deletePreset,
       commitTodayTrendScope: (storageId, mutate, task, options2) => committer.commitScope(storageId, mutate, task, options2),
@@ -25462,6 +26663,7 @@ ${targetInstruction}`
     render,
     onGenerate,
     onRefresh,
+    onLoadDetail,
     onSaveRule,
     onRegenerateRule,
     onRuleEditorStateChange = () => {
@@ -25559,6 +26761,7 @@ ${targetInstruction}`
         return run(rerender());
       }
       closeMenu();
+      if (action === "today-trend-load-detail") return run(onLoadDetail?.(button.dataset.eventId || "", button.dataset.detailId || "") ?? Promise.reject(new Error("\u4ECA\u65E5\u98CE\u5411\u8BE6\u60C5\u52A0\u8F7D\u80FD\u529B\u5C1A\u672A\u63A5\u5165")));
       if (action === "today-trend-cancel-rule-editor") {
         const returnName = view.ruleReturnName;
         view.editingRule = null;
@@ -25910,7 +27113,7 @@ ${targetInstruction}`
   // src/today-trend-dynamics-view.js
   var TYPES = Object.freeze({ normal: "\u5E38\u89C4\u52A8\u6001", incident: "\u7A81\u53D1\u4E8B\u4EF6", rumor: "\u6D41\u8A00\u871A\u8BED", underground: "\u5730\u4E0B\u7EBF" });
   var OUTCOMES = Object.freeze({ resolved: "\u5DF2\u89E3\u51B3", failed: "\u5DF2\u5931\u8D25", terminated: "\u5DF2\u7EC8\u6B62", inconclusive: "\u65E0\u5B9A\u8BBA", confirmed: "\u5DF2\u8BC1\u5B9E", debunked: "\u5DF2\u8BC1\u4F2A", absorbed: "\u5DF2\u627F\u63A5" });
-  var text8 = (value) => escapeHtml(String(value || ""));
+  var text8 = (value) => escapeHtml(String(value ?? ""));
   var icon2 = (action, glyph, label, attrs = "", danger = false) => ({ action, icon: glyph, label, attrs, danger });
   var outcomes = (selected, rumor) => Object.entries(OUTCOMES).filter(([key]) => rumor ? ["confirmed", "debunked"].includes(key) : ["resolved", "failed", "terminated", "inconclusive"].includes(key)).map(([key, label]) => `<option value="${key}"${key === selected ? " selected" : ""}>${label}</option>`).join("");
   var SVG = (body, className = "") => `<svg class="${className}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${body}</svg>`;
@@ -25946,17 +27149,65 @@ ${targetInstruction}`
   function settingsForm(settings) {
     return `<form class="pm-today-trend-editor" data-today-trend-form="dynamics-settings"><label class="pm-today-trend-field">\u540C\u65F6\u8FFD\u8E2A\u4E0A\u9650<input class="pm-today-trend-input" name="trackingLimit" type="number" min="1" max="80" required value="${settings.trackingLimit}"></label>${trendToggleField("appendOnlyOnActualProgress", "\u4EC5\u5B9E\u9645\u8FDB\u5C55\u65F6\u8FFD\u52A0\u9636\u6BB5", settings.appendOnlyOnActualProgress)}${trendToggleField("autoComplete", "\u81EA\u52A8\u5224\u65AD\u5B8C\u7ED3", settings.autoComplete)}${trendToggleField("archiveCompleted", "\u5B8C\u7ED3\u540E\u5F52\u6863", settings.archiveCompleted)}${trendToggleField("incidentEnabled", "\u542F\u7528\u7A81\u53D1\u4E8B\u4EF6", settings.incident.enabled)}<label class="pm-today-trend-field">\u7A81\u53D1\u6982\u7387\uFF080-100\uFF09<input class="pm-today-trend-input" name="incidentProbability" type="number" min="0" max="100" required value="${settings.incident.probability}"></label>${trendToggleField("rumorEnabled", "\u542F\u7528\u6D41\u8A00\u871A\u8BED", settings.rumor.enabled)}${trendToggleField("undergroundEnabled", "\u542F\u7528\u5730\u4E0B\u7EBF", settings.underground.enabled)}<div class="pm-today-trend-form-actions"><button type="button" data-action="today-trend-open-dynamics">\u53D6\u6D88</button><button type="submit">\u8BBE\u7F6E</button></div></form>`;
   }
-  function eventCard(event, archived, actionsVisible, generateAttrs) {
+  function dayTimeLabel(stage) {
+    if (typeof stage.timeRange === "string") return stage.timeRange;
+    if (stage.timeRange?.start && stage.timeRange?.end) return `${stage.timeRange.start}\u2013${stage.timeRange.end}`;
+    if (stage.timeRange?.label) return stage.timeRange.label;
+    return stage.timeLabel || stage.time || "";
+  }
+  function stageBoundary(stage) {
+    if (stage?.kind === "day-summary" && stage.storyDate) {
+      const time = dayTimeLabel(stage);
+      return {
+        key: `day:${stage.storyDate}`,
+        dateTime: stage.storyDate,
+        label: time ? `${stage.storyDate} \xB7 ${time}` : stage.storyDate
+      };
+    }
+    if (stage?.kind === "period-summary" && stage.startDate && stage.endDate) {
+      const sameDate = stage.startDate === stage.endDate;
+      const time = stage.startTime && stage.endTime ? `${stage.startTime}\u2013${stage.endTime}` : "";
+      const label = sameDate ? `${stage.startDate}${time ? ` \xB7 ${time}` : ""}` : `${stage.startDate}${stage.startTime ? ` ${stage.startTime}` : ""} \u2013 ${stage.endDate}${stage.endTime ? ` ${stage.endTime}` : ""}`;
+      return {
+        key: `period:${stage.startDate}:${stage.startTime || ""}:${stage.endDate}:${stage.endTime || ""}`,
+        dateTime: stage.startDate,
+        label
+      };
+    }
+    return null;
+  }
+  function boundaryHtml(boundary) {
+    return boundary ? `<time class="pm-today-trend-stage-date" datetime="${escapeAttr(boundary.dateTime)}">${text8(boundary.label)}</time>` : "";
+  }
+  function stageBody(stage, eventId, detailById = {}, loadingDetailIds = /* @__PURE__ */ new Set()) {
+    const displayText = stage && typeof stage === "object" ? stage.displayText : stage;
+    const refs = stage?.kind === "day-summary" && Array.isArray(stage.detailRefs) ? stage.detailRefs : [];
+    const details = refs.map((detailId) => {
+      const state = detailById[detailId];
+      const label = state?.status === "available" ? state.text : state?.status === "unavailable" ? "\u8BE6\u60C5\u4E0D\u53EF\u7528" : "\u5C55\u5F00\u8BE6\u60C5";
+      const disabled = loadingDetailIds.has(detailId) || state?.status === "available" || state?.status === "unavailable" ? " disabled" : "";
+      return `<button type="button" class="pm-today-trend-detail-action" data-action="today-trend-load-detail" data-event-id="${escapeAttr(eventId)}" data-detail-id="${escapeAttr(detailId)}"${disabled}>${escapeHtml(label)}</button>`;
+    }).join("");
+    return `${text8(displayText)}${details ? `<div class="pm-today-trend-detail-actions">${details}</div>` : ""}`;
+  }
+  function eventCard(event, archived, actionsVisible, generateAttrs, detailById, loadingDetailIds) {
     const state = archived ? OUTCOMES[event.outcome] || event.outcome : event.stageLabel;
     const eventAttrs = `data-event-id="${escapeAttr(event.id)}"`;
     const actions = archived ? [icon2("today-trend-delete-event", TRASH_ICON_SVG, `\u5220\u9664${event.title}`, `${eventAttrs} data-label="${escapeAttr(event.title)}"`, true)] : [icon2("today-trend-advance-event", REFRESH_ICON_SVG, `\u91CD\u65B0\u751F\u6210${event.title}`, `${eventAttrs} ${generateAttrs}`), icon2("today-trend-edit-event", EDIT_ICON_SVG, `\u7F16\u8F91${event.title}`, eventAttrs), icon2("today-trend-archive-event", TRASH_ICON_SVG, `\u5F52\u6863${event.title}`, eventAttrs), ...event.type === "underground" ? [icon2("today-trend-promote-underground", SPARKLES_ICON_SVG, `\u5347\u7EA7${event.title}`, eventAttrs)] : []];
     const stages = Array.isArray(event.stages) ? event.stages : [];
     const participants = Array.isArray(event.participants) ? event.participants : [];
-    const stageList = stages.map((stage, index) => `<li${!archived && index === stages.length - 1 ? ' class="is-current"' : ""}><span class="pm-today-trend-stage-tag">${!archived && index === stages.length - 1 ? "\u6700\u65B0\u9636\u6BB5" : `\u9636\u6BB5 ${String(index + 1).padStart(2, "0")}`}</span>${text8(stage)}</li>`).join("");
+    let previousBoundaryKey = "";
+    const stageList = stages.map((stage, index) => {
+      const boundary = stageBoundary(stage);
+      const showBoundary = boundary && boundary.key !== previousBoundaryKey;
+      if (boundary) previousBoundaryKey = boundary.key;
+      else previousBoundaryKey = "";
+      return `<li${!archived && index === stages.length - 1 ? ' class="is-current"' : ""}>${showBoundary ? boundaryHtml(boundary) : ""}<span class="pm-today-trend-stage-tag">${!archived && index === stages.length - 1 ? "\u6700\u65B0\u9636\u6BB5" : `\u9636\u6BB5 ${String(index + 1).padStart(2, "0")}`}</span>${stageBody(stage, event.id, detailById, loadingDetailIds)}</li>`;
+    }).join("");
     const history = archived ? `<details class="pm-today-trend-event-history"><summary>\u9636\u6BB5\u8BB0\u5F55\uFF08${stages.length}\uFF09</summary><ol>${stageList}</ol></details>` : `<ol class="pm-today-trend-event-history is-live">${stageList}</ol>`;
     return `<article class="pm-today-trend-event-card${archived ? " is-archived" : ""}" data-event-id="${escapeAttr(event.id)}" data-event-type="${escapeAttr(event.type)}"><div class="pm-today-trend-event-body"><header><div class="pm-today-trend-event-heading"><span class="pm-today-trend-event-marker" aria-hidden="true">${eventIcon(event)}</span><b>${text8(event.title)}</b></div>${trendInlineActions({ visible: actionsVisible, actions })}</header><div class="pm-today-trend-event-tags">${badge(event)}${pill(archived, state)}</div><dl class="pm-today-trend-event-facts"><div><dt>\u8D77\u56E0</dt><dd>${text8(event.origin)}</dd></div><div><dt>\u4E3B\u4F53</dt><dd>${text8(participants.join("\u3001") || "\u672A\u8BB0\u5F55")}</dd></div></dl>${history}${archived ? `<div class="pm-today-trend-event-latest"><strong>\u6700\u7EC8\u7ED3\u679C</strong><span>${text8(event.finalResult)}</span></div>` : ""}</div></article>`;
   }
-  function renderTodayTrendDynamicsView({ scope, preset = null, editingEventId = null, editingRule = null, ruleDraft = null, mode = "content", dynamicsTab = "active", menuOpenId = null, generationAvailable = false, generationBusy = false, floorStatus = "" } = {}) {
+  function renderTodayTrendDynamicsView({ scope, preset = null, editingEventId = null, editingRule = null, ruleDraft = null, mode = "content", dynamicsTab = "active", menuOpenId = null, generationAvailable = false, generationBusy = false, floorStatus = "", detailById = {}, loadingDetailIds = /* @__PURE__ */ new Set() } = {}) {
     if (!scope) return '<p class="pm-today-trend-empty">\u5F53\u524D\u804A\u5929\u5C1A\u672A\u521D\u59CB\u5316\u4ECA\u65E5\u98CE\u5411\u3002</p>';
     const attrs = `${generationAvailable && !generationBusy ? "" : "disabled"} aria-busy="${generationBusy}"`;
     if (mode === "settings") return `<section class="pm-today-trend-view">${trendModuleHead({ title: "\u4E8B\u4EF6\u8FFD\u8E2A\u8BBE\u7F6E", menuId: "dynamics-settings", menuOpenId, actions: [icon2("today-trend-open-dynamics", BACK_ICON_SVG, "\u8FD4\u56DE\u4E8B\u4EF6\u8FFD\u8E2A")] })}${settingsForm(scope.dynamicsSettings)}</section>`;
@@ -25969,8 +27220,8 @@ ${targetInstruction}`
       return `<section class="pm-today-trend-view">${event ? eventForm(event, kind) : eventForm()}</section>`;
     }
     const actionsVisible = menuOpenId === "dynamics-module";
-    const active = activeEvents.map((event) => eventCard(event, false, actionsVisible, attrs)).join("") || '<p class="pm-today-trend-empty">\u6682\u65E0\u6B63\u5728\u8FFD\u8E2A\u7684\u52A8\u6001\u3002</p>';
-    const archived = archivedEvents.map((event) => eventCard(event, true, actionsVisible, attrs)).join("") || '<p class="pm-today-trend-empty">\u6682\u65E0\u5DF2\u5B8C\u7ED3\u52A8\u6001\u3002</p>';
+    const active = activeEvents.map((event) => eventCard(event, false, actionsVisible, attrs, detailById, loadingDetailIds)).join("") || '<p class="pm-today-trend-empty">\u6682\u65E0\u6B63\u5728\u8FFD\u8E2A\u7684\u52A8\u6001\u3002</p>';
+    const archived = archivedEvents.map((event) => eventCard(event, true, actionsVisible, attrs, detailById, loadingDetailIds)).join("") || '<p class="pm-today-trend-empty">\u6682\u65E0\u5DF2\u5B8C\u7ED3\u52A8\u6001\u3002</p>';
     const activeCount = activeEvents.length;
     const archivedCount = archivedEvents.length;
     const tab = dynamicsTab === "archived" ? "archived" : "active";
@@ -26057,11 +27308,42 @@ ${targetInstruction}`
   }
 
   // src/today-trend-settings-view.js
-  function renderTodayTrendSettingsView({ scope = null, presets = [], generationBusy = false, menuOpenId = null } = {}) {
+  function retentionSettingsGroup(scope, revisions2, saving, generationBusy, draft) {
+    const settings = scope.historyRetentionSettings || {
+      archivedDetailLatestEventCount: 2,
+      archivedDetailRetentionFloors: 20,
+      revision: 1
+    };
+    const nValue = draft?.archivedDetailLatestEventCount ?? String(settings.archivedDetailLatestEventCount);
+    const lValue = draft?.archivedDetailRetentionFloors ?? String(settings.archivedDetailRetentionFloors);
+    const available = Number.isSafeInteger(revisions2?.scopeRevision) && revisions2.scopeRevision >= 0 && Number.isSafeInteger(revisions2?.settingsRevision) && revisions2.settingsRevision >= 1;
+    const disabled = saving || generationBusy || !available;
+    return `<fieldset class="pm-today-trend-retention-settings"><legend>\u4E8B\u4EF6\u8FFD\u8E2A\u5F52\u6863\u6570\u636E\u4FDD\u7559\u8BBE\u7F6E</legend>
+        <p class="pm-today-trend-retention-help">\u63A7\u5236\u5DF2\u5F52\u6863\u4E8B\u4EF6\u7684\u53EF\u5C55\u5F00\u9636\u6BB5\u8BE6\u60C5\u4E0E\u65E5\u671F\u6458\u8981\u3002\u9ED8\u8BA4\u4FDD\u7559\u6700\u8FD1 2 \u4E2A\u5F52\u6863\u4E8B\u4EF6\uFF0C\u6216\u6700\u8FD1 20 \u697C\u5185\u5F52\u6863\u7684\u4E8B\u4EF6\uFF1BN \u4E0E L \u4EFB\u4E00\u6761\u4EF6\u6EE1\u8DB3\u5373\u4FDD\u7559\u3002</p>
+        <div class="pm-today-trend-retention-fields"><label class="pm-today-trend-field"><span>\u6700\u8FD1\u5F52\u6863\u4E8B\u4EF6\u6570 N\uFF080..80\uFF09</span><input class="pm-today-trend-input" name="archivedDetailLatestEventCount" type="number" inputmode="numeric" min="0" max="80" step="1" required value="${escapeAttr(nValue)}" ${disabled ? "disabled" : ""}><small>\u8BBE\u4E3A 0 \u53EF\u5173\u95ED\u6309\u4E8B\u4EF6\u6570\u91CF\u4FDD\u7559\u3002</small></label>
+        <label class="pm-today-trend-field"><span>\u5F52\u6863\u540E\u4FDD\u7559\u697C\u5C42\u6570 L\uFF080..1000\uFF09</span><input class="pm-today-trend-input" name="archivedDetailRetentionFloors" type="number" inputmode="numeric" min="0" max="1000" step="1" required value="${escapeAttr(lValue)}" ${disabled ? "disabled" : ""}><small>\u8BBE\u4E3A 0 \u53EF\u5173\u95ED\u6309\u697C\u5C42\u8303\u56F4\u4FDD\u7559\u3002</small></label></div>
+        <input type="hidden" name="expectedScopeRevision" value="${available ? escapeAttr(String(revisions2.scopeRevision)) : ""}"><input type="hidden" name="expectedSettingsRevision" value="${available ? escapeAttr(String(revisions2.settingsRevision)) : ""}">
+        <p class="pm-today-trend-retention-combinations">\u7EC4\u5408\u8BED\u4E49\uFF1AN&gt;0/L&gt;0 \u65F6\u6309 OR \u4FDD\u62A4\uFF1BN&gt;0/L=0 \u65F6\u53EA\u6309\u6700\u8FD1\u4E8B\u4EF6\u6570\uFF1BN=0/L&gt;0 \u65F6\u53EA\u6309\u697C\u5C42\uFF1BN=0/L=0 \u65F6\u4E0D\u4FDD\u7559\u53EF\u79FB\u9664\u8BE6\u7EC6\u6570\u636E\u3002</p>
+        <p class="pm-today-trend-retention-example">\u793A\u4F8B\uFF1AL=20 \u65F6\uFF0C\u5728 #32 \u67E5\u770B\u4E8E #12 \u5F52\u6863\u7684\u4E8B\u4EF6\u4ECD\u53D7\u4FDD\u62A4\uFF1B\u5230 #33 \u65F6\uFF0C\u4EC5\u5F53 N \u6761\u4EF6\u4ECD\u6EE1\u8DB3\u624D\u7EE7\u7EED\u4FDD\u7559\u3002</p>
+        <p class="pm-today-trend-retention-warning">\u4FDD\u5B58\u53EA\u66F4\u65B0\u4FDD\u7559\u7B56\u7565\uFF0C\u4E0D\u4F1A\u7ACB\u5373\u6E05\u7406\u3002\u7F29\u5C0F\u914D\u7F6E\u540E\uFF0C\u540E\u7EED\u6210\u529F\u4E8B\u52A1\u53EF\u80FD\u5728\u5B89\u5168\u70B9\u4E0D\u53EF\u9006\u5220\u9664\u8D85\u51FA\u4FDD\u62A4\u8303\u56F4\u7684\u8BE6\u7EC6\u6570\u636E\uFF1B\u804A\u5929\u56DE\u9000\u4E0D\u4F1A\u6062\u590D\uFF0C\u4E4B\u540E\u589E\u5927\u914D\u7F6E\u4E5F\u4E0D\u4F1A\u590D\u6D3B\u5DF2\u5220\u9664\u6B63\u6587\u3002\u4E8B\u4EF6\u56FA\u5B9A\u6838\u5FC3\u59CB\u7EC8\u4FDD\u7559\uFF0C\u5305\u62EC\u6807\u9898\u3001\u8D77\u56E0\u3001\u4E3B\u4F53\u4E0E\u7ED3\u679C\u3002</p>
+        <div class="pm-today-trend-form-actions pm-today-trend-retention-save"><button type="submit" ${disabled ? "disabled" : ""} aria-busy="${saving}">${saving ? "\u6B63\u5728\u4FDD\u5B58\u4FDD\u7559\u8BBE\u7F6E" : "\u4FDD\u5B58\u5F52\u6863\u4FDD\u7559\u8BBE\u7F6E"}</button></div>
+        ${available ? "" : '<p class="pm-today-trend-retention-unavailable" role="status">canonical \u4FEE\u8BA2\u4FE1\u606F\u4E0D\u53EF\u7528\uFF0C\u5F53\u524D\u7981\u6B62\u4FDD\u5B58\u3002</p>'}
+    </fieldset>`;
+  }
+  function renderTodayTrendSettingsView({
+    scope = null,
+    presets = [],
+    generationBusy = false,
+    menuOpenId = null,
+    retentionRevisions = null,
+    retentionSaving = false,
+    retentionDraft = null,
+    errorHtml = ""
+  } = {}) {
     if (!scope) return '<section class="pm-today-trend-settings"><h3>APP \u603B\u8BBE\u7F6E</h3><p class="pm-today-trend-empty">\u8BF7\u5148\u521B\u5EFA\u6216\u7ED1\u5B9A\u4E16\u754C\u9884\u8BBE\u3002</p></section>';
     const options2 = presets.map((preset) => `<option value="${escapeAttr(preset.id)}" ${preset.id === scope.presetId ? "selected" : ""}>${escapeHtml(preset.name)}</option>`).join("");
     const rules = [["world", "\u4E16\u754C\u6001\u52BF\u89C4\u5219"], ["reputation", "\u4E2A\u4EBA\u98CE\u8BC4\u89C4\u5219"], ["faction", "\u52BF\u529B\u56FE\u8C31\u89C4\u5219"], ["dynamics", "\u52A8\u6001\u603B\u89C4\u5219"], ["incident", "\u7A81\u53D1\u4E8B\u4EF6\u89C4\u5219"], ["rumor", "\u6D41\u8A00\u871A\u8BED\u89C4\u5219"], ["underground", "\u5730\u4E0B\u7EBF\u89C4\u5219"]].map(([name, label]) => `<div class="pm-today-trend-rule-row"><span>${label}</span>${trendActionMenu({ id: `app-rule:${name}`, open: menuOpenId === `app-rule:${name}`, label: `${label}\u64CD\u4F5C`, actions: [{ action: `today-trend-edit-${name}-rule`, icon: EDIT_ICON_SVG, label: `\u7F16\u8F91${label}`, attrs: 'data-rule-return="settings"' }, { action: `today-trend-regenerate-${name}-rule`, icon: REFRESH_ICON_SVG, label: `\u91CD\u65B0\u751F\u6210${label}` }] })}</div>`).join("");
-    return `<section class="pm-today-trend-settings">${trendModuleHead({ title: "APP \u603B\u8BBE\u7F6E", menuId: "app-settings", menuOpenId, actions: [{ action: "today-trend-close-settings", icon: BACK_ICON_SVG, label: "\u8FD4\u56DE\u4ECA\u65E5\u98CE\u5411" }] })}<form class="pm-today-trend-editor" data-today-trend-form="app-settings"><label class="pm-today-trend-field">\u5F53\u524D\u4E16\u754C\u9884\u8BBE<select class="pm-today-trend-input" name="presetId">${options2}</select></label><div class="pm-today-trend-form-actions pm-today-trend-preset-actions"><button type="button" data-action="today-trend-new-preset">\u65B0\u5EFA</button><button type="button" data-action="today-trend-delete-preset">\u5220\u9664</button><button type="button" data-action="today-trend-reinitialize">\u91CD\u5EFA</button><button type="button" data-action="today-trend-rename-preset">\u91CD\u547D\u540D</button></div><label class="pm-today-trend-field">\u8C03\u7528\u65B9\u5F0F<select class="pm-today-trend-input" name="mode"><option value="manual" ${scope.operation?.mode === "manual" ? "selected" : ""}>\u624B\u52A8</option><option value="auto" ${scope.operation?.mode === "auto" ? "selected" : ""}>\u81EA\u52A8</option></select></label><label class="pm-today-trend-field">\u81EA\u52A8\u8C03\u7528\uFF1A\u6BCF N \u697C\u6267\u884C\u4E00\u6B21<input class="pm-today-trend-input" name="intervalFloors" type="number" min="1" max="1000" required value="${escapeAttr(String(scope.operation?.intervalFloors || 1))}"></label><label class="pm-today-trend-switch pm-today-trend-injection-switch"><span><b>\u6B63\u6587\u6CE8\u5165</b><small>\u5F00\u542F\u540E\uFF0C\u89D2\u8272\u56DE\u590D\u65F6\u4F1A\u53C2\u8003\u5F53\u524D\u4F1A\u8BDD\u4E2D\u7684\u4ECA\u65E5\u98CE\u5411\u3002</small></span><input name="injectionEnabled" type="checkbox" role="switch" aria-checked="${scope.injection?.enabled === true}"${scope.injection?.enabled ? " checked" : ""}><i aria-hidden="true"></i></label><label class="pm-today-trend-switch pm-today-trend-minimal-ui-switch"><span><b>\u6781\u7B80 UI</b><small>\u5F00\u542F\u540E\uFF0C\u901A\u8FC7\u5173\u7CFB\u56FE\u6807\u5207\u6362\u72B6\u6001\u5E76\u9690\u85CF\u5173\u7CFB\u91CF\u8868\u3002</small></span><input name="minimalUi" type="checkbox" role="switch" aria-checked="${scope.injection?.minimalUi === true}"${scope.injection?.minimalUi ? " checked" : ""}><i aria-hidden="true"></i></label><div class="pm-today-trend-form-actions pm-today-trend-settings-save"><button type="submit">\u4FDD\u5B58\u8BBE\u7F6E</button></div></form><section class="pm-today-trend-rule"><h3>\u63D0\u793A\u8BCD\u603B\u89C8</h3>${rules}</section></section>`;
+    return `<section class="pm-today-trend-settings">${trendModuleHead({ title: "APP \u603B\u8BBE\u7F6E", menuId: "app-settings", menuOpenId, actions: [{ action: "today-trend-close-settings", icon: BACK_ICON_SVG, label: "\u8FD4\u56DE\u4ECA\u65E5\u98CE\u5411" }] })}${errorHtml}<form class="pm-today-trend-editor" data-today-trend-form="app-settings"><label class="pm-today-trend-field">\u5F53\u524D\u4E16\u754C\u9884\u8BBE<select class="pm-today-trend-input" name="presetId">${options2}</select></label><p class="pm-today-trend-preset-warning">\u5207\u6362\u4E16\u754C\u9884\u8BBE\u4F1A\u91CD\u5EFA\u5F53\u524D\u4F5C\u7528\u57DF\u3002\u5207\u6362\u5B8C\u6210\u540E\u8BF7\u91CD\u65B0\u6253\u5F00\u672C\u9875\uFF0C\u518D\u5355\u72EC\u786E\u8BA4\u5F52\u6863\u4FDD\u7559\u8BBE\u7F6E\u3002</p><div class="pm-today-trend-form-actions pm-today-trend-preset-actions"><button type="button" data-action="today-trend-new-preset">\u65B0\u5EFA</button><button type="button" data-action="today-trend-delete-preset">\u5220\u9664</button><button type="button" data-action="today-trend-reinitialize">\u91CD\u5EFA</button><button type="button" data-action="today-trend-rename-preset">\u91CD\u547D\u540D</button></div><label class="pm-today-trend-field">\u8C03\u7528\u65B9\u5F0F<select class="pm-today-trend-input" name="mode"><option value="manual" ${scope.operation?.mode === "manual" ? "selected" : ""}>\u624B\u52A8</option><option value="auto" ${scope.operation?.mode === "auto" ? "selected" : ""}>\u81EA\u52A8</option></select></label><label class="pm-today-trend-field">\u81EA\u52A8\u8C03\u7528\uFF1A\u6BCF N \u697C\u6267\u884C\u4E00\u6B21<input class="pm-today-trend-input" name="intervalFloors" type="number" min="1" max="1000" required value="${escapeAttr(String(scope.operation?.intervalFloors || 1))}"></label><label class="pm-today-trend-switch pm-today-trend-injection-switch"><span><b>\u6B63\u6587\u6CE8\u5165</b><small>\u5F00\u542F\u540E\uFF0C\u89D2\u8272\u56DE\u590D\u65F6\u4F1A\u53C2\u8003\u5F53\u524D\u4F1A\u8BDD\u4E2D\u7684\u4ECA\u65E5\u98CE\u5411\u3002</small></span><input name="injectionEnabled" type="checkbox" role="switch" aria-checked="${scope.injection?.enabled === true}"${scope.injection?.enabled ? " checked" : ""}><i aria-hidden="true"></i></label><label class="pm-today-trend-switch pm-today-trend-minimal-ui-switch"><span><b>\u6781\u7B80 UI</b><small>\u5F00\u542F\u540E\uFF0C\u901A\u8FC7\u5173\u7CFB\u56FE\u6807\u5207\u6362\u72B6\u6001\u5E76\u9690\u85CF\u5173\u7CFB\u91CF\u8868\u3002</small></span><input name="minimalUi" type="checkbox" role="switch" aria-checked="${scope.injection?.minimalUi === true}"${scope.injection?.minimalUi ? " checked" : ""}><i aria-hidden="true"></i></label><div class="pm-today-trend-form-actions pm-today-trend-settings-save"><button type="submit">\u4FDD\u5B58\u8BBE\u7F6E</button></div></form><form class="pm-today-trend-editor" data-today-trend-form="retention-settings">${retentionSettingsGroup(scope, retentionRevisions, retentionSaving, generationBusy, retentionDraft)}</form><section class="pm-today-trend-rule"><h3>\u63D0\u793A\u8BCD\u603B\u89C8</h3>${rules}</section></section>`;
   }
 
   // src/today-trend-world-view.js
@@ -26103,6 +27385,17 @@ ${targetInstruction}`
 
   // src/today-trend-view.js
   var moduleView = (view, props) => ({ world: renderTodayTrendWorldView, reputation: renderTodayTrendReputationView, faction: renderTodayTrendFactionView, dynamics: renderTodayTrendDynamicsView }[view.name] || renderTodayTrendWorldView)(props);
+  function errorFeedback(error, copyStatus = "") {
+    if (!error) return "";
+    const message = typeof error === "string" ? error : String(error.message || "\u672A\u77E5\u9519\u8BEF");
+    const code = typeof error === "object" && /^TT_[A-Z0-9_]+$/.test(String(error.code || "")) ? String(error.code) : "";
+    if (!code && !copyStatus) {
+      return `<p class="pm-today-trend-init-feedback pm-today-trend-error" role="alert">${escapeHtml(message)}</p>`;
+    }
+    const diagnostic = code ? `<span class="pm-today-trend-diagnostic"><code>${escapeHtml(code)}</code><button type="button" data-action="today-trend-copy-diagnostic-code" data-code="${escapeAttr(code)}">\u590D\u5236\u8BCA\u65AD\u7801</button></span>` : "";
+    const copyFeedback = copyStatus ? `<small class="pm-today-trend-diagnostic-copy-status" role="status">${escapeHtml(copyStatus)}</small>` : "";
+    return `<div class="pm-today-trend-init-feedback pm-today-trend-error" role="alert" tabindex="-1"><span>${escapeHtml(message)}</span>${diagnostic}${copyFeedback}</div>`;
+  }
   function renderFirstUse({ presets, worldBooks, error, initializing, draft = {}, reinitializing = false, initializationMode = "reuse" }) {
     const presetOptions = presets.map((item) => `<option value="${escapeAttr(item.id)}">${escapeHtml(item.name)}</option>`).join("");
     const canReusePreset = Boolean(presetOptions) && !reinitializing;
@@ -26111,7 +27404,7 @@ ${targetInstruction}`
     const books = worldBooks.map((name) => `<label class="pm-today-trend-book-option"><input class="pm-today-trend-book-input" type="checkbox" name="worldBookNames" value="${escapeAttr(name)}" ${selectedBooks.has(name) ? "checked" : ""}><i class="pm-today-trend-book-check" aria-hidden="true"></i><span>${escapeHtml(name)}</span></label>`).join("");
     const modeSwitch = canReusePreset ? `<div class="pm-today-trend-mode-switch" aria-label="\u9884\u8BBE\u4F7F\u7528\u65B9\u5F0F"><button type="button" data-action="today-trend-use-preset" aria-pressed="${activeMode === "reuse"}">\u590D\u7528\u9884\u8BBE</button><button type="button" data-action="today-trend-create-preset" aria-pressed="${activeMode === "create"}">\u521B\u5EFA\u9884\u8BBE</button></div>` : "";
     const worldBookOptions = books || '<p class="pm-today-trend-empty-state" role="status">\u5F53\u524D\u804A\u5929\u6CA1\u6709\u53EF\u7528\u4E16\u754C\u4E66\uFF0C\u65E0\u6CD5\u521D\u59CB\u5316\u3002</p>';
-    const feedback = error ? `<p class="pm-today-trend-init-feedback pm-today-trend-error" role="alert">${escapeHtml(error)}</p>` : initializing ? '<p class="pm-today-trend-init-feedback pm-today-trend-loading" role="status" aria-live="polite">\u6B63\u5728\u521D\u59CB\u5316\u4ECA\u65E5\u98CE\u5411\uFF0C\u8BF7\u4FDD\u6301\u9875\u9762\u5F00\u542F\u3002</p>' : "";
+    const feedback = error ? errorFeedback(error) : initializing ? '<p class="pm-today-trend-init-feedback pm-today-trend-loading" role="status" aria-live="polite">\u6B63\u5728\u521D\u59CB\u5316\u4ECA\u65E5\u98CE\u5411\uFF0C\u8BF7\u4FDD\u6301\u9875\u9762\u5F00\u542F\u3002</p>' : "";
     const cancelAction = reinitializing ? '<button class="pm-today-trend-secondary-action" type="button" data-action="today-trend-cancel-initialize">\u53D6\u6D88</button>' : "";
     const initializeSectionTitle = reinitializing ? "\u91CD\u65B0\u521D\u59CB\u5316\u914D\u7F6E" : "\u521B\u5EFA\u65B0\u9884\u8BBE";
     const bindPresetSection = activeMode === "reuse" ? `<section class="pm-today-trend-init-section pm-today-trend-bind-section" aria-labelledby="pm-today-trend-bind-title"><header class="pm-today-trend-section-head"><h4 id="pm-today-trend-bind-title" class="pm-today-trend-section-title">\u590D\u7528\u5DF2\u6709\u9884\u8BBE</h4><p class="pm-today-trend-section-help">\u76F4\u63A5\u7ED1\u5B9A\u5DF2\u4FDD\u5B58\u7684\u4E16\u754C\u9884\u8BBE\uFF0C\u65E0\u9700\u91CD\u65B0\u751F\u6210\u3002</p></header><form class="pm-today-trend-editor pm-today-trend-bind-form" data-today-trend-form="bind-preset"><label class="pm-today-trend-field"><span>\u5DF2\u6709\u9884\u8BBE</span><select class="pm-today-trend-input" name="presetId">${presetOptions}</select></label><button class="pm-today-trend-primary-action" type="submit">\u7ED1\u5B9A\u5E76\u5F00\u59CB</button>${feedback}</form></section>` : "";
@@ -26136,7 +27429,26 @@ ${targetInstruction}`
     const value = draft ?? rules?.[field] ?? "";
     return `<main class="pm-today-trend-content pm-today-trend-rule-page"><section class="pm-today-trend-view">${trendRuleEditor({ rule, value })}</section></main>`;
   }
-  function renderTodayTrendApp({ scope = null, presets = [], worldBooks = [], view = { name: "world", mode: "content" }, generation = {}, currentFloor, error = null, initializing = false, initializationDraft, initializationOpen = false, reinitializing = false, initializationMode = "reuse" } = {}) {
+  function renderTodayTrendApp({
+    scope = null,
+    presets = [],
+    worldBooks = [],
+    view = { name: "world", mode: "content" },
+    generation = {},
+    currentFloor,
+    error = null,
+    initializing = false,
+    initializationDraft,
+    initializationOpen = false,
+    reinitializing = false,
+    initializationMode = "reuse",
+    detailById = {},
+    loadingDetailIds = /* @__PURE__ */ new Set(),
+    retentionRevisions = null,
+    retentionSaving = false,
+    retentionDraft = null,
+    diagnosticCopyStatus = ""
+  } = {}) {
     const busy = ["queued", "generating", "parsing", "committing"].includes(generation.phase);
     const syncedFloor = Number.isInteger(scope?.operation?.lastSuccessfulAssistantCount) && scope.operation.lastSuccessfulAssistantCount >= 0 ? scope.operation.lastSuccessfulAssistantCount : 0;
     const taskIsCurrent = generation.task?.storageId === scope?.storageId;
@@ -26151,7 +27463,16 @@ ${targetInstruction}`
       targeted
     });
     const preset = presets.find((item) => item.id === scope?.presetId) || null;
-    const content = !scope || initializationOpen ? renderFirstUse({ presets, worldBooks, error, initializing, draft: initializationDraft, reinitializing, initializationMode }) : view.editingRule ? renderRuleEditorPage(preset, view.editingRule, view.ruleDraft) : view.name === "settings" ? `<main class="pm-today-trend-content">${renderTodayTrendSettingsView({ scope, presets, generationBusy: busy, menuOpenId: view.menuOpenId })}</main>` : `<main class="pm-today-trend-content${view.mode === "content" ? ` is-${view.name}${scope.injection?.minimalUi ? " is-minimal-ui" : ""}` : ""}">${moduleView(view, { scope, preset, mode: view.mode, dynamicsTab: view.dynamicsTab, editingWorldItemId: view.editingWorldItemId, editingCircleId: view.editingCircleId, editingFactionId: view.editingFactionId, editingEventId: view.editingEventId, editingRule: view.editingRule, ruleDraft: view.ruleDraft, menuOpenId: view.menuOpenId, generationAvailable: !busy, generationBusy: busy, floorStatus })}</main>`;
+    const content = !scope || initializationOpen ? renderFirstUse({ presets, worldBooks, error, initializing, draft: initializationDraft, reinitializing, initializationMode }) : view.editingRule ? renderRuleEditorPage(preset, view.editingRule, view.ruleDraft) : view.name === "settings" ? `<main class="pm-today-trend-content">${renderTodayTrendSettingsView({
+      scope,
+      presets,
+      generationBusy: busy,
+      menuOpenId: view.menuOpenId,
+      retentionRevisions,
+      retentionSaving,
+      retentionDraft,
+      errorHtml: errorFeedback(error, diagnosticCopyStatus)
+    })}</main>` : `<main class="pm-today-trend-content${view.mode === "content" ? ` is-${view.name}${scope.injection?.minimalUi ? " is-minimal-ui" : ""}` : ""}">${moduleView(view, { scope, preset, mode: view.mode, dynamicsTab: view.dynamicsTab, editingWorldItemId: view.editingWorldItemId, editingCircleId: view.editingCircleId, editingFactionId: view.editingFactionId, editingEventId: view.editingEventId, editingRule: view.editingRule, ruleDraft: view.ruleDraft, menuOpenId: view.menuOpenId, generationAvailable: !busy, generationBusy: busy, floorStatus, detailById, loadingDetailIds })}</main>`;
     const navigation = scope && !initializationOpen && !view.editingRule ? `<nav class="pm-today-trend-tabs${view.name === "world" ? " is-world" : ""}" aria-label="\u4ECA\u65E5\u98CE\u5411\u6A21\u5757">${[["world", "\u4E16\u754C\u6001\u52BF", TODAY_TREND_WORLD_ICON_SVG], ["reputation", "\u4E2A\u4EBA\u98CE\u8BC4", TODAY_TREND_REPUTATION_ICON_SVG], ["faction", "\u52BF\u529B\u56FE\u8C31", TODAY_TREND_FACTION_ICON_SVG], ["dynamics", "\u4E8B\u4EF6\u8FFD\u8E2A", TODAY_TREND_DYNAMICS_ICON_SVG]].map(([name, label, icon3]) => `<button type="button" data-action="today-trend-open-${name === "faction" ? "factions" : name}" aria-label="${label}" aria-pressed="${view.name === name}">${icon3}</button>`).join("")}<button type="button" data-action="today-trend-open-settings" aria-label="APP \u603B\u8BBE\u7F6E" aria-pressed="${view.name === "settings"}">${MORE_ICON_SVG}</button></nav>` : "";
     return `<section id="pm-today-trend-app" class="pm-today-trend-shell" aria-labelledby="pm-today-trend-title"><header class="pm-today-trend-header"><button type="button" class="pm-today-trend-home" data-today-trend-ui-action="home" aria-label="\u8FD4\u56DE\u684C\u9762" title="\u8FD4\u56DE\u684C\u9762">${HOME_ICON_SVG}</button><h2 id="pm-today-trend-title">\u4ECA\u65E5\u98CE\u5411</h2><span class="pm-today-trend-header-actions"><button type="button" class="pm-today-trend-header-control" data-action="today-trend-generate-all" ${!scope || busy ? "disabled" : ""} aria-busy="${busy}" aria-label="\u624B\u52A8\u66F4\u65B0\u6240\u6709\u4ECA\u65E5\u98CE\u5411" title="\u624B\u52A8\u66F4\u65B0\u6240\u6709\u4ECA\u65E5\u98CE\u5411">${SPARKLES_ICON_SVG}</button><button type="button" class="pm-today-trend-header-control" data-action="today-trend-toggle-operation" ${!scope || busy ? "disabled" : ""} aria-pressed="${scope?.operation?.enabled === true}" aria-label="${scope?.operation?.enabled ? "\u6682\u505C\u8FD0\u4F5C" : "\u5F00\u542F\u81EA\u52A8"}" title="${scope?.operation?.enabled ? "\u6682\u505C\u8FD0\u4F5C" : "\u5F00\u542F\u81EA\u52A8"}">${scope?.operation?.enabled ? PAUSE_ICON_SVG : PLAY_ICON_SVG}</button></span></header>${content}${navigation}</section>`;
   }
@@ -26161,23 +27482,65 @@ ${targetInstruction}`
   var draftFrom = (data) => ({ presetName: String(data.get("presetName") || ""), worldBookNames: data.getAll("worldBookNames"), includeExistingChat: data.get("includeExistingChat") === "on", userRequirements: String(data.get("userRequirements") || "") });
   function createTodayTrendPhoneController({ state, deps, container }) {
     if (!container?.addEventListener || typeof deps.getStorageId !== "function") throw new TypeError("\u4ECA\u65E5\u98CE\u5411\u624B\u673A\u63A7\u5236\u5668\u4F9D\u8D56\u65E0\u6548");
-    let dispatcher = null, settings = false, initializing = false, initializationOpen = false, reinitializing = false, initializationMode = "reuse", error = "", renderEpoch = 0;
+    let dispatcher = null, settings = false, initializing = false, initializationOpen = false, reinitializing = false, initializationMode = "reuse", error = null, renderEpoch = 0;
     let initAbort = null, lastScope = null, lastPresets = [], lastView = { name: "world", mode: "content" };
-    let unsubscribeGeneration = null, destroyed = false, lastTerminalPhase = "", completedReloadEpoch = 0;
+    let unsubscribeGeneration = null, destroyed = false, lastTerminalPhase = "", completedReloadEpoch = 0, retentionSaveEpoch = 0;
+    let retentionRevisions = null, retentionSaving = false, retentionDraft = null;
+    let diagnosticCopyStatus = "", pendingFocusSelector = "";
     let initializationDraft = { includeExistingChat: true };
+    const detailById = /* @__PURE__ */ Object.create(null);
+    const loadingDetailIds = /* @__PURE__ */ new Set();
+    let detailStorageId = "";
     const store = () => deps.getTodayTrendStore?.();
+    const uiScope = async (id2) => typeof deps.getTodayTrendUiScope === "function" ? deps.getTodayTrendUiScope(id2) : (await store())?.scopes?.[id2] || null;
     const worldBooks = () => getReadableWorldBookNames(deps.getCtx?.());
+    const restoreFocus = (selector, epoch) => {
+      if (!selector || typeof container.querySelector !== "function") return;
+      queueMicrotask(() => {
+        if (destroyed || epoch !== renderEpoch) return;
+        const target = container.querySelector(selector);
+        if (typeof target?.focus === "function") target.focus();
+      });
+    };
+    const loadDetail = async (eventId, detailId) => {
+      const storageId = deps.getStorageId();
+      const floor = deps.getTodayTrendCurrentFloor?.();
+      if (!storageId || storageId !== detailStorageId || !Number.isSafeInteger(floor) || floor < 0 || typeof deps.resolveTodayTrendDetail !== "function") return false;
+      if (detailById[detailId] || loadingDetailIds.has(detailId)) return false;
+      loadingDetailIds.add(detailId);
+      try {
+        await render();
+        const detail = await deps.resolveTodayTrendDetail(eventId, detailId, floor);
+        if (destroyed || storageId !== deps.getStorageId() || floor !== deps.getTodayTrendCurrentFloor?.()) return false;
+        detailById[detailId] = detail ? { status: "available", text: detail.text } : { status: "unavailable", text: "" };
+        return true;
+      } finally {
+        loadingDetailIds.delete(detailId);
+        if (!destroyed) await render();
+      }
+    };
     const render = async (view) => {
       if (destroyed) return false;
       const epoch = ++renderEpoch;
       const current = await store();
       if (destroyed || epoch !== renderEpoch || state.phoneWindow?.querySelector(".pm-today-trend-page") !== container) return false;
       const id2 = deps.getStorageId();
-      const scope = current?.scopes?.[id2] || null;
-      lastScope = scope;
-      lastPresets = Object.values(current?.presets || {});
+      const scope = await uiScope(id2);
+      if (destroyed || epoch !== renderEpoch || state.phoneWindow?.querySelector(".pm-today-trend-page") !== container) return false;
       const activeView = view || dispatcher?.state() || lastView;
       lastView = settings ? { ...activeView, name: "settings" } : activeView;
+      let revisions2 = retentionRevisions;
+      if (lastView.name === "settings" && typeof deps.getTodayTrendRetentionSettingsState === "function") {
+        revisions2 = await deps.getTodayTrendRetentionSettingsState(id2);
+        if (destroyed || epoch !== renderEpoch || state.phoneWindow?.querySelector(".pm-today-trend-page") !== container) return false;
+      }
+      if (detailStorageId !== id2) {
+        detailStorageId = id2;
+        for (const key of Object.keys(detailById)) delete detailById[key];
+      }
+      lastScope = scope;
+      lastPresets = Object.values(current?.presets || {});
+      retentionRevisions = revisions2;
       const currentFloor = deps.getTodayTrendCurrentFloor?.();
       container.innerHTML = renderTodayTrendApp({
         scope,
@@ -26191,13 +27554,25 @@ ${targetInstruction}`
         initializationDraft,
         initializationOpen,
         reinitializing,
-        initializationMode
+        initializationMode,
+        detailById,
+        loadingDetailIds,
+        retentionRevisions,
+        retentionSaving,
+        retentionDraft,
+        diagnosticCopyStatus
       });
+      const focusSelector = pendingFocusSelector;
+      pendingFocusSelector = "";
+      restoreFocus(focusSelector, epoch);
       return true;
     };
     const report = (cause) => {
-      if (destroyed) return;
-      error = generationErrorMessage(cause);
+      if (destroyed || cause?.name === "AbortError") return;
+      const code = /^TT_[A-Z0-9_]+$/.test(String(cause?.code || "")) ? String(cause.code) : "";
+      error = { message: generationErrorMessage(cause), code };
+      diagnosticCopyStatus = "";
+      pendingFocusSelector = code === "TT_RETENTION_SETTINGS_INVALID" ? 'form[data-today-trend-form="retention-settings"] input:invalid' : code === "TT_SETTINGS_REVISION_CONFLICT" ? ".pm-today-trend-error" : "";
       container.innerHTML = renderTodayTrendApp({
         scope: lastScope,
         presets: lastPresets,
@@ -26209,8 +27584,16 @@ ${targetInstruction}`
         initializationDraft,
         initializationOpen,
         reinitializing,
-        initializationMode
+        initializationMode,
+        detailById,
+        loadingDetailIds,
+        retentionRevisions,
+        retentionSaving,
+        retentionDraft,
+        diagnosticCopyStatus
       });
+      restoreFocus(pendingFocusSelector, renderEpoch);
+      pendingFocusSelector = "";
     };
     const rerender = (view) => render(view).catch(report);
     const generationChanged = (snapshot) => {
@@ -26257,12 +27640,12 @@ ${targetInstruction}`
     };
     const regenerateRule = async (rule) => {
       if (typeof deps.regenerateTodayTrendRule !== "function") throw new Error("\u6A21\u5757\u89C4\u5219\u91CD\u65B0\u751F\u6210\u80FD\u529B\u4E0D\u53EF\u7528");
-      error = "";
+      error = null;
       await deps.regenerateTodayTrendRule(rule);
       return rerender();
     };
     const generate = async (module, itemId, options2 = {}) => {
-      error = "";
+      error = null;
       await render();
       try {
         await (module ? deps.generateTodayTrendModule?.(module, itemId, options2) : deps.generateTodayTrend?.({}));
@@ -26288,6 +27671,7 @@ ${targetInstruction}`
       render: rerender,
       onGenerate: (module) => generate(module),
       onRefresh: (module, itemId, options2) => generate(module, itemId, options2),
+      onLoadDetail: loadDetail,
       onSaveRule: saveRule,
       onRegenerateRule: regenerateRule,
       onRuleEditorStateChange: setRuleEditorState,
@@ -26296,7 +27680,7 @@ ${targetInstruction}`
     const openInitialization = ({ replace = false } = {}) => {
       const preset = replace ? lastPresets.find((item) => item.id === lastScope?.presetId) : null;
       initializationDraft = preset ? { presetName: preset.name, ...preset.source } : { includeExistingChat: true };
-      error = "";
+      error = null;
       settings = false;
       initializationOpen = true;
       reinitializing = replace;
@@ -26317,16 +27701,17 @@ ${targetInstruction}`
       }
       if (button.dataset.action === "today-trend-close-settings") {
         settings = false;
+        retentionDraft = null;
         rerender();
       }
       if (button.dataset.action === "today-trend-use-preset") {
         initializationMode = "reuse";
-        error = "";
+        error = null;
         rerender();
       }
       if (button.dataset.action === "today-trend-create-preset") {
         initializationMode = "create";
-        error = "";
+        error = null;
         rerender();
       }
       if (["today-trend-open-world", "today-trend-open-reputation", "today-trend-open-factions", "today-trend-open-dynamics"].includes(button.dataset.action)) settings = false;
@@ -26350,8 +27735,27 @@ ${targetInstruction}`
         initializing = false;
         initializationOpen = false;
         reinitializing = false;
-        error = "";
+        error = null;
         rerender();
+      }
+      if (button.dataset.action === "today-trend-copy-diagnostic-code") {
+        const code = /^TT_[A-Z0-9_]+$/.test(String(button.dataset.code || "")) ? String(button.dataset.code) : "";
+        if (!code) return;
+        const write = globalThis.navigator?.clipboard?.writeText;
+        if (typeof write !== "function") {
+          diagnosticCopyStatus = "\u590D\u5236\u5931\u8D25\uFF1A\u5F53\u524D\u73AF\u5883\u4E0D\u652F\u6301\u526A\u8D34\u677F\u3002";
+          rerender();
+          return;
+        }
+        Promise.resolve(write.call(globalThis.navigator.clipboard, code)).then(() => {
+          if (destroyed) return;
+          diagnosticCopyStatus = "\u8BCA\u65AD\u7801\u5DF2\u590D\u5236\u3002";
+          rerender();
+        }).catch(() => {
+          if (destroyed) return;
+          diagnosticCopyStatus = "\u590D\u5236\u5931\u8D25\uFF0C\u8BF7\u624B\u52A8\u9009\u62E9\u8BCA\u65AD\u7801\u3002";
+          rerender();
+        });
       }
       if (button.dataset.action === "today-trend-delete-preset") {
         const presetId = button.closest?.("form")?.querySelector?.('[name="presetId"]')?.value;
@@ -26370,7 +27774,7 @@ ${targetInstruction}`
         const taskAbort = new AbortController();
         initAbort = taskAbort;
         initializing = true;
-        error = "";
+        error = null;
         rerender();
         deps.initializeTodayTrend({ ...initializationDraft, presetId: reinitializing ? lastScope?.presetId : "", signal: taskAbort.signal }).then(() => {
           if (taskAbort.signal.aborted || initAbort !== taskAbort) return;
@@ -26406,9 +27810,55 @@ ${targetInstruction}`
           return deps.saveTodayTrendSettings({ presetId, operation: { ...currentScope?.operation, mode: data.get("mode"), intervalFloors: Number(data.get("intervalFloors")) }, injection: { enabled: data.get("injectionEnabled") === "on", minimalUi: data.get("minimalUi") === "on" } });
         }).then((committed) => {
           if (!committed) return;
+          retentionDraft = null;
           settings = false;
           return rerender();
         }).catch(report);
+      }
+      if (form.dataset.todayTrendForm === "retention-settings") {
+        event.preventDefault();
+        if (retentionSaving) return;
+        if (typeof deps.saveTodayTrendRetentionSettings !== "function") return report(new Error("\u5F52\u6863\u4FDD\u7559\u8BBE\u7F6E\u4FDD\u5B58\u80FD\u529B\u4E0D\u53EF\u7528"));
+        const storageId = deps.getStorageId();
+        const submittedDraft = {
+          archivedDetailLatestEventCount: String(data.get("archivedDetailLatestEventCount") || ""),
+          archivedDetailRetentionFloors: String(data.get("archivedDetailRetentionFloors") || "")
+        };
+        const epoch = ++retentionSaveEpoch;
+        retentionSaving = true;
+        retentionDraft = submittedDraft;
+        error = null;
+        rerender();
+        Promise.resolve(deps.saveTodayTrendRetentionSettings({
+          storageId,
+          ...submittedDraft,
+          expectedScopeRevision: Number(data.get("expectedScopeRevision")),
+          expectedSettingsRevision: Number(data.get("expectedSettingsRevision"))
+        })).then(async (committed) => {
+          if (!committed || destroyed || epoch !== retentionSaveEpoch || deps.getStorageId() !== storageId) return false;
+          await deps.reloadTodayTrendStore?.();
+          if (destroyed || epoch !== retentionSaveEpoch || deps.getStorageId() !== storageId) return false;
+          retentionRevisions = committed.revisions || null;
+          retentionDraft = null;
+          error = null;
+          return rerender();
+        }).catch(async (cause) => {
+          if (destroyed || epoch !== retentionSaveEpoch || deps.getStorageId() !== storageId || cause?.name === "AbortError") return;
+          if (cause?.code === "TT_SETTINGS_REVISION_CONFLICT") {
+            try {
+              await deps.reloadTodayTrendStore?.();
+              if (destroyed || epoch !== retentionSaveEpoch || deps.getStorageId() !== storageId) return;
+              retentionRevisions = await deps.getTodayTrendRetentionSettingsState?.(storageId) || null;
+              lastScope = await uiScope(storageId);
+            } catch {
+            }
+          }
+          report(cause);
+        }).finally(() => {
+          if (destroyed || epoch !== retentionSaveEpoch) return;
+          retentionSaving = false;
+          rerender();
+        });
       }
     };
     container.addEventListener("click", click, true);
@@ -26418,6 +27868,7 @@ ${targetInstruction}`
       if (destroyed) return false;
       destroyed = true;
       completedReloadEpoch += 1;
+      retentionSaveEpoch += 1;
       renderEpoch += 1;
       initAbort?.abort("today-trend-page-destroyed");
       deps.cancelTodayTrendInitialization?.("today-trend-page-destroyed");
@@ -26442,9 +27893,10 @@ ${targetInstruction}`
       if (!container.addEventListener) {
         const storageId = deps.getStorageId();
         const store = await deps.getTodayTrendStore?.();
+        const scope = await (typeof deps.getTodayTrendUiScope === "function" ? deps.getTodayTrendUiScope(storageId) : store?.scopes?.[storageId] || null);
         if (phoneWindow !== state.phoneWindow || !container.isConnected) return false;
         container.innerHTML = renderTodayTrendApp({
-          scope: store?.scopes?.[storageId] || null,
+          scope,
           currentFloor: deps.getTodayTrendCurrentFloor?.()
         });
         return true;

@@ -293,7 +293,7 @@ export function createTodayTrendGenerationController({
             const context = await gather({ ...input, getCtx, worldBookNames: input.preset.source?.worldBookNames,
                 includeExistingChat: input.preset.source?.includeExistingChat, userRequirements: input.preset.source?.userRequirements });
             assertActive(input.signal);
-            const prompts = buildGeneration({ context, preset: input.preset, scope: input.scope,
+            const prompts = buildGeneration({ context, preset: input.preset, scope: input.scope, promptScope: input.promptScope,
                 assistantCount: input.assistantCount, allowIncident: input.allowIncident === true, target: input.target,
                 storyDate: input.storyDate ?? null, summaryOnly: input.summaryOnly === true });
             input.onPhase?.('generating');
