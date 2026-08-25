@@ -2445,6 +2445,9 @@ await assert.rejects(() => createTodayTrendGenerationController({ getCtx: () => 
 '规则重生成不得接受协议外字段');
 assert.match(generationPrompts.systemPrompt, /顶层必须且只能有 world、reputation、factions、dynamics、history 五个键/, '后续生成必须锁定五键协议');
 assert.match(generationPrompts.systemPrompt, /键集合必须严格等于 eventId、stages、daySummaries、periodSummaries/, 'history event 必须明确禁止混入 dynamics 字段');
+assert.match(generationPrompts.systemPrompt, /stages 必须是非空字符串数组[\s\S]*禁止输出 id、kind、text、time、timeLabel 或任何对象/,
+    '事件追踪生成提示词必须区分 v2 输入投影与 v1 字符串 stages 输出契约');
+
 assert.match(generationPrompts.systemPrompt, /可信 story_date 缺失、未前进、或该 event 没有开放日期时，daySummaries 必须为 \[\]/, '手动同日或无可信日期生成必须明确禁止伪造封日摘要');
 assert.match(generationPrompts.systemPrompt, /不允许新建 type 为 incident/, '未命中突发投骰时必须禁止新增事故');
 assert.match(generationPrompts.systemPrompt, /地下线升级必须归档旧事件，再新建关联的 incident/, '生成提示词必须禁止原地改写地下线类型');
@@ -2500,12 +2503,53 @@ for (const [type, label] of [['rumor', '流言'], ['underground', '地下线']])
     const disabledScope = structuredClone(valid.scopes.chat);
 
     disabledScope.dynamicsSettings[type].enabled = false;
+
     await assert.rejects(() => createTodayTrendGenerationController({ getCtx: () => ({}), gather: async () => collectedContext,
         callAI: async () => JSON.stringify({ world: null, reputation: null, factions: null, dynamics: {
             active: [...valid.scopes.chat.dynamics.active, { ...valid.scopes.chat.dynamics.active[0], id: `new-${type}`, type, title: `新${label}` }], archived: valid.scopes.chat.dynamics.archived,
         } }),
     }).generate({ scope: disabledScope, preset: valid.presets.preset }), new RegExp(`本轮未允许生成${label}`), `关闭${label}开关时生成结果不得新增${label}`);
 }
+
+const fullUpdateController = createTodayTrendGenerationController({
+    getCtx: () => ({}), gather: async () => collectedContext,
+    callAI: async () => JSON.stringify({
+        world: { items: [{ id: 'world', name: '节目风向', summary: '全量更新世界态势' }] },
+        reputation: { circles: [{ id: 'judge', name: '评委团', scope: '现场评审', status: 'trust', evaluation: '全量更新个人风评' }] },
+        factions: [{ ...valid.scopes.chat.factions[0], summary: '全量更新势力图谱' }],
+        dynamics: {
+            active: [{ ...valid.scopes.chat.dynamics.active[0], stageLabel: '服务中', latestStage: '全量更新事件阶段',
+                stages: [...valid.scopes.chat.dynamics.active[0].stages, '全量更新事件阶段'] }],
+            archived: valid.scopes.chat.dynamics.archived,
+        },
+    }),
+});
+const fullyUpdated = await fullUpdateController.generate({ scope: valid.scopes.chat, preset: valid.presets.preset, assistantCount: 8 });
+assert.equal(fullyUpdated.scope.world.items[0].summary, '全量更新世界态势', '手动全量生成必须允许更新世界态势');
+assert.equal(fullyUpdated.scope.reputation.circles[0].evaluation, '全量更新个人风评', '手动全量生成必须允许更新个人风评');
+assert.equal(fullyUpdated.scope.factions[0].summary, '全量更新势力图谱', '手动全量生成必须允许更新势力图谱');
+assert.equal(fullyUpdated.scope.dynamics.active[0].latestStage, '全量更新事件阶段', '手动全量生成必须允许更新事件追踪');
+await assert.rejects(() => createTodayTrendGenerationController({
+    getCtx: () => ({}), gather: async () => collectedContext,
+    callAI: async () => JSON.stringify({ world: null, reputation: null, factions: null, dynamics: {
+        active: [{ ...valid.scopes.chat.dynamics.active[0], stages: [{ text: '错误的结构化阶段' }] }],
+        archived: valid.scopes.chat.dynamics.archived,
+    } }),
+}).generate({ scope: valid.scopes.chat, preset: valid.presets.preset }), /事件追踪\.active\[0\]\.stages必须是非空字符串数组/,
+'结构化 StageProjection 不得进入 v1 dynamics 输出契约或退化为泛化空阶段错误');
+
+for (const stages of [null, [], [null], ['   ']]) {
+    await assert.rejects(() => createTodayTrendGenerationController({
+        getCtx: () => ({}), gather: async () => collectedContext,
+        callAI: async () => JSON.stringify({ world: null, reputation: null, factions: null, dynamics: {
+            active: [{ ...valid.scopes.chat.dynamics.active[0], stages }],
+            archived: valid.scopes.chat.dynamics.archived,
+        } }),
+    }).generate({ scope: valid.scopes.chat, preset: valid.presets.preset }), /事件追踪\.active\[0\]\.stages必须是非空字符串数组/,
+    '无效事件阶段数组必须在提交前以字段路径拒绝');
+}
+
+
 
 const activeRumorGenerationScope = structuredClone(valid.scopes.chat);
 activeRumorGenerationScope.dynamics.active.push({ ...activeRumorGenerationScope.dynamics.archived[0], id: 'generation-rumor', lifecycle: 'active', stageLabel: '流传中', outcome: null, finalResult: null, relatedEventIds: [] });

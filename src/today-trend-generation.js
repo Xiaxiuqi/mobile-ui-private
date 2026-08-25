@@ -20,6 +20,11 @@ const arrayOf = (value, verify, label) => {
     if (!Array.isArray(value)) throw new Error(`今日风向生成${label}必须是数组`);
     value.forEach(verify);
 };
+const nonEmptyTextArray = (value, label) => {
+    if (!Array.isArray(value) || value.length === 0 || value.some(item => typeof item !== 'string' || !item.trim())) {
+        throw new Error(`今日风向生成${label}必须是非空字符串数组`);
+    }
+};
 const verifyRelation = value => keysOnly(value, ['status', 'evaluation'], '关系');
 const verifyWorld = value => {
     keysOnly(value, ['items'], '世界态势');
@@ -36,8 +41,12 @@ const verifyFactions = value => arrayOf(value, faction => {
 }, '势力图谱');
 const verifyDynamics = value => {
     keysOnly(value, ['active', 'archived'], '事件追踪');
-    for (const bucket of ['active', 'archived']) arrayOf(value[bucket], event => keysOnly(event,
-        ['id', 'type', 'lifecycle', 'title', 'stageLabel', 'origin', 'participants', 'stages', 'latestStage', 'outcome', 'finalResult', 'relatedEventIds', 'createdAt', 'updatedAt'], '动态事件'), '动态事件');
+    for (const bucket of ['active', 'archived']) arrayOf(value[bucket], (event, index) => {
+        const label = `事件追踪.${bucket}[${index}]`;
+        keysOnly(event,
+            ['id', 'type', 'lifecycle', 'title', 'stageLabel', 'origin', 'participants', 'stages', 'latestStage', 'outcome', 'finalResult', 'relatedEventIds', 'createdAt', 'updatedAt'], label);
+        nonEmptyTextArray(event.stages, `${label}.stages`);
+    }, '动态事件');
 };
 
 const withoutDirectParentChildLinks = factions => {
