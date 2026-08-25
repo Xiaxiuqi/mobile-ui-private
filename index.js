@@ -26424,16 +26424,13 @@ ${targetInstruction}`
           }
           if (syncedFloor === task.floor) {
             const latestCheckpoint = currentPayload.generationSnapshots?.reduce((latest, item) => item.restoreCapability === "full" && item.assistantCount < task.floor && (!latest || item.assistantCount > latest.assistantCount) ? item : latest, null);
-            if (!latestCheckpoint) {
-              throw Object.assign(new Error("\u5F53\u524D\u5DF2\u540C\u6B65\u697C\u5C42\u7F3A\u5C11\u66F4\u65E9\u7684\u5B8C\u6574 canonical checkpoint\uFF0C\u62D2\u7EDD\u624B\u52A8\u66F4\u65B0"), {
-                code: "TT_REROLL_CHECKPOINT_MISSING"
-              });
+            if (latestCheckpoint) {
+              canonicalRerollSource = rollbackTodayTrendV2Scope(canonical3, id2, latestCheckpoint.assistantCount);
+              scope = buildReadOnlyShadow(canonicalRerollSource).scopes[id2];
+              rerollFromAssistantCount = latestCheckpoint.assistantCount;
+              expectedCanonicalStoreRevision = canonical3.globalEnvelope.revision;
+              expectedCanonicalScopeRevision = canonical3.globalEnvelope.payload.scopes[id2].revision;
             }
-            canonicalRerollSource = rollbackTodayTrendV2Scope(canonical3, id2, latestCheckpoint.assistantCount);
-            scope = buildReadOnlyShadow(canonicalRerollSource).scopes[id2];
-            rerollFromAssistantCount = latestCheckpoint.assistantCount;
-            expectedCanonicalStoreRevision = canonical3.globalEnvelope.revision;
-            expectedCanonicalScopeRevision = canonical3.globalEnvelope.payload.scopes[id2].revision;
           }
         }
         const preset = scope && source?.presets?.[scope.presetId];

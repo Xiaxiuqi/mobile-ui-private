@@ -270,16 +270,13 @@ export function createTodayTrendScheduler({
                     const latestCheckpoint = currentPayload.generationSnapshots?.reduce((latest, item) => item.restoreCapability === 'full'
                         && item.assistantCount < task.floor && (!latest || item.assistantCount > latest.assistantCount)
                         ? item : latest, null);
-                    if (!latestCheckpoint) {
-                        throw Object.assign(new Error('当前已同步楼层缺少更早的完整 canonical checkpoint，拒绝手动更新'), {
-                            code: 'TT_REROLL_CHECKPOINT_MISSING',
-                        });
+                    if (latestCheckpoint) {
+                        canonicalRerollSource = rollbackTodayTrendV2Scope(canonical, id, latestCheckpoint.assistantCount);
+                        scope = buildReadOnlyShadow(canonicalRerollSource).scopes[id];
+                        rerollFromAssistantCount = latestCheckpoint.assistantCount;
+                        expectedCanonicalStoreRevision = canonical.globalEnvelope.revision;
+                        expectedCanonicalScopeRevision = canonical.globalEnvelope.payload.scopes[id].revision;
                     }
-                    canonicalRerollSource = rollbackTodayTrendV2Scope(canonical, id, latestCheckpoint.assistantCount);
-                    scope = buildReadOnlyShadow(canonicalRerollSource).scopes[id];
-                    rerollFromAssistantCount = latestCheckpoint.assistantCount;
-                    expectedCanonicalStoreRevision = canonical.globalEnvelope.revision;
-                    expectedCanonicalScopeRevision = canonical.globalEnvelope.payload.scopes[id].revision;
                 }
             }
             const preset = scope && source?.presets?.[scope.presetId];

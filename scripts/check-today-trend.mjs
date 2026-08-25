@@ -5147,7 +5147,7 @@ assert.equal(phase9SchedulerRerollStore.globalEnvelope.payload.scopes.chat.paylo
     'scheduler F 楼层重新生成结果', 'scheduler reroll 必须提交新的 F 结果');
 assert.equal(phase9SchedulerRerollStore.globalEnvelope.payload.scopes.chat.payload.generationSnapshots.at(-1).rerollFromAssistantCount,
     46, 'scheduler reroll 必须持久化实际 F-1 checkpoint');
-const phase9MissingCheckpointStore = structuredClone(phase9AtF);
+let phase9MissingCheckpointStore = structuredClone(migratedValidV2);
 const phase9StaleRerollBase = structuredClone(phase9SchedulerRerollStore);
 const phase9StaleRerollRevision = phase9StaleRerollBase.globalEnvelope.revision;
 const phase9StaleRerollScopeRevision = phase9StaleRerollBase.globalEnvelope.payload.scopes.chat.revision;
@@ -5165,29 +5165,47 @@ await assert.rejects(() => phase9StaleRerollCommitter.commitStore(store => store
 }), error => error?.code === 'TT_REROLL_STALE_SCOPE',
 'AI 期间 canonical revision 变化时，reroll 必须在 candidate/journal 写入前 fail-closed');
 assert.equal(phase9StaleRerollWrites, 0, 'reroll stale revision 必须保持零持久化写入');
-
-
 phase9MissingCheckpointStore.globalEnvelope.payload.scopes.chat.payload.operation = {
     ...phase9MissingCheckpointStore.globalEnvelope.payload.scopes.chat.payload.operation,
     lastSuccessfulAssistantCount: 47, lastSuccessfulRunAt: 47,
 };
 phase9MissingCheckpointStore.globalEnvelope.payload.scopes.chat.payload.generationSnapshots = phase9MissingCheckpointStore
-    .globalEnvelope.payload.scopes.chat.payload.generationSnapshots.filter(snapshot => snapshot.assistantCount === 47);
+    .globalEnvelope.payload.scopes.chat.payload.generationSnapshots.map(snapshot => ({
+        ...structuredClone(snapshot), restoreCapability: 'projection-only', checkpointRef: null, rerollFromAssistantCount: null,
+    }));
 normalizeTodayTrendV2Store(phase9MissingCheckpointStore);
 let phase9MissingCheckpointCalls = 0;
+let phase9MissingCheckpointCommitted = false;
 const phase9MissingCheckpointScheduler = createTodayTrendScheduler({
-    controller: { generate: async () => { phase9MissingCheckpointCalls += 1; throw new Error('缺 checkpoint 不得调用 AI'); } },
+    controller: { generate: async ({ scope }) => {
+        phase9MissingCheckpointCalls += 1;
+        const refreshed = structuredClone(scope);
+        refreshed.world.items[0].summary = '无旧 checkpoint 时仍可刷新当前楼层';
+        return { scope: refreshed, history: { events: [] } };
+    } },
     committer: {
         supportsCanonical: true, invalidateCommits: () => {},
         loadCanonical: async () => structuredClone(phase9MissingCheckpointStore),
-        commitStore: async () => { throw new Error('缺 checkpoint 不得提交'); },
+        commitStore: async (mutate, _task, options) => {
+            assert.deepEqual(options, { canonical: true, scopeId: 'chat' },
+                '无旧 checkpoint 的同楼层刷新不得伪造 reroll revision fence，但仍必须走 canonical commit');
+            phase9MissingCheckpointCommitted = true;
+            phase9MissingCheckpointStore = await mutate(structuredClone(phase9MissingCheckpointStore));
+            return buildReadOnlyShadow(phase9MissingCheckpointStore);
+        },
     },
     getStore: async () => buildReadOnlyShadow(phase9MissingCheckpointStore),
     getStorageId: () => 'chat', getFloor: () => 47,
 });
-await assert.rejects(() => phase9MissingCheckpointScheduler.manual({ floor: 47 }),
-    error => error?.code === 'TT_REROLL_CHECKPOINT_MISSING', '已同步 F 缺少严格更早 full checkpoint 必须 fail-closed');
-assert.equal(phase9MissingCheckpointCalls, 0, '缺少 reroll checkpoint 时不得调用 AI');
+await phase9MissingCheckpointScheduler.manual({ floor: 47 });
+assert.equal(phase9MissingCheckpointCalls, 1, '无旧 checkpoint 的同楼层刷新仍必须只调用一次 AI');
+assert.equal(phase9MissingCheckpointCommitted, true, '无旧 checkpoint 的同楼层刷新必须提交 canonical candidate');
+assert.equal(phase9MissingCheckpointStore.globalEnvelope.payload.scopes.chat.payload.world.items[0].summary,
+    '无旧 checkpoint 时仍可刷新当前楼层', '无旧 checkpoint 的手动更新必须以当前 canonical scope 刷新');
+assert.equal(phase9MissingCheckpointStore.globalEnvelope.payload.scopes.chat.payload.generationSnapshots.at(-1).assistantCount,
+    47, '同楼层刷新必须重新写入当前楼层 snapshot');
+assert.equal(phase9MissingCheckpointStore.globalEnvelope.payload.scopes.chat.payload.generationSnapshots.at(-1).rerollFromAssistantCount,
+    null, '同楼层刷新不得伪造 reroll 基线');
 
 const phase9RerollSagaInitial = structuredClone(phase9AtF);
 phase9RerollSagaInitial.globalEnvelope.payload.scopes.chat.payload.operation = {
