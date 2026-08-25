@@ -2448,7 +2448,9 @@ assert.match(generationPrompts.systemPrompt, /键集合必须严格等于 eventI
 assert.match(generationPrompts.systemPrompt, /stages 必须是非空字符串数组[\s\S]*禁止输出 id、kind、text、time、timeLabel 或任何对象/,
     '事件追踪生成提示词必须区分 v2 输入投影与 v1 字符串 stages 输出契约');
 
-assert.match(generationPrompts.systemPrompt, /可信 story_date 缺失、未前进、或该 event 没有开放日期时，daySummaries 必须为 \[\]/, '手动同日或无可信日期生成必须明确禁止伪造封日摘要');
+assert.match(generationPrompts.systemPrompt, /daySummaries 的判定必须逐 event 独立执行/, '封日摘要判定不得受其他 event 的开放日期影响');
+assert.match(generationPrompts.systemPrompt, /当前没有开放 live-stage、可信 story_date 缺失或未前进时，必须输出 daySummaries:\[\]，即使该 event 本轮追加了 stages 也禁止生成 daySummary/,
+    '无开放 live-stage 的 event 即使本轮追加阶段也必须明确禁止伪造封日摘要');
 assert.match(generationPrompts.systemPrompt, /不允许新建 type 为 incident/, '未命中突发投骰时必须禁止新增事故');
 assert.match(generationPrompts.systemPrompt, /地下线升级必须归档旧事件，再新建关联的 incident/, '生成提示词必须禁止原地改写地下线类型');
 assert.match(generationPrompts.systemPrompt, /A\.parentId 等于 B\.id[\s\S]*保留 parentId 并删除对应外部关联[\s\S]*只针对直接父子/, '增量提示词必须声明直接父子与外部关联互斥');
