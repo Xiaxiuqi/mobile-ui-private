@@ -1,7 +1,7 @@
 import { appendTodayTrendGenerationSnapshot, rollbackTodayTrendScope } from './today-trend-model.js';
 import { calendarReferenceDate, calendarScopeFor, formatCalendarDate } from './calendar-model.js';
 import {
-    applyTodayTrendGenerationToV2, buildReadOnlyShadow, rollbackTodayTrendV2Scope,
+    applyTodayTrendGenerationToV2, applyTodayTrendRerollToV2, buildReadOnlyShadow, rollbackTodayTrendV2Scope,
 } from './today-trend-v2-model.js';
 
 const cancelled = () => Object.assign(new Error('今日风向生成已取消'), { name: 'AbortError' });
@@ -248,7 +248,40 @@ export function createTodayTrendScheduler({
             if (!isActive(task)) throw cancelled();
             const source = await getStore();
             if (!isActive(task)) throw cancelled();
-            const scope = source?.scopes?.[id];
+            const useCanonical = committer.supportsCanonical === true;
+            const originalScope = source?.scopes?.[id];
+            let scope = originalScope;
+            let canonicalRerollSource = null;
+            let rerollFromAssistantCount = null;
+            let expectedCanonicalStoreRevision = null;
+            let expectedCanonicalScopeRevision = null;
+            if (useCanonical && kind === 'manual' && target === null && typeof committer.loadCanonical === 'function') {
+                const canonical = await committer.loadCanonical();
+                if (!isActive(task)) throw cancelled();
+                const currentPayload = canonical?.globalEnvelope?.payload?.scopes?.[id]?.payload;
+                if (!currentPayload) throw Object.assign(new Error('当前聊天尚未初始化今日风向'), { code: 'TT_V2_SCHEMA_INVALID' });
+                const syncedFloor = currentPayload.operation?.lastSuccessfulAssistantCount;
+                if (Number.isInteger(syncedFloor) && syncedFloor > task.floor) {
+                    throw Object.assign(new Error('当前聊天楼层早于已同步 Today Trend，拒绝覆盖较新的 canonical 状态'), {
+                        code: 'TT_REROLL_CHECKPOINT_INVALID',
+                    });
+                }
+                if (syncedFloor === task.floor) {
+                    const latestCheckpoint = currentPayload.generationSnapshots?.reduce((latest, item) => item.restoreCapability === 'full'
+                        && item.assistantCount < task.floor && (!latest || item.assistantCount > latest.assistantCount)
+                        ? item : latest, null);
+                    if (!latestCheckpoint) {
+                        throw Object.assign(new Error('当前已同步楼层缺少更早的完整 canonical checkpoint，拒绝手动更新'), {
+                            code: 'TT_REROLL_CHECKPOINT_MISSING',
+                        });
+                    }
+                    canonicalRerollSource = rollbackTodayTrendV2Scope(canonical, id, latestCheckpoint.assistantCount);
+                    scope = buildReadOnlyShadow(canonicalRerollSource).scopes[id];
+                    rerollFromAssistantCount = latestCheckpoint.assistantCount;
+                    expectedCanonicalStoreRevision = canonical.globalEnvelope.revision;
+                    expectedCanonicalScopeRevision = canonical.globalEnvelope.payload.scopes[id].revision;
+                }
+            }
             const preset = scope && source?.presets?.[scope.presetId];
             if (!scope || !preset) {
                 removeObservation(id);
@@ -258,7 +291,7 @@ export function createTodayTrendScheduler({
             const configuredProbability = scope.dynamicsSettings?.incident?.enabled
                 ? scope.dynamicsSettings.incident.probability : 0;
             const effectiveIncidentProbability = incidentProbability === undefined ? configuredProbability : incidentProbability;
-            const promptScope = getPromptScope ? await getPromptScope(id) : null;
+            const promptScope = getPromptScope ? await getPromptScope(id, canonicalRerollSource) : null;
             if (getPromptScope && typeof promptScope !== 'string') throw new Error('今日风向 canonical prompt scope 不可用');
             if (!isActive(task)) throw cancelled();
             const generated = await controller.generate({
@@ -271,7 +304,6 @@ export function createTodayTrendScheduler({
             if (!isActive(task)) throw cancelled();
             setPhase('committing', null);
             const commitStartedAt = now();
-            const useCanonical = committer.supportsCanonical === true;
             const committed = await committer.commitStore(store => {
                 const facade = useCanonical ? buildReadOnlyShadow(store) : store;
                 const current = facade.scopes[id];
@@ -280,7 +312,7 @@ export function createTodayTrendScheduler({
                 if (!current || current.presetId !== preset.id || currentPreset?.revision !== preset.revision) {
                     throw new Error('今日风向资料已切换，迟到结果已丢弃');
                 }
-                if (JSON.stringify(current) !== JSON.stringify(scope)) {
+                if (JSON.stringify(current) !== JSON.stringify(originalScope)) {
                     throw new Error('今日风向资料在生成期间已修改，迟到结果已丢弃');
                 }
                 if (trustedStoryDateFor(id) !== trustedStoryDate) throw staleCalendar();
@@ -290,6 +322,12 @@ export function createTodayTrendScheduler({
                         ...current.operation, lastSuccessfulAssistantCount: task.floor, lastSuccessfulRunAt: generatedAt,
                     }, injection: current.injection, generationSnapshots: current.generationSnapshots };
                 if (useCanonical) {
+                    if (rerollFromAssistantCount !== null) {
+                        return applyTodayTrendRerollToV2(store, id, rerollFromAssistantCount,
+                            nextScope, generated.history ?? { events: [] }, {
+                                trustedStoryDate, assistantCount: task.floor, generatedAt,
+                            });
+                    }
                     return applyTodayTrendGenerationToV2(store, id, nextScope, generated.history ?? { events: [] }, {
                         trustedStoryDate, assistantCount: task.floor, generatedAt, snapshot: !task.target,
                     });
@@ -299,7 +337,13 @@ export function createTodayTrendScheduler({
                 }
                 facade.scopes[id] = task.target ? nextScope : appendTodayTrendGenerationSnapshot(nextScope, task.floor, generatedAt);
                 return store;
-            }, { active: () => isActive(task) }, { canonical: useCanonical, scopeId: id });
+            }, { active: () => isActive(task) }, {
+                canonical: useCanonical, scopeId: id,
+                ...(rerollFromAssistantCount === null ? {} : {
+                    expectedStoreRevision: expectedCanonicalStoreRevision,
+                    expectedScopeRevision: expectedCanonicalScopeRevision,
+                }),
+            });
             if (!committed || !isActive(task)) throw cancelled();
             const remainingFeedback = Math.max(0, commitFeedbackMs - Math.max(0, now() - commitStartedAt));
             if (remainingFeedback > 0) await wait(remainingFeedback);

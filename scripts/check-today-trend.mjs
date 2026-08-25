@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
+import { installDiagnosticApi } from '../src/diagnostic.js';
 import { getLastMessageId as resolveLastMessageId } from '../src/host-context.js';
 import { installTodayTrend } from '../src/today-trend.js';
 import { createTodayTrendPhoneController } from '../src/today-trend-phone-controller.js';
@@ -19,7 +20,7 @@ import {
     normalizeTodayTrendV2Authority, normalizeTodayTrendV2Envelope,
 } from '../src/today-trend-v2-authority.js';
 import {
-    applyTodayTrendGenerationToV2, buildReadOnlyShadow, diffReadOnlyShadow, evaluateTodayTrendArchivedRetention,
+    applyTodayTrendGenerationToV2, applyTodayTrendRerollToV2, buildReadOnlyShadow, diffReadOnlyShadow, evaluateTodayTrendArchivedRetention,
     copyTodayTrendV2ScopeForBranch, extractArchivedFixedCore, migrateTodayTrendStoreToV2,
     normalizeTodayTrendStageProjection, normalizeTodayTrendV2Candidate, normalizeTodayTrendV2Store,
     resolveTodayTrendV2DetailForTarget, resolveTodayTrendV2LatestStage, resolveTodayTrendV2RetentionSettingsState,
@@ -27,7 +28,7 @@ import {
     validateTodayTrendV2Transition,
 } from '../src/today-trend-v2-model.js';
 import {
-    applyTodayTrendHistoryProducer, normalizeTodayTrendHistoryProducer,
+    appendTodayTrendCanonicalSnapshot, applyTodayTrendHistoryProducer, normalizeTodayTrendHistoryProducer,
 } from '../src/today-trend-history-reducer.js';
 import { createTodayTrendCommitter } from '../src/today-trend-commit.js';
 import { createTodayTrendJournal, normalizeTodayTrendJournal, todayTrendStoreDigest } from '../src/today-trend-journal.js';
@@ -86,6 +87,39 @@ try {
 const createTodayTrendScheduler = options => createTodayTrendSchedulerBase({ commitFeedbackMs: 0, ...options });
 
 assert.equal(TODAY_TREND_VERSION, 1);
+const originalDiagnosticWindow = globalThis.window;
+globalThis.window = { __pmDiagEnabled: true };
+try {
+    let diagnosticManualRuns = 0;
+    assert.equal(installDiagnosticApi({
+        runtime: {}, getCtx: () => null, getStorageId: () => 'diagnostic-chat',
+        getCalendarStore: () => ({ scopes: { 'diagnostic-chat': { baseDate: '2025-04-15' } } }),
+        getTodayTrendStore: async () => ({ scopes: { 'diagnostic-chat': {
+            operation: { lastSuccessfulAssistantCount: 42 },
+            dynamics: { active: [{ stages: ['事件标题和阶段正文均不得泄露'] }], archived: [{ stages: ['另一段事件正文'] }] },
+        } } }),
+        getTodayTrendGenerationState: () => ({ phase: 'failed', lastError: 'TT_HISTORY_STAGE_MISMATCH 事件标题和阶段正文均不得泄露' }),
+        generateTodayTrend: async () => {
+            diagnosticManualRuns += 1;
+            throw Object.assign(new Error('事件标题和阶段正文均不得泄露'), { code: 'TT_HISTORY_STAGE_MISMATCH' });
+        },
+    }), true, 'Today Trend 诊断必须在显式开关下安装');
+    const diagnosticTrend = await window.__pmDiag.todayTrend.status();
+    assert.deepEqual(diagnosticTrend.scope, {
+        activeEventCount: 1, archivedEventCount: 1, stageCount: 2, lastSuccessfulAssistantCount: 42,
+    }, 'Today Trend 诊断只能返回聚合状态');
+    assert.deepEqual(diagnosticTrend.generation, { phase: 'failed', errorCode: 'TT_HISTORY_STAGE_MISMATCH' },
+        'Today Trend 诊断不得透传原始错误正文');
+    assert.equal(JSON.stringify(diagnosticTrend).includes('事件标题和阶段正文均不得泄露'), false,
+        'Today Trend 诊断不得泄露事件或聊天正文');
+    assert.deepEqual(await window.__pmDiag.todayTrend.runManual(), {
+        ok: false, error: { name: 'Error', code: 'TT_HISTORY_STAGE_MISMATCH', message: '事件标题和阶段正文均不得泄露' },
+    }, '控制台手动测试必须保留公开入口返回的结构化错误');
+    assert.equal(diagnosticManualRuns, 1, '控制台手动测试必须恰好调用一次公开生成入口');
+} finally {
+    if (originalDiagnosticWindow === undefined) delete globalThis.window;
+    else globalThis.window = originalDiagnosticWindow;
+}
 for (const contract of [
     installTodayTrend, normalizeTodayTrendStore, createTodayTrendStorage, createTodayTrendV2Authority, createTodayTrendCommitter,
     normalizeTodayTrendStageProjection, normalizeTodayTrendV2Candidate, resolveTodayTrendV2LatestStage,
@@ -2410,6 +2444,8 @@ await assert.rejects(() => createTodayTrendGenerationController({ getCtx: () => 
 }).regenerateRule({ scope: valid.scopes.chat, preset: valid.presets.preset, rule: 'world' }), /今日风向规则重生成失败/,
 '规则重生成不得接受协议外字段');
 assert.match(generationPrompts.systemPrompt, /顶层必须且只能有 world、reputation、factions、dynamics、history 五个键/, '后续生成必须锁定五键协议');
+assert.match(generationPrompts.systemPrompt, /键集合必须严格等于 eventId、stages、daySummaries、periodSummaries/, 'history event 必须明确禁止混入 dynamics 字段');
+assert.match(generationPrompts.systemPrompt, /可信 story_date 缺失、未前进、或该 event 没有开放日期时，daySummaries 必须为 \[\]/, '手动同日或无可信日期生成必须明确禁止伪造封日摘要');
 assert.match(generationPrompts.systemPrompt, /不允许新建 type 为 incident/, '未命中突发投骰时必须禁止新增事故');
 assert.match(generationPrompts.systemPrompt, /地下线升级必须归档旧事件，再新建关联的 incident/, '生成提示词必须禁止原地改写地下线类型');
 assert.match(generationPrompts.systemPrompt, /A\.parentId 等于 B\.id[\s\S]*保留 parentId 并删除对应外部关联[\s\S]*只针对直接父子/, '增量提示词必须声明直接父子与外部关联互斥');
@@ -4949,21 +4985,229 @@ for (const state of phase8RemovedStates) {
 }
 assert.equal(phase8CleanedPayload.dynamics.active.some(event => event.id === phase4EventId), false, '归档治理不得产生 active detail 串线');
 
-const phase9RolledBack = rollbackTodayTrendV2Scope(phase8Cleaned, 'chat', 0);
-const phase9RolledBackPayload = phase9RolledBack.globalEnvelope.payload.scopes.chat.payload;
-assert.equal(phase9RolledBackPayload.historyRetentionState.highWaterAssistantCount, 33,
-    'canonical rollback 不得降低当前高水位');
-assert.equal(phase9RolledBackPayload.historyRetentionState.detailPoolRevision,
-    phase8CleanedPayload.historyRetentionState.detailPoolRevision,
-    'canonical rollback 不得再次触发 retention 或推进 detailPoolRevision');
-assert.deepEqual(phase9RolledBackPayload.fixedCoreBaselineByEvent, phase8CleanedPayload.fixedCoreBaselineByEvent,
-    'canonical rollback 必须按当前 archived fixed core 重建一致 baseline');
-for (const state of phase8RemovedStates) {
-    assert.equal(phase9RolledBackPayload.removableEntityStateById[state.entityId]?.state, 'removed',
-        'canonical rollback 不得复活已 removed 的实体');
-    assert.deepEqual(phase9RolledBackPayload.removableEntityTombstonesById[state.entityId], state,
-        'canonical rollback 必须保留 removed 审计 tombstone');
-}
+assert.throws(() => rollbackTodayTrendV2Scope(phase8Cleaned, 'chat', 0),
+    error => error?.code === 'TT_CANONICAL_CHECKPOINT_INCOMPLETE',
+    '旧 v2 projection-only snapshot 不得伪造完整历史，rollback 必须可诊断 fail-closed');
+
+const phase9BeforeF = applyTodayTrendGenerationToV2(
+    normalizedPhase4Available, 'chat', buildReadOnlyShadow(normalizedPhase4Available).scopes.chat,
+    { events: [] }, { assistantCount: 46, generatedAt: 46 },
+);
+const phase9FSettings = saveTodayTrendRetentionSettingsToV2(phase9BeforeF, 'chat', {
+    archivedDetailLatestEventCount: '0', archivedDetailRetentionFloors: '0',
+}, {
+    expectedScopeRevision: phase9BeforeF.globalEnvelope.payload.scopes.chat.revision, expectedSettingsRevision: 1,
+});
+const phase9FFacade = buildReadOnlyShadow(phase9FSettings).scopes.chat;
+const phase9FEvent = phase9FFacade.dynamics.active.find(event => event.id === 'service');
+phase9FFacade.dynamics.active = phase9FFacade.dynamics.active.filter(event => event.id !== 'service');
+phase9FFacade.dynamics.archived.push({
+    ...phase9FEvent, lifecycle: 'archived', outcome: 'resolved', finalResult: 'F 楼层归档', updatedAt: phase9FEvent.updatedAt + 1,
+});
+const phase9AtF = applyTodayTrendGenerationToV2(
+    phase9FSettings, 'chat', phase9FFacade, { events: [] }, { assistantCount: 47, generatedAt: 47 },
+);
+const phase9AtFPayload = phase9AtF.globalEnvelope.payload.scopes.chat.payload;
+assert.equal(phase9AtFPayload.dynamics.archived.some(event => event.id === 'service'), true, '#F 必须新增 archived event');
+assert.equal(Object.values(phase9AtFPayload.removableEntityTombstonesById).some(state => state.eventId === 'service'), true,
+    '#F retention 必须新增 tombstone');
+const phase9RestoredFMinus1 = rollbackTodayTrendV2Scope(phase9AtF, 'chat', 46);
+const phase9RestoredPayload = phase9RestoredFMinus1.globalEnvelope.payload.scopes.chat.payload;
+assert.equal(phase9RestoredPayload.dynamics.active.some(event => event.id === 'service'), true,
+    '回滚 F-1 必须恢复当时 active event');
+assert.equal(phase9RestoredPayload.dynamics.archived.some(event => event.id === 'service'), false,
+    '回滚 F-1 必须消除 #F 新增 archived event，不得保留当前 archived');
+const phase9UnorderedSnapshots = structuredClone(phase9AtF);
+phase9UnorderedSnapshots.globalEnvelope.payload.scopes.chat.payload.generationSnapshots.reverse();
+const phase9NormalizedSnapshots = normalizeTodayTrendV2Store(phase9UnorderedSnapshots)
+    .globalEnvelope.payload.scopes.chat.payload.generationSnapshots;
+assert.deepEqual(phase9NormalizedSnapshots.map(snapshot => snapshot.assistantCount), [0, 7, 46, 47],
+    'canonical normalizer 必须按 assistantCount 规范化 snapshot 顺序');
+assert.equal(rollbackTodayTrendV2Scope(phase9UnorderedSnapshots, 'chat', 46)
+    .globalEnvelope.payload.scopes.chat.payload.dynamics.active.some(event => event.id === 'service'), true,
+'乱序持久化 snapshot 的 rollback 仍必须选择目标 floor 最近 checkpoint');
+const phase9DuplicateSnapshot = structuredClone(phase9AtF);
+phase9DuplicateSnapshot.globalEnvelope.payload.scopes.chat.payload.generationSnapshots.push(
+    structuredClone(phase9DuplicateSnapshot.globalEnvelope.payload.scopes.chat.payload.generationSnapshots.at(-1)));
+assert.throws(() => normalizeTodayTrendV2Store(phase9DuplicateSnapshot), error => error?.code === 'TT_V2_SCHEMA_INVALID',
+    'canonical snapshot 不得接受重复 assistantCount');
+const phase9MissingRollbackCheckpoint = structuredClone(phase9AtF);
+phase9MissingRollbackCheckpoint.globalEnvelope.payload.scopes.chat.payload.generationSnapshots = [];
+assert.throws(() => rollbackTodayTrendV2Scope(phase9MissingRollbackCheckpoint, 'chat', 46),
+    error => error?.code === 'TT_ROLLBACK_CHECKPOINT_MISSING',
+    '聊天删除早于 retained checkpoint 窗口时必须 fail-closed，禁止静默保留较新 canonical 状态');
+const phase9SelfCertifiedRewrite = structuredClone(phase9AtF);
+const phase9SelfCertifiedPayload = phase9SelfCertifiedRewrite.globalEnvelope.payload.scopes.chat.payload;
+const phase9SelfCertifiedArchived = phase9SelfCertifiedPayload.dynamics.archived.find(event => event.id === 'service');
+phase9SelfCertifiedArchived.title = '伪造 checkpoint 的归档标题';
+phase9SelfCertifiedPayload.fixedCoreBaselineByEvent.service = extractArchivedFixedCore(phase9SelfCertifiedArchived);
+phase9SelfCertifiedRewrite.globalEnvelope.payload.scopes.chat.payload = appendTodayTrendCanonicalSnapshot(
+    phase9SelfCertifiedPayload, 48, 48, phase9SelfCertifiedRewrite.globalEnvelope.revision + 1,
+);
+assert.throws(() => validateTodayTrendV2Transition(phase9AtF, phase9SelfCertifiedRewrite),
+    error => error?.code === 'TT_V2_SCHEMA_INVALID',
+    'candidate 不得通过追加描述自身的 full checkpoint 绕过 archived fixed-core 不可变门禁');
+const phase9RegeneratedFacade = buildReadOnlyShadow(phase9BeforeF).scopes.chat;
+phase9RegeneratedFacade.world.items[0].summary = 'F 楼层重新生成结果';
+const phase9RerolledF = applyTodayTrendRerollToV2(phase9AtF, 'chat', 46, phase9RegeneratedFacade,
+    { events: [] }, { assistantCount: 47, generatedAt: 470 });
+const phase9RerolledPayload = phase9RerolledF.globalEnvelope.payload.scopes.chat.payload;
+assert.equal(phase9RerolledPayload.world.items[0].summary, 'F 楼层重新生成结果',
+    'reroll 必须从 F-1 完整恢复后提交新的 F 结果');
+assert.equal(phase9RerolledPayload.dynamics.archived.some(event => event.id === 'service'), false,
+    'reroll 不得保留旧 F 引入的 archived event');
+assert.equal(Object.values(phase9RerolledPayload.removableEntityTombstonesById).some(state => state.eventId === 'service'), false,
+    'reroll 不得保留旧 F 引入的 tombstone');
+assert.equal(phase9RerolledPayload.generationSnapshots.at(-1).rerollFromAssistantCount, 46,
+    '新的 F checkpoint 必须记录实际采用的前置 reroll checkpoint');
+assert.throws(() => applyTodayTrendRerollToV2(phase9AtF, 'chat', 47, phase9RegeneratedFacade,
+    { events: [] }, { assistantCount: 47, generatedAt: 471 }), error => error?.code === 'TT_REROLL_CHECKPOINT_INVALID',
+    'reroll 不得把当前 F 或更晚 checkpoint 当作自身基线');
+
+let phase9SchedulerRerollStore = structuredClone(phase9AtF);
+phase9SchedulerRerollStore.globalEnvelope.payload.scopes.chat.payload.operation = {
+    ...phase9SchedulerRerollStore.globalEnvelope.payload.scopes.chat.payload.operation,
+    lastSuccessfulAssistantCount: 47, lastSuccessfulRunAt: 47,
+};
+phase9SchedulerRerollStore = normalizeTodayTrendV2Store(phase9SchedulerRerollStore);
+let phase9SchedulerRerollCalls = 0;
+const phase9SchedulerReroll = createTodayTrendScheduler({
+    controller: { generate: async ({ scope }) => {
+        phase9SchedulerRerollCalls += 1;
+        assert.equal(scope.dynamics.archived.some(event => event.id === 'service'), false,
+            '已同步 F 的手动更新必须以 F-1 完整 checkpoint 的 projection 生成');
+        const regenerated = structuredClone(scope);
+        regenerated.world.items[0].summary = 'scheduler F 楼层重新生成结果';
+        return { scope: regenerated, history: { events: [] } };
+    } },
+    committer: {
+        supportsCanonical: true, invalidateCommits: () => {},
+        loadCanonical: async () => structuredClone(phase9SchedulerRerollStore),
+        commitStore: async (mutate, _task, options) => {
+            assert.deepEqual(options, { canonical: true, scopeId: 'chat',
+                expectedStoreRevision: phase9SchedulerRerollStore.globalEnvelope.revision,
+                expectedScopeRevision: phase9SchedulerRerollStore.globalEnvelope.payload.scopes.chat.revision,
+            }, 'reroll 必须冻结 canonical store/scope revision 并通过单事务提交');
+            phase9SchedulerRerollStore = await mutate(structuredClone(phase9SchedulerRerollStore));
+            return buildReadOnlyShadow(phase9SchedulerRerollStore);
+        },
+    },
+    getStore: async () => buildReadOnlyShadow(phase9SchedulerRerollStore),
+    getStorageId: () => 'chat', getChat: () => Array.from({ length: 48 }, () => ({ mes: 'F' })), getFloor: () => 47,
+});
+await phase9SchedulerReroll.manual({ floor: 47 });
+assert.equal(phase9SchedulerRerollCalls, 1, '已同步 F 的手动 reroll 必须只调用一次 AI');
+assert.equal(phase9SchedulerRerollStore.globalEnvelope.payload.scopes.chat.payload.world.items[0].summary,
+    'scheduler F 楼层重新生成结果', 'scheduler reroll 必须提交新的 F 结果');
+assert.equal(phase9SchedulerRerollStore.globalEnvelope.payload.scopes.chat.payload.generationSnapshots.at(-1).rerollFromAssistantCount,
+    46, 'scheduler reroll 必须持久化实际 F-1 checkpoint');
+const phase9MissingCheckpointStore = structuredClone(phase9AtF);
+const phase9StaleRerollBase = structuredClone(phase9SchedulerRerollStore);
+const phase9StaleRerollRevision = phase9StaleRerollBase.globalEnvelope.revision;
+const phase9StaleRerollScopeRevision = phase9StaleRerollBase.globalEnvelope.payload.scopes.chat.revision;
+const phase9StaleRerollCurrent = structuredClone(phase9StaleRerollBase);
+phase9StaleRerollCurrent.globalEnvelope.revision += 1;
+phase9StaleRerollCurrent.globalEnvelope.payload.scopes.chat.revision += 1;
+let phase9StaleRerollWrites = 0;
+const phase9StaleRerollCommitter = createTodayTrendCommitter({
+    loadCanonical: async () => structuredClone(phase9StaleRerollCurrent),
+    save: async () => { phase9StaleRerollWrites += 1; throw new Error('stale reroll 不得写入'); },
+});
+await assert.rejects(() => phase9StaleRerollCommitter.commitStore(store => store, null, {
+    canonical: true, scopeId: 'chat', expectedStoreRevision: phase9StaleRerollRevision,
+    expectedScopeRevision: phase9StaleRerollScopeRevision, refreshInjection: false,
+}), error => error?.code === 'TT_REROLL_STALE_SCOPE',
+'AI 期间 canonical revision 变化时，reroll 必须在 candidate/journal 写入前 fail-closed');
+assert.equal(phase9StaleRerollWrites, 0, 'reroll stale revision 必须保持零持久化写入');
+
+
+phase9MissingCheckpointStore.globalEnvelope.payload.scopes.chat.payload.operation = {
+    ...phase9MissingCheckpointStore.globalEnvelope.payload.scopes.chat.payload.operation,
+    lastSuccessfulAssistantCount: 47, lastSuccessfulRunAt: 47,
+};
+phase9MissingCheckpointStore.globalEnvelope.payload.scopes.chat.payload.generationSnapshots = phase9MissingCheckpointStore
+    .globalEnvelope.payload.scopes.chat.payload.generationSnapshots.filter(snapshot => snapshot.assistantCount === 47);
+normalizeTodayTrendV2Store(phase9MissingCheckpointStore);
+let phase9MissingCheckpointCalls = 0;
+const phase9MissingCheckpointScheduler = createTodayTrendScheduler({
+    controller: { generate: async () => { phase9MissingCheckpointCalls += 1; throw new Error('缺 checkpoint 不得调用 AI'); } },
+    committer: {
+        supportsCanonical: true, invalidateCommits: () => {},
+        loadCanonical: async () => structuredClone(phase9MissingCheckpointStore),
+        commitStore: async () => { throw new Error('缺 checkpoint 不得提交'); },
+    },
+    getStore: async () => buildReadOnlyShadow(phase9MissingCheckpointStore),
+    getStorageId: () => 'chat', getFloor: () => 47,
+});
+await assert.rejects(() => phase9MissingCheckpointScheduler.manual({ floor: 47 }),
+    error => error?.code === 'TT_REROLL_CHECKPOINT_MISSING', '已同步 F 缺少严格更早 full checkpoint 必须 fail-closed');
+assert.equal(phase9MissingCheckpointCalls, 0, '缺少 reroll checkpoint 时不得调用 AI');
+
+const phase9RerollSagaInitial = structuredClone(phase9AtF);
+phase9RerollSagaInitial.globalEnvelope.payload.scopes.chat.payload.operation = {
+    ...phase9RerollSagaInitial.globalEnvelope.payload.scopes.chat.payload.operation,
+    lastSuccessfulAssistantCount: 47, lastSuccessfulRunAt: 47,
+};
+const phase9RerollSagaHarness = createAuthorityHarness();
+const phase9RerollSagaAuthority = createTodayTrendV2Authority({
+    ...phase9RerollSagaHarness, tabId: 'phase-9-reroll-saga-owner', BroadcastChannelImpl: undefined,
+});
+await phase9RerollSagaAuthority.acquire({ readV2: true, writeV2: true, initialStore: phase9RerollSagaInitial });
+let phase9RerollSagaNow = 9500;
+const phase9RerollSagaJournal = createTodayTrendJournal({
+    listKeys: async () => [...phase9RerollSagaHarness.records.keys()], readEntry: phase9RerollSagaHarness.readEntry,
+    writeEntry: async (key, value) => { phase9RerollSagaHarness.records.set(key, structuredClone(value)); return true; },
+    deleteEntry: async key => phase9RerollSagaHarness.records.delete(key), now: () => ++phase9RerollSagaNow,
+    transactionId: () => `phase-9-reroll-saga-${phase9RerollSagaNow}`,
+});
+const phase9RerollSagaStorage = createTodayTrendStorage({
+    v2Authority: phase9RerollSagaAuthority, journal: phase9RerollSagaJournal, storage: memoryStorage(),
+});
+const phase9RerollSagaBefore = await phase9RerollSagaStorage.loadCanonical();
+let phase9RerollSagaRefreshes = 0, phase9RerollSagaAiCalls = 0;
+const phase9RerollSagaCommitter = createTodayTrendCommitter({
+    runtime: {}, load: phase9RerollSagaStorage.load, loadCanonical: phase9RerollSagaStorage.loadCanonical,
+    save: phase9RerollSagaStorage.save, storageStatus: phase9RerollSagaStorage.status, journal: phase9RerollSagaJournal,
+    refreshInjection: async () => {
+        phase9RerollSagaRefreshes += 1;
+        return phase9RerollSagaRefreshes === 1 ? { failedWrites: 1, failedKeys: [] } : { failedWrites: 0, failedKeys: [] };
+    },
+});
+const phase9RerollSagaScheduler = createTodayTrendScheduler({
+    controller: { generate: async ({ scope }) => {
+        phase9RerollSagaAiCalls += 1;
+        const regenerated = structuredClone(scope);
+        regenerated.world.items[0].summary = '补偿前的 reroll candidate';
+        return { scope: regenerated, history: { events: [] } };
+    } },
+    committer: phase9RerollSagaCommitter, getStore: phase9RerollSagaStorage.load,
+    getStorageId: () => 'chat', getFloor: () => 47,
+});
+await assert.rejects(() => phase9RerollSagaScheduler.manual({ floor: 47 }), /注入刷新失败/,
+    'reroll candidate 注入失败必须触发 canonical saga 补偿');
+assert.equal(phase9RerollSagaAiCalls, 1, '补偿路径不得重试或重复调用 reroll AI');
+assert.equal(phase9RerollSagaRefreshes, 2, 'reroll 注入失败后必须仅注入一次 previous 补偿状态');
+const phase9RerollSagaRestored = await phase9RerollSagaStorage.loadCanonical();
+assert.equal(todayTrendStoreDigest(phase9RerollSagaRestored), todayTrendStoreDigest(phase9RerollSagaBefore),
+    'reroll 注入补偿必须恢复 reroll 前完整 canonical 业务状态');
+assert.equal(phase9RerollSagaRestored.globalEnvelope.payload.scopes.chat.payload.dynamics.archived.some(event => event.id === 'service'), true,
+    'reroll 注入补偿必须恢复旧 F archived event');
+assert.equal(Object.values(phase9RerollSagaRestored.globalEnvelope.payload.scopes.chat.payload.removableEntityTombstonesById)
+    .some(state => state.eventId === 'service'), true, 'reroll 注入补偿必须恢复旧 F tombstone');
+assert.equal(await phase9RerollSagaAuthority.release({ readV2: true, serveV2: false }), true,
+    'reroll saga 验证完成后必须释放 authority owner');
+phase9RerollSagaAuthority.close();
+
+const phase9RemovedCheckpointCandidate = structuredClone(phase8Cleaned);
+phase9RemovedCheckpointCandidate.globalEnvelope.payload.scopes.chat.payload = appendTodayTrendCanonicalSnapshot(
+    phase9RemovedCheckpointCandidate.globalEnvelope.payload.scopes.chat.payload, 34, 34,
+    phase9RemovedCheckpointCandidate.globalEnvelope.revision + 1,
+);
+const phase9RemovedCheckpoint = normalizeTodayTrendV2Store(phase9RemovedCheckpointCandidate);
+const phase9RemovedRestored = rollbackTodayTrendV2Scope(phase9RemovedCheckpoint, 'chat', 34)
+    .globalEnvelope.payload.scopes.chat.payload;
+for (const state of phase8RemovedStates) assert.equal(phase9RemovedRestored.removableEntityStateById[state.entityId]?.state, 'removed',
+    'F-1 checkpoint 中已删除的 removable entity 回滚后不得复活');
 
 const phase9ActiveSnapshotStore = applyTodayTrendGenerationToV2(
     normalizedPhase4Available, 'chat', buildReadOnlyShadow(normalizedPhase4Available).scopes.chat,
@@ -4990,6 +5234,16 @@ for (let assistantCount = 47; assistantCount <= 70; assistantCount += 1) {
 const phase9BoundedManifestPayload = phase9BoundedManifestStore.globalEnvelope.payload.scopes.chat.payload;
 assert.equal(phase9BoundedManifestPayload.generationSnapshots.length, 12,
     '长期 active event 的 canonical snapshot 必须保持最多 12 个');
+assert.ok(phase9BoundedManifestPayload.generationSnapshots.every(snapshot =>
+    snapshot.restoreCapability !== 'full' || (snapshot.checkpointRef?.rootEntityId && snapshot.checkpointRef?.payloadDigest)),
+    '每个 full checkpoint 必须只保存可校验 restore manifest/ref');
+assert.ok(phase9BoundedManifestPayload.generationSnapshots.every(snapshot => !Object.hasOwn(snapshot, 'checkpoint')),
+    '12 个 checkpoint 不得重复内嵌完整 payload');
+const phase9CheckpointRoots = new Set(phase9BoundedManifestPayload.generationSnapshots
+    .filter(snapshot => snapshot.restoreCapability === 'full').map(snapshot => snapshot.checkpointRef.rootEntityId));
+assert.ok(phase9CheckpointRoots.size > 1, '不同 checkpoint 必须保留各自不可变 root entity');
+assert.ok(Object.keys(phase9BoundedManifestPayload.checkpointEntityStore).length < 200,
+    '相邻 checkpoint 的相同正文/detail/manifest/state 必须按内容实体复用，不能按 12 份完整 payload 复制');
 assert.equal(Object.keys(phase9BoundedManifestPayload.archivedRemovableDataByEvent.service.manifestsById).length, 1,
     '长期 active event 必须复用稳定 manifest 正文，禁止随 generation 无界增长');
 assert.equal(Object.values(phase9BoundedManifestPayload.removableEntityStateById)
@@ -5012,6 +5266,15 @@ assert.equal(phase9ActiveRolledBackPayload.generationSnapshots.some(snapshot =>
 assert.equal(resolveTodayTrendV2DetailForTarget(
     phase9ActiveRolledBack, 'chat', 'service', 'detail:service:4', 60,
 )?.text, '完成北侧仓门加固', 'active rollback 后目标楼层 detail 仍须通过同一 manifest 可见性链读取');
+const phase9EvictedRoot = phase9ActiveSnapshotPayload.generationSnapshots.find(snapshot => snapshot.assistantCount === 46)
+    ?.checkpointRef?.rootEntityId;
+assert.equal(phase9BoundedManifestPayload.generationSnapshots.some(snapshot => snapshot.checkpointRef?.rootEntityId === phase9EvictedRoot), false,
+    '超过 12 上限后必须淘汰旧 checkpoint ref');
+if (phase9EvictedRoot && !phase9BoundedManifestPayload.generationSnapshots.some(snapshot =>
+    snapshot.checkpointRef?.rootEntityId === phase9EvictedRoot)) {
+    assert.equal(Object.hasOwn(phase9BoundedManifestPayload.checkpointEntityStore, phase9EvictedRoot), false,
+        '淘汰 checkpoint 后只 GC 已无 retained root reachability 的孤儿 root entity');
+}
 const phase9ArchivedFromManifestFacade = buildReadOnlyShadow(phase9BoundedManifestStore).scopes.chat;
 const phase9ArchivedFromManifestEvent = phase9ArchivedFromManifestFacade.dynamics.active.find(event => event.id === 'service');
 phase9ArchivedFromManifestFacade.dynamics.active = phase9ArchivedFromManifestFacade.dynamics.active
@@ -5081,9 +5344,83 @@ phase9RemovedPayload.removableEntityStateById[phase9ResolverDetailId] = {
 };
 phase9RemovedPayload.removableEntityTombstonesById[phase9ResolverDetailId] =
     structuredClone(phase9RemovedPayload.removableEntityStateById[phase9ResolverDetailId]);
-assert.equal(resolveTodayTrendV2DetailForTarget(
+const phase9RemovedResolution = resolveTodayTrendV2DetailForTarget(
     phase9RemovedDetail, 'chat', 'service', phase9ResolverDetailId, 47,
-), null, 'detail resolver 必须拒绝已 removed 且正文已清理的 detail');
+);
+assert.deepEqual(phase9RemovedResolution, {
+    status: 'unavailable', code: 'TT_DETAIL_REMOVED', detailId: phase9ResolverDetailId, eventId: 'service',
+    removalReason: 'archived-retention', removedAtAssistantCount: 47,
+}, 'detail resolver 必须明确区分 removed unavailable 与 unknown');
+assert.equal(JSON.stringify(phase9RemovedResolution).includes('完成北侧仓门加固'), false,
+    'removed unavailable 诊断不得泄漏 detail 正文');
+const phase9HistoricalDetail = structuredClone(phase9ActiveSnapshotStore);
+const phase9HistoricalPayload = phase9HistoricalDetail.globalEnvelope.payload.scopes.chat.payload;
+phase9HistoricalPayload.operation = {
+    ...phase9HistoricalPayload.operation, lastSuccessfulAssistantCount: 47, lastSuccessfulRunAt: 47,
+};
+delete phase9HistoricalPayload.stageDetailsByEvent.service;
+phase9HistoricalPayload.removableEntityStateById[phase9ResolverDetailId] = {
+    ...phase9HistoricalPayload.removableEntityStateById[phase9ResolverDetailId],
+    state: 'removed', removalReason: 'archived-retention', removedAtAssistantCount: 47,
+};
+phase9HistoricalPayload.removableEntityTombstonesById[phase9ResolverDetailId] =
+    structuredClone(phase9HistoricalPayload.removableEntityStateById[phase9ResolverDetailId]);
+assert.equal(resolveTodayTrendV2DetailForTarget(
+    phase9HistoricalDetail, 'chat', 'service', phase9ResolverDetailId, 46,
+)?.text, '完成北侧仓门加固', '当前 #47 删除 detail 时，读取 #46 必须从 retained checkpoint 恢复正文');
+assert.equal(resolveTodayTrendV2DetailForTarget(
+    phase9HistoricalDetail, 'chat', 'service', phase9ResolverDetailId, 47,
+)?.status, 'unavailable', '当前 #47 已删除的 detail 必须保持 unavailable');
+
+
+const phase9ScopeV3 = normalizeTodayTrendV2Store(phase9ActiveSnapshotStore);
+assert.equal(phase9ScopeV3.globalEnvelope.schemaVersion, 2, 'scope v3 不得改写全局 envelope v2');
+assert.equal(phase9ScopeV3.globalEnvelope.payload.scopes.chat.schemaVersion, 3, 'canonical scope envelope 必须升级为 v3');
+const phase9ScopeV2 = structuredClone(phase9ScopeV3);
+phase9ScopeV2.globalEnvelope.payload.scopes.chat.schemaVersion = 2;
+const phase9LegacyEmbeddedPayload = rollbackTodayTrendV2Scope(phase9ScopeV3, 'chat', 46)
+    .globalEnvelope.payload.scopes.chat.payload;
+delete phase9LegacyEmbeddedPayload.generationSnapshots;
+delete phase9LegacyEmbeddedPayload.checkpointEntityStore;
+delete phase9LegacyEmbeddedPayload.commitJournal;
+for (const snapshot of phase9ScopeV2.globalEnvelope.payload.scopes.chat.payload.generationSnapshots) {
+    delete snapshot.checkpointRef;
+    snapshot.restoreCapability = 'full';
+    snapshot.checkpoint = structuredClone(phase9LegacyEmbeddedPayload);
+    snapshot.checkpointDigest = 'legacy-untrusted-digest';
+}
+delete phase9ScopeV2.globalEnvelope.payload.scopes.chat.payload.checkpointEntityStore;
+const phase9MigratedV3 = normalizeTodayTrendV2Store(phase9ScopeV2);
+assert.equal(phase9MigratedV3.globalEnvelope.payload.scopes.chat.schemaVersion, 3,
+    '历史 scope v2 full checkpoint 必须受限迁移为 v3');
+assert.ok(phase9MigratedV3.globalEnvelope.payload.scopes.chat.payload.generationSnapshots
+    .every(snapshot => snapshot.restoreCapability === 'projection-only' && snapshot.checkpointRef === null),
+    '历史 scope v2 snapshot 一律只能迁移为 projection-only，不得成为 reroll authority');
+assert.throws(() => rollbackTodayTrendV2Scope(phase9MigratedV3, 'chat', 46),
+    error => error?.code === 'TT_CANONICAL_CHECKPOINT_INCOMPLETE',
+    '即使旧 v2 内嵌对象形似完整 payload，也不得升级为 rollback/reroll authority');
+assert.deepEqual(normalizeTodayTrendV2Store(phase9MigratedV3), phase9MigratedV3,
+    'scope v2→v3 迁移结果必须幂等');
+assert.throws(() => normalizeTodayTrendV2Store({
+    ...structuredClone(phase9MigratedV3),
+    globalEnvelope: {
+        ...structuredClone(phase9MigratedV3.globalEnvelope),
+        payload: { ...structuredClone(phase9MigratedV3.globalEnvelope.payload), scopes: {
+            chat: { ...structuredClone(phase9MigratedV3.globalEnvelope.payload.scopes.chat), schemaVersion: 4 },
+        } },
+    },
+}), error => error?.code === 'TT_V2_FUTURE_VERSION', 'future scope envelope 必须 fail-closed');
+const phase9TamperedCheckpoint = structuredClone(phase9ScopeV3);
+const phase9TamperedPayload = phase9TamperedCheckpoint.globalEnvelope.payload.scopes.chat.payload;
+const phase9TamperedEntityId = Object.keys(phase9TamperedPayload.checkpointEntityStore)[0];
+phase9TamperedPayload.checkpointEntityStore[phase9TamperedEntityId].kind = 'tampered';
+assert.throws(() => normalizeTodayTrendV2Store(phase9TamperedCheckpoint),
+    error => error?.code === 'TT_CANONICAL_CHECKPOINT_INTEGRITY', '篡改 checkpoint entity 必须产生稳定完整性诊断');
+
+const phase9UnknownDetail = resolveTodayTrendV2DetailForTarget(
+    phase9RemovedDetail, 'chat', 'service', 'detail:service:999', 47,
+);
+assert.equal(phase9UnknownDetail, null, '未知 detail 必须继续 fail-closed，不得伪装为 removed unavailable');
 
 const phase9BranchSource = structuredClone(phase8Cleaned.globalEnvelope.payload.scopes.chat);
 const phase9BranchPayload = phase9BranchSource.payload;
@@ -5120,6 +5457,9 @@ for (const snapshot of phase9CopiedPayload.generationSnapshots) {
     assert.equal(Object.hasOwn(snapshot, 'stageDetailsByEvent'), false, 'canonical snapshot 不得复制 detail 正文');
     assert.equal(Object.hasOwn(snapshot, 'archivedRemovableDataByEvent'), false,
         'canonical snapshot 不得复制 archived removable 正文容器');
+    assert.equal(Object.hasOwn(snapshot, 'checkpoint'), false, 'canonical snapshot 不得内嵌完整 checkpoint payload');
+    if (snapshot.restoreCapability === 'full') rollbackTodayTrendV2Scope({ version: 2, globalEnvelope: { schemaVersion: 2,
+        revision: 0, payload: { presets: phase9Presets, scopes: { 'phase9-branch': phase9CopiedEnvelope } } } }, 'phase9-branch', snapshot.assistantCount);
 }
 for (const state of Object.values(phase9CopiedPayload.removableEntityStateById)) {
     assert.equal(state.state, 'removed', '分支复制不得复活 removed lifecycle');

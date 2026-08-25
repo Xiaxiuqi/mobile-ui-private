@@ -60,9 +60,10 @@ export function installTodayTrend(_state, deps = {}) {
     };
     const scheduler = createTodayTrendScheduler({ controller, committer, getStore: loadStore, getStorageId,
         getChat: () => getCtx()?.chat || [], getFloor: getHostFloor, getCalendarStore: deps.getCalendarStore,
-        getPromptScope: typeof committer.loadCanonical === 'function' ? async storageId => serializeTodayTrendV2ScopeForGeneration(
-            await committer.loadCanonical(), storageId,
-        ) : null });
+        getPromptScope: typeof committer.loadCanonical === 'function' ? async (storageId, canonicalOverride = null) =>
+            serializeTodayTrendV2ScopeForGeneration(
+                canonicalOverride || await committer.loadCanonical(), storageId,
+            ) : null });
     const reloadStore = () => loadStore({ force: true });
     const nextPresetId = (store, storageId) => {
         let id = '';

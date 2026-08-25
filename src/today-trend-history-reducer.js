@@ -22,6 +22,22 @@ const validDate = value => typeof value === 'string' && datePattern.test(value)
     && new Date(`${value}T12:00:00Z`).toISOString().slice(0, 10) === value;
 const projectionText = stage => ['day-summary', 'period-summary', 'span-stage'].includes(stage.kind) ? stage.summary : stage.text;
 const DETAIL_CAPACITY = 80;
+const canonical = value => {
+    if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
+    if (value && typeof value === 'object') {
+        return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${canonical(value[key])}`).join(',')}}`;
+    }
+    return JSON.stringify(value);
+};
+export function todayTrendCheckpointDigest(value) {
+    const serialized = canonical(value);
+    let hash = 2166136261;
+    for (let index = 0; index < serialized.length; index += 1) {
+        hash ^= serialized.charCodeAt(index);
+        hash = Math.imul(hash, 16777619);
+    }
+    return `fnv1a32:${(hash >>> 0).toString(16).padStart(8, '0')}:${serialized.length}`;
+}
 const availableState = (entityType, entityId, eventId) => ({
     entityType, entityId, eventId, state: 'available', removalReason: null, removedAtAssistantCount: null, policyRevision: 1,
 });
@@ -447,91 +463,152 @@ function snapshotDetailManifestRefs(payload, visibleFromAssistantCount, storeRev
     return result;
 }
 
-function snapshotFromPayload(payload, assistantCount, generatedAt, storeRevision) {
+const checkpointValueRef = (value, entityStore) => {
+    if (value === null || typeof value !== 'object') return { value };
+    const entity = Array.isArray(value)
+        ? { kind: 'array', items: value.map(item => checkpointValueRef(item, entityStore)) }
+        : { kind: 'object', entries: Object.keys(value).sort().map(key => [key, checkpointValueRef(value[key], entityStore)]) };
+    const entityId = todayTrendCheckpointDigest(entity);
+    const existing = entityStore[entityId];
+    if (existing && canonical(existing) !== canonical(entity)) {
+        fail('TT_CANONICAL_CHECKPOINT_INTEGRITY', `checkpoint entity ${entityId} 内容冲突`);
+    }
+    entityStore[entityId] = entity;
+    return { entityId };
+};
+
+export function storeTodayTrendCheckpoint(checkpointValue, entityStoreValue = {}) {
+    const checkpoint = clone(checkpointValue);
+    const entityStore = clone(entityStoreValue);
+    if (!record(entityStore)) fail('TT_CANONICAL_CHECKPOINT_INTEGRITY', 'checkpoint entity store 无效');
+    const root = checkpointValueRef(checkpoint, entityStore);
+    return {
+        entityStore,
+        checkpointRef: { rootEntityId: root.entityId, payloadDigest: todayTrendCheckpointDigest(checkpoint) },
+    };
+}
+
+const checkpointEntityRefs = entity => entity.kind === 'array'
+    ? entity.items : entity.kind === 'object' ? entity.entries.map(([, ref]) => ref) : [];
+
+export function materializeTodayTrendCheckpoint(checkpointRef, entityStoreValue) {
+    if (!record(checkpointRef) || Object.keys(checkpointRef).length !== 2
+        || typeof checkpointRef.rootEntityId !== 'string' || typeof checkpointRef.payloadDigest !== 'string'
+        || !record(entityStoreValue)) {
+        fail('TT_CANONICAL_CHECKPOINT_INCOMPLETE', 'checkpoint restore manifest/ref 无效');
+    }
+    const visiting = new Set();
+    const materializeRef = ref => {
+        if (!record(ref) || Object.keys(ref).length !== 1) fail('TT_CANONICAL_CHECKPOINT_INTEGRITY', 'checkpoint entity ref 无效');
+        if (Object.hasOwn(ref, 'value')) return clone(ref.value);
+        if (typeof ref.entityId !== 'string') fail('TT_CANONICAL_CHECKPOINT_INTEGRITY', 'checkpoint entity ID 无效');
+        const entity = entityStoreValue[ref.entityId];
+        if (!record(entity) || todayTrendCheckpointDigest(entity) !== ref.entityId || visiting.has(ref.entityId)) {
+            fail('TT_CANONICAL_CHECKPOINT_INTEGRITY', `checkpoint entity ${ref.entityId} 完整性校验失败`);
+        }
+        visiting.add(ref.entityId);
+        let value;
+        if (entity.kind === 'array' && Array.isArray(entity.items)) value = entity.items.map(materializeRef);
+        else if (entity.kind === 'object' && Array.isArray(entity.entries)) {
+            value = {};
+            for (const entry of entity.entries) {
+                if (!Array.isArray(entry) || entry.length !== 2 || typeof entry[0] !== 'string' || Object.hasOwn(value, entry[0])) {
+                    fail('TT_CANONICAL_CHECKPOINT_INTEGRITY', `checkpoint entity ${ref.entityId} object manifest 无效`);
+                }
+                value[entry[0]] = materializeRef(entry[1]);
+            }
+        } else fail('TT_CANONICAL_CHECKPOINT_INTEGRITY', `checkpoint entity ${ref.entityId} 类型无效`);
+        visiting.delete(ref.entityId);
+        return value;
+    };
+    const payload = materializeRef({ entityId: checkpointRef.rootEntityId });
+    if (todayTrendCheckpointDigest(payload) !== checkpointRef.payloadDigest) {
+        fail('TT_CANONICAL_CHECKPOINT_INTEGRITY', 'checkpoint materialized payload 摘要不一致');
+    }
+    return payload;
+}
+
+export function gcTodayTrendCheckpointEntityStore(payloadValue) {
+    const payload = clone(payloadValue);
+    const store = record(payload.checkpointEntityStore) ? payload.checkpointEntityStore : {};
+    const reachable = new Set();
+    const visit = entityId => {
+        if (reachable.has(entityId)) return;
+        const entity = store[entityId];
+        if (!record(entity) || todayTrendCheckpointDigest(entity) !== entityId) {
+            fail('TT_CANONICAL_CHECKPOINT_INTEGRITY', `checkpoint entity ${entityId} 完整性校验失败`);
+        }
+        reachable.add(entityId);
+        for (const ref of checkpointEntityRefs(entity)) if (record(ref) && typeof ref.entityId === 'string') visit(ref.entityId);
+    };
+    for (const snapshot of payload.generationSnapshots || []) {
+        if (snapshot.restoreCapability === 'full' && record(snapshot.checkpointRef)) visit(snapshot.checkpointRef.rootEntityId);
+    }
+    payload.checkpointEntityStore = Object.fromEntries([...reachable].sort().map(id => [id, store[id]]));
+    return payload;
+}
+
+function snapshotFromPayload(payload, assistantCount, generatedAt, storeRevision, rerollFromAssistantCount = null) {
     const detailManifestRefs = snapshotDetailManifestRefs(payload, assistantCount, storeRevision);
+    const checkpoint = clone(payload);
+    delete checkpoint.generationSnapshots;
+    delete checkpoint.commitJournal;
+    delete checkpoint.checkpointEntityStore;
+    const stored = storeTodayTrendCheckpoint(checkpoint, payload.checkpointEntityStore);
+    payload.checkpointEntityStore = stored.entityStore;
     return {
         assistantCount, generatedAt, storeRevision,
         detailPoolRevision: payload.historyRetentionState.detailPoolRevision,
         visibleFromAssistantCount: assistantCount,
         detailManifestRefs,
         retentionPolicyRevision: payload.historyRetentionState.retentionPolicyRevision,
+        restoreCapability: 'full',
+        rerollFromAssistantCount,
+        checkpointRef: stored.checkpointRef,
         world: clone(payload.world), reputation: clone(payload.reputation), factions: clone(payload.factions),
         dynamicsSettings: clone(payload.dynamicsSettings), dynamics: clone(payload.dynamics),
     };
 }
 
-export function appendTodayTrendCanonicalSnapshot(payloadValue, assistantCount, generatedAt, storeRevision = 0) {
+export function appendTodayTrendCanonicalSnapshot(payloadValue, assistantCount, generatedAt, storeRevision = 0, {
+    rerollFromAssistantCount = null,
+} = {}) {
     const payload = clone(payloadValue);
+    if (!record(payload.checkpointEntityStore)) payload.checkpointEntityStore = {};
     const floor = Number.isSafeInteger(assistantCount) && assistantCount >= 0 ? assistantCount : 0;
     const timestamp = Number.isFinite(generatedAt) && generatedAt >= 0 ? Math.floor(generatedAt) : 0;
     const revision = Number.isSafeInteger(storeRevision) && storeRevision >= 0 ? storeRevision : 0;
-    const snapshots = [...payload.generationSnapshots.filter(item => item.assistantCount !== floor), snapshotFromPayload(payload, floor, timestamp, revision)]
+    if (rerollFromAssistantCount !== null && (!Number.isSafeInteger(rerollFromAssistantCount)
+        || rerollFromAssistantCount < 0 || rerollFromAssistantCount >= floor)) {
+        fail('TT_REROLL_CHECKPOINT_INVALID', 'reroll 基线必须是当前楼层之前的有效 checkpoint');
+    }
+    const snapshots = [...payload.generationSnapshots.filter(item => item.assistantCount !== floor),
+        snapshotFromPayload(payload, floor, timestamp, revision, rerollFromAssistantCount)]
         .sort((left, right) => left.assistantCount - right.assistantCount);
     const baseline = snapshots.find(item => item.assistantCount === 0);
     payload.generationSnapshots = baseline
         ? [baseline, ...snapshots.filter(item => item.assistantCount !== 0).slice(-11)]
         : snapshots.slice(-12);
-    return payload;
-}
-
-function alignRollbackRemovableContainers(payload) {
-    const events = allEvents(payload.dynamics);
-    const eventIds = new Set(events.map(event => event.id));
-    const activeIds = new Set(payload.dynamics.active.map(event => event.id));
-    const archivedIds = new Set(payload.dynamics.archived.map(event => event.id));
-    const bodyIds = new Set();
-    const detailRefsByEvent = new Map();
-    for (const event of events) {
-        const refs = new Set();
-        for (const stage of event.stages) {
-            if (stage.kind !== 'day-summary') continue;
-            // Archived stage projections are fixed core, not removable day-summary bodies.
-            if (activeIds.has(event.id)) bodyIds.add(stage.id);
-            for (const ref of stage.detailRefs) refs.add(ref);
-        }
-        detailRefsByEvent.set(event.id, refs);
-    }
-    payload.stageDetailsByEvent = Object.fromEntries(Object.entries(payload.stageDetailsByEvent || {}).flatMap(([eventId, details]) => {
-        const refs = detailRefsByEvent.get(eventId);
-        if (!refs) return [];
-        const retained = details.filter(detail => refs.has(detail.id));
-        for (const detail of retained) bodyIds.add(detail.id);
-        return retained.length ? [[eventId, retained]] : [];
-    }));
-    payload.archivedRemovableDataByEvent = Object.fromEntries(Object.entries(payload.archivedRemovableDataByEvent || {})
-        .filter(([eventId]) => eventIds.has(eventId))
-        .map(([eventId, container]) => {
-            if (!archivedIds.has(eventId)) container.daySummariesById = {};
-            for (const id of Object.keys(container.daySummariesById || {})) bodyIds.add(id);
-            for (const id of Object.keys(container.manifestsById || {})) bodyIds.add(id);
-            return [eventId, container];
-        }));
-    const states = payload.removableEntityStateById || {};
-    const tombstones = payload.removableEntityTombstonesById || {};
-    payload.removableEntityStateById = Object.fromEntries(Object.entries(states).filter(([id, state]) => {
-        if (!eventIds.has(state.eventId)) return false;
-        if (state.state === 'available') return bodyIds.has(id);
-        return state.state === 'removed' && !bodyIds.has(id) && tombstones[id] !== undefined;
-    }));
-    payload.removableEntityTombstonesById = Object.fromEntries(Object.entries(tombstones)
-        .filter(([id, tombstone]) => payload.removableEntityStateById[id]?.state === 'removed'
-            && tombstone.eventId === payload.removableEntityStateById[id].eventId));
-    return payload;
+    return gcTodayTrendCheckpointEntityStore(payload);
 }
 
 export function rollbackTodayTrendCanonicalPayload(payloadValue, assistantCount) {
     const payload = clone(payloadValue);
     const floor = Number.isSafeInteger(assistantCount) && assistantCount >= 0 ? assistantCount : 0;
-    const snapshot = payload.generationSnapshots.filter(item => item.assistantCount <= floor).at(-1);
-    if (!snapshot) return payload;
-    const currentArchived = clone(payload.dynamics.archived);
-    const archivedIds = new Set(currentArchived.map(event => event.id));
-    Object.assign(payload, {
-        world: clone(snapshot.world), reputation: clone(snapshot.reputation), factions: clone(snapshot.factions),
-        dynamicsSettings: clone(snapshot.dynamicsSettings),
-        dynamics: { active: clone(snapshot.dynamics.active).filter(event => !archivedIds.has(event.id)), archived: currentArchived },
-        operation: { ...payload.operation, lastSuccessfulAssistantCount: snapshot.assistantCount, lastSuccessfulRunAt: snapshot.generatedAt },
+    const snapshot = payload.generationSnapshots.reduce((latest, item) => item.assistantCount <= floor
+        && (!latest || item.assistantCount > latest.assistantCount) ? item : latest, null);
+    if (!snapshot) {
+        fail('TT_ROLLBACK_CHECKPOINT_MISSING', `canonical scope 缺少不晚于楼层 ${floor} 的 checkpoint`);
+    }
+    if (snapshot.restoreCapability !== 'full' || !record(snapshot.checkpointRef)) {
+        fail('TT_CANONICAL_CHECKPOINT_INCOMPLETE',
+            `canonical snapshot ${snapshot.assistantCount} 缺少完整 checkpoint，拒绝伪造历史状态`);
+    }
+    const checkpoint = materializeTodayTrendCheckpoint(snapshot.checkpointRef, payload.checkpointEntityStore);
+    return gcTodayTrendCheckpointEntityStore({
+        ...checkpoint,
         generationSnapshots: payload.generationSnapshots.filter(item => item.assistantCount <= snapshot.assistantCount),
+        checkpointEntityStore: clone(payload.checkpointEntityStore),
+        commitJournal: null,
     });
-    return alignRollbackRemovableContainers(payload);
 }

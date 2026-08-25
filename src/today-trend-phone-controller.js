@@ -40,9 +40,10 @@ export function createTodayTrendPhoneController({ state, deps, container }) {
             await render();
             const detail = await deps.resolveTodayTrendDetail(eventId, detailId, floor);
             if (destroyed || storageId !== deps.getStorageId() || floor !== deps.getTodayTrendCurrentFloor?.()) return false;
-            detailById[detailId] = detail
+            detailById[detailId] = detail?.status === 'available'
                 ? { status: 'available', text: detail.text }
-                : { status: 'unavailable', text: '' };
+                : detail?.status === 'unavailable' && detail.code === 'TT_DETAIL_REMOVED'
+                    ? { status: 'unavailable', text: '', code: detail.code } : { status: 'unknown', text: '' };
             return true;
         } finally {
             loadingDetailIds.delete(detailId);

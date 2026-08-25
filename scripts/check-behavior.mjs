@@ -5397,8 +5397,8 @@ const parsedSchema16LegacyBackup = parseBackupData({
 assert.equal(parsedSchema16LegacyBackup.todayTrendV2.v2Store.globalEnvelope.schemaVersion, 2,
     'schema 16 旧 v2Store 备份必须经显式兼容入口升级 global envelope');
 assert.ok(Object.values(parsedSchema16LegacyBackup.todayTrendV2.v2Store.globalEnvelope.payload.scopes)
-    .every(scopeEnvelope => scopeEnvelope.schemaVersion === 2),
-'schema 16 旧 v2Store 备份必须严格重写全部 scope envelope');
+    .every(scopeEnvelope => scopeEnvelope.schemaVersion === 3),
+'schema 16 旧 v2Store 备份必须严格重写全部 scope envelope 到当前 v3');
 assert.equal(schema16LegacyV2Store.globalEnvelope.schemaVersion, 1,
     'schema 16 旧 v2Store 备份迁移不得原地改写导入对象');
 assert.throws(() => parseBackupData({
@@ -6380,7 +6380,10 @@ const releaseOnlyAuthority = {
     },
 };
 const releaseOnlyBridge = createTodayTrendStorage({ storage: localStorage, v2Authority: releaseOnlyAuthority });
-const releaseOnlyBackupHandlers = createBackupStateHandlers({ saveTodayTrendStore: releaseOnlyBridge.save });
+const releaseOnlyBackupHandlers = createBackupStateHandlers({
+    captureTodayTrendV2Backup: async () => null,
+    saveTodayTrendStore: releaseOnlyBridge.save,
+});
 let releaseOnlyBackupError = null;
 try {
     await runBackupTransaction({
@@ -8625,6 +8628,31 @@ try {
         '诊断面不得暴露消息正文');
     diagnosticRuntime.lastBranchInheritanceError = { name: 'Error', message: '潜在聊天正文不得经诊断 API 暴露' };
     assert.equal(window.__pmDiag.snapshot().lastBranchInheritanceError?.message, '', '诊断 API 必须剥离原始错误文本');
+    let diagnosticManualRuns = 0;
+    assert.equal(installDiagnosticApi({ runtime: diagnosticRuntime, getCtx: () => branchContext,
+        getStorageId: () => branchIds.target,
+        getCalendarStore: () => ({ scopes: { [branchIds.target]: { baseDate: '2025-04-15' } } }),
+        getTodayTrendStore: async () => ({ scopes: { [branchIds.target]: {
+            operation: { lastSuccessfulAssistantCount: 42 }, dynamics: { active: [{ stages: ['进展一'] }], archived: [{ stages: ['进展二'] }] },
+        } } }),
+        getTodayTrendGenerationState: () => ({ phase: 'failed', lastError: 'TT_HISTORY_STAGE_MISMATCH history producer 与 dynamics stage 追加不一致' }),
+        generateTodayTrend: async () => {
+            diagnosticManualRuns += 1;
+            throw Object.assign(new Error('history producer 与 dynamics stage 追加不一致'), { code: 'TT_HISTORY_STAGE_MISMATCH' });
+        },
+    }), true, '已启用诊断时必须允许用完整插件依赖重装诊断面');
+    const diagnosticTrend = await window.__pmDiag.todayTrend.status();
+    assert.deepEqual(diagnosticTrend.scope, { activeEventCount: 1, archivedEventCount: 1, stageCount: 2, lastSuccessfulAssistantCount: 42 },
+        'Today Trend 诊断只能暴露计数与同步元数据，不得暴露事件或聊天正文');
+    assert.equal(diagnosticTrend.storyDate, '2025-04-15', 'Today Trend 诊断必须读取当前聊天的可信日历日期');
+    assert.deepEqual(diagnosticTrend.generation, { phase: 'failed', errorCode: 'TT_HISTORY_STAGE_MISMATCH' },
+        'Today Trend 状态诊断只能公开稳定错误码，不能透传原始错误正文');
+    assert.equal(JSON.stringify(diagnosticTrend).includes('history producer 与 dynamics stage 追加不一致'), false,
+        'Today Trend 状态诊断不得泄露可能包含事件或聊天内容的错误正文');
+    assert.deepEqual(await window.__pmDiag.todayTrend.runManual(), {
+        ok: false, error: { name: 'Error', code: 'TT_HISTORY_STAGE_MISMATCH', message: 'history producer 与 dynamics stage 追加不一致' },
+    }, '控制台手动测试必须调用插件公开生成入口并保留结构化失败码');
+    assert.equal(diagnosticManualRuns, 1, '控制台手动测试不得绕过插件入口或重复触发 AI');
     delete window.__pmDiagEnabled;
     delete window.__pmDiag;
     delete window.__pmRetryBranch;

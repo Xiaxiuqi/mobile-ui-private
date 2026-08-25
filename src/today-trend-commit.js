@@ -188,9 +188,17 @@ export function createTodayTrendCommitter({
         return recoveryPromise;
     };
 
-    const sagaCommit = async ({ previous, candidate, previousFacade, candidateFacade, task, expectedGeneration, scopeId }) => {
+    const sagaCommit = async ({
+        previous, candidate, previousFacade, candidateFacade, task, expectedGeneration, scopeId,
+        expectedStoreRevision = null,
+    }) => {
         const status = await storageStatus();
         if (!status.available || !status.owned || status.authority?.writeV2 !== true) return null;
+        if (expectedStoreRevision !== null && status.authority.storeRevision !== expectedStoreRevision) {
+            const error = new Error('今日风向 canonical store 已在生成期间变化，迟到结果已丢弃');
+            error.code = 'TT_REROLL_STALE_SCOPE';
+            throw error;
+        }
         await prepareInjection?.(candidateFacade);
         let entry = await journal.begin({
             scopeId, affectedScopeIds: changedScopeIds(previous, candidate),
@@ -201,7 +209,7 @@ export function createTodayTrendCommitter({
         let saved;
         try {
             saved = await save(candidate, {
-                scopeId, changedScopeIds: entry.affectedScopeIds, expectedStoreRevision: entry.baseStoreRevision,
+                scopeId, changedScopeIds: entry.affectedScopeIds, expectedStoreRevision: expectedStoreRevision ?? entry.baseStoreRevision,
                 transactionId: entry.transactionId, journalWrite: storeWritten, returnReceipt: true,
             });
             entry = journal.acceptAtomicTransition(storeWritten.value);
@@ -232,7 +240,19 @@ export function createTodayTrendCommitter({
         const scopeId = options.scopeId ?? null;
         const refreshEnabled = Object.hasOwn(options, 'refreshInjection')
             ? options.refreshInjection !== false : options.refresh !== false;
+        const expectedStoreRevision = options.expectedStoreRevision;
+        const expectedScopeRevision = options.expectedScopeRevision;
         if (options.canonical !== undefined && typeof options.canonical !== 'boolean') throw new TypeError('canonical 必须是布尔值');
+        if (expectedStoreRevision !== undefined && (!Number.isSafeInteger(expectedStoreRevision) || expectedStoreRevision < 0)) {
+            throw new TypeError('expectedStoreRevision 必须是非负安全整数');
+        }
+        if (expectedScopeRevision !== undefined && (!Number.isSafeInteger(expectedScopeRevision) || expectedScopeRevision < 0)) {
+            throw new TypeError('expectedScopeRevision 必须是非负安全整数');
+        }
+        if ((expectedStoreRevision !== undefined || expectedScopeRevision !== undefined)
+            && (options.canonical !== true || typeof scopeId !== 'string' || !scopeId)) {
+            throw new TypeError('canonical revision fence 必须指定 canonical scopeId');
+        }
         const expectedGeneration = generation;
         return enqueueDirectoryOperation('todayTrend', async () => {
             await recover();
@@ -241,6 +261,17 @@ export function createTodayTrendCommitter({
             const previous = loadCanonical ? canonicalStore(await loadCanonical()) : normalizeTodayTrendStore(await load());
             const previousFacade = facadeStore(previous);
             if (options.canonical && !loadCanonical) throw new TypeError('canonical mutation 需要 loadCanonical');
+            if (expectedStoreRevision !== undefined && previous.globalEnvelope.revision !== expectedStoreRevision) {
+                const error = new Error('今日风向 canonical store 已在生成期间变化，迟到结果已丢弃');
+                error.code = 'TT_REROLL_STALE_SCOPE';
+                throw error;
+            }
+            if (expectedScopeRevision !== undefined
+                && previous.globalEnvelope.payload.scopes[scopeId]?.revision !== expectedScopeRevision) {
+                const error = new Error('今日风向 canonical scope 已在生成期间变化，迟到结果已丢弃');
+                error.code = 'TT_REROLL_STALE_SCOPE';
+                throw error;
+            }
             const mutated = await mutate(clone(options.canonical ? previous : previousFacade));
             const candidate = options.canonical ? canonicalStore(mutated)
                 : loadCanonical ? canonicalStore(mutated, previous) : normalizeTodayTrendStore(mutated);
@@ -249,10 +280,12 @@ export function createTodayTrendCommitter({
             if (journal && refreshEnabled) {
                 const sagaResult = await sagaCommit({
                     previous, candidate, previousFacade, candidateFacade, task, expectedGeneration, scopeId,
+                    expectedStoreRevision: expectedStoreRevision ?? null,
                 });
                 if (sagaResult !== null) return sagaResult;
             }
-            const saved = await save(candidate, { scopeId, allowAuthorityAcquire: true, returnReceipt: true });
+            const saved = await save(candidate, { scopeId, allowAuthorityAcquire: true, returnReceipt: true,
+                ...(expectedStoreRevision === undefined ? {} : { expectedStoreRevision }) });
             const committedCandidate = savedStore(saved, candidateFacade);
             runtime.store = committedCandidate;
             if (!refreshEnabled) return candidateFacade;

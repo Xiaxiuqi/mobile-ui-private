@@ -1,13 +1,15 @@
 import { normalizeTodayTrendStore, TODAY_TREND_LIMITS } from './today-trend-model.js';
 import {
     appendTodayTrendCanonicalSnapshot, applyTodayTrendHistoryProducer, rollbackTodayTrendCanonicalPayload,
+    gcTodayTrendCheckpointEntityStore, materializeTodayTrendCheckpoint, storeTodayTrendCheckpoint,
 } from './today-trend-history-reducer.js';
 
 export const TODAY_TREND_V2_STORE_VERSION = 2;
 const LEGACY_GLOBAL_ENVELOPE_VERSION = 1;
 const LEGACY_SCOPE_ENVELOPE_VERSION = 1;
 const GLOBAL_ENVELOPE_VERSION = 2;
-const SCOPE_ENVELOPE_VERSION = 2;
+const LEGACY_FULL_CHECKPOINT_SCOPE_VERSION = 2;
+const SCOPE_ENVELOPE_VERSION = 3;
 const PROJECTION_KINDS = new Set([
     'live-stage', 'undated-stage', 'legacy-stage', 'day-summary', 'period-summary', 'span-stage',
 ]);
@@ -465,6 +467,8 @@ function createScopePayload(scope) {
         visibleFromAssistantCount: snapshot.assistantCount,
         detailManifestRefs: [],
         retentionPolicyRevision: 1,
+        restoreCapability: 'projection-only',
+        checkpointRef: null,
         dynamics: migrateDynamics(snapshot.dynamics),
     }));
     const fixedCoreBaselineByEvent = {};
@@ -474,14 +478,18 @@ function createScopePayload(scope) {
         historyRetentionSettings: { archivedDetailLatestEventCount: 2, archivedDetailRetentionFloors: 20, revision: 1 },
         historyRetentionState: { highWaterAssistantCount: null, nextArchivedSequence: dynamics.archived.length + 1, detailPoolRevision: 0, retentionPolicyRevision: 1 },
         stageDetailsByEvent: {}, archivedRemovableDataByEvent: {}, removableEntityStateById: {}, removableEntityTombstonesById: {},
-        fixedCoreBaselineByEvent, commitJournal: null,
+        fixedCoreBaselineByEvent, checkpointEntityStore: {}, commitJournal: null,
     };
 }
 
 function projectScopePayloadToV1(scope) {
     return {
         ...scopeFacadeFields(scope), dynamics: projectDynamicsToV1(scope.dynamics),
-        generationSnapshots: scope.generationSnapshots.map(snapshot => ({ ...clone(snapshot), dynamics: projectDynamicsToV1(snapshot.dynamics) })),
+        generationSnapshots: scope.generationSnapshots.map(snapshot => ({
+            assistantCount: snapshot.assistantCount, generatedAt: snapshot.generatedAt,
+            world: clone(snapshot.world), reputation: clone(snapshot.reputation), factions: clone(snapshot.factions),
+            dynamicsSettings: clone(snapshot.dynamicsSettings), dynamics: projectDynamicsToV1(snapshot.dynamics),
+        })),
     };
 }
 
@@ -679,25 +687,55 @@ export function validateTodayTrendV2Transition(previousValue, candidateValue) {
     for (const [storageId, previousEnvelope] of Object.entries(previous.globalEnvelope.payload.scopes)) {
         const nextPayload = candidate.globalEnvelope.payload.scopes[storageId]?.payload;
         const previousPayload = previousEnvelope.payload;
+        let transitionPreviousPayload = previousPayload;
         if (!nextPayload) {
             if (Object.values(previousPayload.removableEntityStateById).some(item => item.state === 'removed')) invalid('包含 removed lifecycle 的 scope 不得直接删除');
             continue;
         }
-        const oldEntities = entityIndex(previousPayload);
+        const restoredSnapshot = nextPayload.generationSnapshots.at(-1);
+        const priorRestoreSnapshot = restoredSnapshot?.restoreCapability === 'full'
+            ? previousPayload.generationSnapshots.find(snapshot => snapshot.restoreCapability === 'full'
+                && same(snapshot.checkpointRef, restoredSnapshot.checkpointRef)) : null;
+        if (priorRestoreSnapshot) {
+            const materialized = {
+                ...materializeTodayTrendCheckpoint(restoredSnapshot.checkpointRef, nextPayload.checkpointEntityStore),
+                generationSnapshots: clone(nextPayload.generationSnapshots),
+                checkpointEntityStore: clone(nextPayload.checkpointEntityStore),
+                commitJournal: null,
+            };
+            if (same(gcTodayTrendCheckpointEntityStore(nextPayload), gcTodayTrendCheckpointEntityStore(materialized))) {
+                // Only a checkpoint already retained by the previous authority can reverse lifecycle history.
+                continue;
+            }
+        }
+        const rerollBaseFloor = restoredSnapshot?.rerollFromAssistantCount;
+        const rerollBaseSnapshot = Number.isSafeInteger(rerollBaseFloor)
+            ? previousPayload.generationSnapshots.find(snapshot => snapshot.assistantCount === rerollBaseFloor
+                && snapshot.restoreCapability === 'full') : null;
+        const retainedRerollBase = rerollBaseSnapshot && nextPayload.generationSnapshots.find(snapshot =>
+            snapshot.assistantCount === rerollBaseFloor && same(snapshot.checkpointRef, rerollBaseSnapshot.checkpointRef));
+        if (retainedRerollBase) {
+            // A new F checkpoint may only reverse post-baseline state when it explicitly retains a full
+            // checkpoint that was already authoritative before this transaction.
+            transitionPreviousPayload = materializeTodayTrendCheckpoint(
+                rerollBaseSnapshot.checkpointRef, previousPayload.checkpointEntityStore,
+            );
+        }
+        const oldEntities = entityIndex(transitionPreviousPayload);
         const newEntities = entityIndex(nextPayload);
         const nextEvents = eventMap(nextPayload.dynamics);
-        const previousArchivedIds = new Set(previousPayload.dynamics.archived.map(event => event.id));
-        for (const archived of previousPayload.dynamics.archived) {
+        const previousArchivedIds = new Set(transitionPreviousPayload.dynamics.archived.map(event => event.id));
+        for (const archived of transitionPreviousPayload.dynamics.archived) {
             const next = nextEvents.get(archived.id);
             if (!next) continue;
             if (next.lifecycle !== 'archived' || !same(extractArchivedFixedCore(archived), extractArchivedFixedCore(next))) {
                 invalid('archived fixed core 不可改写或重新激活');
             }
         }
-        let expectedArchivedSequence = previousPayload.historyRetentionState.nextArchivedSequence;
+        let expectedArchivedSequence = transitionPreviousPayload.historyRetentionState.nextArchivedSequence;
         for (const archived of nextPayload.dynamics.archived) {
             if (previousArchivedIds.has(archived.id)) continue;
-            const previousActive = previousPayload.dynamics.active.find(event => event.id === archived.id);
+            const previousActive = transitionPreviousPayload.dynamics.active.find(event => event.id === archived.id);
             if (!previousActive || archived.archivedSequence !== expectedArchivedSequence) {
                 invalid('新归档事件必须按 nextArchivedSequence 连续分配');
             }
@@ -706,15 +744,15 @@ export function validateTodayTrendV2Transition(previousValue, candidateValue) {
         if (nextPayload.historyRetentionState.nextArchivedSequence !== expectedArchivedSequence) {
             invalid('nextArchivedSequence 与归档事务不一致');
         }
-        if (nextPayload.historyRetentionSettings.revision < previousPayload.historyRetentionSettings.revision
-            || nextPayload.historyRetentionState.retentionPolicyRevision < previousPayload.historyRetentionState.retentionPolicyRevision) {
+        if (nextPayload.historyRetentionSettings.revision < transitionPreviousPayload.historyRetentionSettings.revision
+            || nextPayload.historyRetentionState.retentionPolicyRevision < transitionPreviousPayload.historyRetentionState.retentionPolicyRevision) {
             invalid('retention revision 不得降低');
         }
-        const previousHighWater = previousPayload.historyRetentionState.highWaterAssistantCount;
+        const previousHighWater = transitionPreviousPayload.historyRetentionState.highWaterAssistantCount;
         const nextHighWater = nextPayload.historyRetentionState.highWaterAssistantCount;
         if (previousHighWater !== null && (nextHighWater === null || nextHighWater < previousHighWater)) invalid('highWaterAssistantCount 不得降低');
-        if (nextPayload.historyRetentionState.nextArchivedSequence < previousPayload.historyRetentionState.nextArchivedSequence) invalid('nextArchivedSequence 不得降低');
-        for (const [id, state] of Object.entries(previousPayload.removableEntityStateById)) {
+        if (nextPayload.historyRetentionState.nextArchivedSequence < transitionPreviousPayload.historyRetentionState.nextArchivedSequence) invalid('nextArchivedSequence 不得降低');
+        for (const [id, state] of Object.entries(transitionPreviousPayload.removableEntityStateById)) {
             const nextState = nextPayload.removableEntityStateById[id];
             if (state.state === 'removed' && !same(nextState, state)) invalid('removed lifecycle 不可逆或删除');
         }
@@ -726,11 +764,22 @@ export function validateTodayTrendV2Transition(previousValue, candidateValue) {
 }
 
 function normalizeScopeEnvelope(value, presets) {
+    if (!plainRecord(value)) invalid('scope envelope 必须是对象');
+    if (value.schemaVersion > SCOPE_ENVELOPE_VERSION) {
+        failure('TT_V2_FUTURE_VERSION', `scope envelope 版本 ${value.schemaVersion} 高于当前支持版本 ${SCOPE_ENVELOPE_VERSION}`);
+    }
     exact(value, ['schemaVersion', 'revision', 'payload'], 'scope envelope');
-    if (value.schemaVersion !== SCOPE_ENVELOPE_VERSION) invalid('scope envelope 版本无效');
+    if (![LEGACY_FULL_CHECKPOINT_SCOPE_VERSION, SCOPE_ENVELOPE_VERSION].includes(value.schemaVersion)) {
+        invalid('scope envelope 版本无效');
+    }
+    const migratingV2 = value.schemaVersion === LEGACY_FULL_CHECKPOINT_SCOPE_VERSION;
     safeInteger(value.revision, 'scope envelope revision');
     const payload = clone(value.payload);
-    exact(payload, ['storageId', 'characterId', 'characterName', 'presetId', 'operation', 'injection', 'world', 'reputation', 'factions', 'dynamicsSettings', 'dynamics', 'generationSnapshots', 'historyRetentionSettings', 'historyRetentionState', 'stageDetailsByEvent', 'archivedRemovableDataByEvent', 'removableEntityStateById', 'removableEntityTombstonesById', 'fixedCoreBaselineByEvent', 'commitJournal'], 'scope payload');
+    const payloadKeys = ['storageId', 'characterId', 'characterName', 'presetId', 'operation', 'injection', 'world', 'reputation', 'factions', 'dynamicsSettings', 'dynamics', 'generationSnapshots', 'historyRetentionSettings', 'historyRetentionState', 'stageDetailsByEvent', 'archivedRemovableDataByEvent', 'removableEntityStateById', 'removableEntityTombstonesById', 'fixedCoreBaselineByEvent', 'commitJournal'];
+    if (Object.hasOwn(payload, 'checkpointEntityStore')) payloadKeys.push('checkpointEntityStore');
+    exact(payload, payloadKeys, 'scope payload');
+    if (!Object.hasOwn(payload, 'checkpointEntityStore')) payload.checkpointEntityStore = {};
+    if (!plainRecord(payload.checkpointEntityStore)) invalid('checkpointEntityStore 必须是对象');
     if (!plainRecord(payload.dynamics) || !Array.isArray(payload.generationSnapshots)) invalid('scope payload 无效');
     if (payload.generationSnapshots.length > TODAY_TREND_LIMITS.generationSnapshots) {
         failure('TT_SNAPSHOT_LIMIT', 'canonical snapshot 数量超限');
@@ -757,7 +806,42 @@ function normalizeScopeEnvelope(value, presets) {
     }
     payload.generationSnapshots = payload.generationSnapshots.map(snapshot => {
         const normalizedSnapshot = clone(snapshot);
+        const legacyCheckpoint = Object.hasOwn(normalizedSnapshot, 'checkpoint') ? normalizedSnapshot.checkpoint : null;
+        if (!migratingV2 && (Object.hasOwn(normalizedSnapshot, 'checkpoint')
+            || Object.hasOwn(normalizedSnapshot, 'checkpointDigest'))) {
+            invalid('scope v3 snapshot 不得携带 legacy embedded checkpoint');
+        }
         const assistantCount = safeInteger(normalizedSnapshot.assistantCount, 'snapshot assistantCount');
+        normalizedSnapshot.restoreCapability = Object.hasOwn(normalizedSnapshot, 'restoreCapability')
+            ? normalizedSnapshot.restoreCapability : 'projection-only';
+        // Scope v2 did not have the v3 checkpoint contract. Never promote an old embedded payload
+        // into a reroll authority merely because it resembles a complete checkpoint.
+        if (migratingV2) {
+            normalizedSnapshot.restoreCapability = 'projection-only';
+            delete normalizedSnapshot.checkpoint;
+            delete normalizedSnapshot.checkpointDigest;
+            delete normalizedSnapshot.checkpointRef;
+        }
+        if (!['projection-only', 'full'].includes(normalizedSnapshot.restoreCapability)) invalid('snapshot restoreCapability 无效');
+        normalizedSnapshot.checkpointRef = Object.hasOwn(normalizedSnapshot, 'checkpointRef') ? normalizedSnapshot.checkpointRef : null;
+        normalizedSnapshot.rerollFromAssistantCount = Object.hasOwn(normalizedSnapshot, 'rerollFromAssistantCount')
+            ? normalizedSnapshot.rerollFromAssistantCount : null;
+        if (normalizedSnapshot.rerollFromAssistantCount !== null) {
+            safeInteger(normalizedSnapshot.rerollFromAssistantCount, 'snapshot rerollFromAssistantCount');
+            if (normalizedSnapshot.rerollFromAssistantCount >= assistantCount) invalid('snapshot reroll 基线必须早于自身楼层');
+        }
+        if (migratingV2) normalizedSnapshot.checkpointRef = null;
+        else if (normalizedSnapshot.restoreCapability === 'full' && !plainRecord(normalizedSnapshot.checkpointRef)) {
+            if (!plainRecord(legacyCheckpoint)) invalid('snapshot checkpointRef 与 restoreCapability 不一致');
+            const stored = storeTodayTrendCheckpoint(legacyCheckpoint, payload.checkpointEntityStore);
+            payload.checkpointEntityStore = stored.entityStore;
+            normalizedSnapshot.checkpointRef = stored.checkpointRef;
+        }
+        if (normalizedSnapshot.restoreCapability === 'full') {
+            materializeTodayTrendCheckpoint(normalizedSnapshot.checkpointRef, payload.checkpointEntityStore);
+        } else if (normalizedSnapshot.checkpointRef !== null) invalid('projection-only snapshot 不得携带 checkpoint ref');
+        delete normalizedSnapshot.checkpoint;
+        delete normalizedSnapshot.checkpointDigest;
         normalizedSnapshot.storeRevision = Object.hasOwn(normalizedSnapshot, 'storeRevision')
             ? safeInteger(normalizedSnapshot.storeRevision, 'snapshot storeRevision') : 0;
         normalizedSnapshot.detailPoolRevision = Object.hasOwn(normalizedSnapshot, 'detailPoolRevision')
@@ -788,10 +872,17 @@ function normalizeScopeEnvelope(value, presets) {
         };
         exact(normalizedSnapshot, [
             'assistantCount', 'generatedAt', 'storeRevision', 'detailPoolRevision', 'visibleFromAssistantCount',
-            'detailManifestRefs', 'retentionPolicyRevision', 'world', 'reputation', 'factions', 'dynamicsSettings', 'dynamics',
+            'detailManifestRefs', 'retentionPolicyRevision', 'restoreCapability', 'checkpointRef',
+            'rerollFromAssistantCount', 'world', 'reputation', 'factions', 'dynamicsSettings', 'dynamics',
         ], 'snapshot');
         return normalizedSnapshot;
     });
+    const snapshotFloors = new Set();
+    for (const snapshot of payload.generationSnapshots) {
+        if (snapshotFloors.has(snapshot.assistantCount)) invalid('snapshot assistantCount 不得重复');
+        snapshotFloors.add(snapshot.assistantCount);
+    }
+    payload.generationSnapshots.sort((left, right) => left.assistantCount - right.assistantCount);
     const v1Store = normalizeTodayTrendStore({ version: 1, presets, scopes: { [payload.storageId]: projectScopePayloadToV1(payload) } });
     const facade = v1Store.scopes[payload.storageId];
     payload.operation = clone(facade.operation); payload.injection = clone(facade.injection); payload.world = clone(facade.world);
@@ -810,6 +901,23 @@ function normalizeScopeEnvelope(value, presets) {
     if (Object.keys(payload.fixedCoreBaselineByEvent).some(id => !archivedEventIds.has(id))) invalid('fixed core baseline 存在孤儿记录');
     payload.fixedCoreBaselineByEvent = fixedCoreBaselineByEvent;
     if (payload.commitJournal !== null) invalid('scope payload commitJournal 必须为 null');
+    payload.generationSnapshots = payload.generationSnapshots.map(snapshot => {
+        if (snapshot.restoreCapability !== 'full') return snapshot;
+        const checkpoint = materializeTodayTrendCheckpoint(snapshot.checkpointRef, payload.checkpointEntityStore);
+        const normalizedCheckpoint = normalizeScopeEnvelope({
+            schemaVersion: SCOPE_ENVELOPE_VERSION,
+            revision: value.revision,
+            payload: { ...clone(checkpoint), generationSnapshots: [], checkpointEntityStore: {}, commitJournal: null },
+        }, presets).payload;
+        delete normalizedCheckpoint.generationSnapshots;
+        delete normalizedCheckpoint.checkpointEntityStore;
+        delete normalizedCheckpoint.commitJournal;
+        if (!same(normalizedCheckpoint, checkpoint)) {
+            failure('TT_CANONICAL_CHECKPOINT_INTEGRITY', `canonical snapshot ${snapshot.assistantCount} 正常化后完整性校验失败`);
+        }
+        return snapshot;
+    });
+    Object.assign(payload, gcTodayTrendCheckpointEntityStore(payload));
     return { schemaVersion: SCOPE_ENVELOPE_VERSION, revision: value.revision, payload };
 }
 
@@ -1157,6 +1265,7 @@ function preserveScopeMetadata(previousPayload, nextPayload, continuous, assista
         .map(([id, value]) => [id, clone(value)]));
     nextPayload.historyRetentionSettings = clone(previousPayload.historyRetentionSettings);
     nextPayload.historyRetentionState = clone(previousPayload.historyRetentionState);
+    nextPayload.checkpointEntityStore = clone(previousPayload.checkpointEntityStore);
     archiveNewEvents(previousPayload, nextPayload, continuous, assistantCount);
     nextPayload.stageDetailsByEvent = preserve(previousPayload.stageDetailsByEvent, ([id]) => continuous.has(id));
     nextPayload.archivedRemovableDataByEvent = preserve(previousPayload.archivedRemovableDataByEvent, ([id]) => continuous.has(id));
@@ -1270,6 +1379,7 @@ export function mergeTodayTrendV1StoreIntoV2(currentValue, facadeValue, { assist
 
 export function applyTodayTrendGenerationToV2(currentValue, storageId, generatedScope, history, {
     trustedStoryDate = null, assistantCount = null, generatedAt = 0, snapshot = true,
+    rerollFromAssistantCount = null,
 } = {}) {
     const current = normalizeTodayTrendV2Store(currentValue);
     const previousEnvelope = current.globalEnvelope.payload.scopes[storageId];
@@ -1289,9 +1399,23 @@ export function applyTodayTrendGenerationToV2(currentValue, storageId, generated
     payload = applyArchivedRetention(payload, reliableCount);
     payload.fixedCoreBaselineByEvent = Object.fromEntries(payload.dynamics.archived
         .map(event => [event.id, extractArchivedFixedCore(event)]));
-    if (snapshot) payload = appendTodayTrendCanonicalSnapshot(payload, assistantCount, generatedAt, current.globalEnvelope.revision + 1);
+    if (snapshot) payload = appendTodayTrendCanonicalSnapshot(payload, assistantCount, generatedAt,
+        current.globalEnvelope.revision + 1, { rerollFromAssistantCount });
     envelope.payload = payload;
     return normalizeTodayTrendV2Store(merged);
+}
+
+export function applyTodayTrendRerollToV2(currentValue, storageId, baselineAssistantCount, generatedScope, history, options = {}) {
+    const current = normalizeTodayTrendV2Store(currentValue);
+    const baseline = reliableAssistantCount(baselineAssistantCount);
+    const floor = reliableAssistantCount(options.assistantCount);
+    if (baseline === null || floor === null || baseline >= floor) {
+        failure('TT_REROLL_CHECKPOINT_INVALID', 'reroll 必须指定当前楼层之前的完整 checkpoint');
+    }
+    const restored = rollbackTodayTrendV2Scope(current, storageId, baseline);
+    return applyTodayTrendGenerationToV2(restored, storageId, generatedScope, history, {
+        ...options, snapshot: true, rerollFromAssistantCount: baseline,
+    });
 }
 
 export function rollbackTodayTrendV2Scope(currentValue, storageId, assistantCount) {
@@ -1304,15 +1428,42 @@ export function rollbackTodayTrendV2Scope(currentValue, storageId, assistantCoun
     return normalizeTodayTrendV2Store(current);
 }
 
+function checkpointPayloadForDetailTarget(payload, target) {
+    const snapshot = payload.generationSnapshots.reduce((latest, item) => item.restoreCapability === 'full'
+        && item.assistantCount <= target && (!latest || item.assistantCount > latest.assistantCount) ? item : latest, null);
+    if (!snapshot) return null;
+    return {
+        payload: materializeTodayTrendCheckpoint(snapshot.checkpointRef, payload.checkpointEntityStore),
+        snapshots: payload.generationSnapshots.filter(item => item.assistantCount <= snapshot.assistantCount),
+    };
+}
+
 export function resolveTodayTrendV2DetailForTarget(currentValue, storageId, eventId, detailId, targetAssistantCount) {
     const target = reliableAssistantCount(targetAssistantCount);
     if (target === null || typeof storageId !== 'string' || typeof eventId !== 'string' || typeof detailId !== 'string') return null;
     const store = normalizeTodayTrendV2Store(currentValue);
-    const payload = store.globalEnvelope.payload.scopes[storageId]?.payload;
-    if (!payload) return null;
+    const currentPayload = store.globalEnvelope.payload.scopes[storageId]?.payload;
+    if (!currentPayload) return null;
+    const currentFloor = reliableAssistantCount(currentPayload.operation.lastSuccessfulAssistantCount);
+    const checkpoint = currentFloor !== null && currentFloor <= target
+        ? { payload: currentPayload, snapshots: currentPayload.generationSnapshots }
+        : checkpointPayloadForDetailTarget(currentPayload, target);
+    if (!checkpoint) return null;
+    const { payload, snapshots } = checkpoint;
+    const detailState = payload.removableEntityStateById[detailId];
+    if (detailState?.state === 'removed' && detailState.entityType === 'detail' && detailState.eventId === eventId) {
+        const tombstone = payload.removableEntityTombstonesById[detailId];
+        if (!same(tombstone, detailState)) {
+            failure('TT_DETAIL_REMOVED_DIAGNOSTIC_INVALID', 'removed detail 缺少一致的 tombstone 诊断');
+        }
+        return {
+            status: 'unavailable', code: 'TT_DETAIL_REMOVED', detailId, eventId,
+            removalReason: detailState.removalReason,
+            removedAtAssistantCount: detailState.removedAtAssistantCount,
+        };
+    }
     const detail = (payload.stageDetailsByEvent[eventId] || []).find(item => item.id === detailId);
     if (!detail) return null;
-    const detailState = payload.removableEntityStateById[detailId];
     if (detailState?.state !== 'available' || detailState.entityType !== 'detail' || detailState.eventId !== eventId) return null;
     const event = [...payload.dynamics.active, ...payload.dynamics.archived].find(item => item.id === eventId);
     if (!event) return null;
@@ -1323,7 +1474,7 @@ export function resolveTodayTrendV2DetailForTarget(currentValue, storageId, even
         && summary.sourceFloorEnd !== null && summary.sourceFloorEnd <= target);
     if (!sourceSummary) return null;
     const manifestContainer = payload.archivedRemovableDataByEvent[eventId]?.manifestsById || {};
-    const manifestVisible = payload.generationSnapshots.some(snapshot => {
+    const manifestVisible = snapshots.some(snapshot => {
         if (snapshot.visibleFromAssistantCount > target) return false;
         return snapshot.detailManifestRefs.some(entry => {
             if (entry.eventId !== eventId || entry.visibleFromAssistantCount > target || !entry.detailRefs.includes(detailId)) return false;
@@ -1333,7 +1484,7 @@ export function resolveTodayTrendV2DetailForTarget(currentValue, storageId, even
                 && state.entityType === 'manifest' && state.eventId === eventId;
         });
     });
-    return manifestVisible ? clone(detail) : null;
+    return manifestVisible ? { ...clone(detail), status: 'available' } : null;
 }
 
 export function normalizeTodayTrendV2Candidate(value, currentValue = null) {
@@ -1376,6 +1527,7 @@ export function copyTodayTrendV2ScopeForBranch(sourceEnvelopeValue, targetStorag
     const sourceFloor = reliableAssistantCount(sourceEnvelope.payload.operation.lastSuccessfulAssistantCount) ?? 0;
     const offset = targetFloor - sourceFloor;
     const payload = clone(sourceEnvelope.payload);
+    const sourceCheckpointEntityStore = clone(sourceEnvelope.payload.checkpointEntityStore);
     payload.storageId = targetStorageId;
     payload.commitJournal = null;
     payload.operation = {
@@ -1398,12 +1550,14 @@ export function copyTodayTrendV2ScopeForBranch(sourceEnvelopeValue, targetStorag
         payload.historyRetentionState.highWaterAssistantCount, offset,
     );
     const translatedSnapshots = [];
+    payload.checkpointEntityStore = {};
     let baselineSnapshot = null;
     for (const snapshot of payload.generationSnapshots) {
         const assistantCount = translateBranchFloor(snapshot.assistantCount, offset);
         const translated = {
             ...clone(snapshot), assistantCount,
             visibleFromAssistantCount: translateBranchFloor(snapshot.visibleFromAssistantCount, offset),
+            rerollFromAssistantCount: translateBranchFloor(snapshot.rerollFromAssistantCount, offset),
             detailManifestRefs: snapshot.detailManifestRefs.map(entry => ({
                 ...clone(entry), visibleFromAssistantCount: translateBranchFloor(entry.visibleFromAssistantCount, offset),
             })),
@@ -1412,6 +1566,35 @@ export function copyTodayTrendV2ScopeForBranch(sourceEnvelopeValue, targetStorag
                 archived: snapshot.dynamics.archived.map(event => translateBranchEvent(event, offset)),
             },
         };
+        if (snapshot.restoreCapability === 'full') {
+            const checkpoint = materializeTodayTrendCheckpoint(snapshot.checkpointRef, sourceCheckpointEntityStore);
+            checkpoint.storageId = targetStorageId;
+            checkpoint.operation = {
+                ...checkpoint.operation,
+                lastSuccessfulAssistantCount: translateBranchFloor(checkpoint.operation.lastSuccessfulAssistantCount, offset),
+            };
+            checkpoint.dynamics = {
+                active: checkpoint.dynamics.active.map(event => translateBranchEvent(event, offset)),
+                archived: checkpoint.dynamics.archived.map(event => translateBranchEvent(event, offset)),
+            };
+            for (const container of Object.values(checkpoint.archivedRemovableDataByEvent)) {
+                container.daySummariesById = Object.fromEntries(Object.entries(container.daySummariesById)
+                    .map(([id, summary]) => [id, translateBranchProjection(summary, offset)]));
+            }
+            for (const field of ['removableEntityStateById', 'removableEntityTombstonesById']) {
+                checkpoint[field] = Object.fromEntries(Object.entries(checkpoint[field]).map(([id, state]) => [id, {
+                    ...state, removedAtAssistantCount: translateBranchFloor(state.removedAtAssistantCount, offset),
+                }]));
+ }
+            checkpoint.historyRetentionState.highWaterAssistantCount = translateBranchFloor(
+                checkpoint.historyRetentionState.highWaterAssistantCount, offset,
+            );
+            checkpoint.fixedCoreBaselineByEvent = Object.fromEntries(checkpoint.dynamics.archived
+                .map(event => [event.id, extractArchivedFixedCore(event)]));
+            const stored = storeTodayTrendCheckpoint(checkpoint, payload.checkpointEntityStore);
+            payload.checkpointEntityStore = stored.entityStore;
+            translated.checkpointRef = stored.checkpointRef;
+        }
         if (assistantCount === 0) {
             if (baselineSnapshot === null || snapshot.assistantCount > baselineSnapshot.sourceAssistantCount) {
                 baselineSnapshot = { sourceAssistantCount: snapshot.assistantCount, value: translated };
@@ -1423,6 +1606,7 @@ export function copyTodayTrendV2ScopeForBranch(sourceEnvelopeValue, targetStorag
     if (baselineSnapshot) translatedSnapshots.push(baselineSnapshot.value);
     payload.generationSnapshots = translatedSnapshots.sort((left, right) => left.assistantCount - right.assistantCount)
         .slice(-TODAY_TREND_LIMITS.generationSnapshots);
+    Object.assign(payload, gcTodayTrendCheckpointEntityStore(payload));
     payload.fixedCoreBaselineByEvent = Object.fromEntries(payload.dynamics.archived
         .map(event => [event.id, extractArchivedFixedCore(event)]));
     return normalizeScopeEnvelope({ ...sourceEnvelope, revision: 0, payload }, presets);
