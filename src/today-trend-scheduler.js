@@ -204,7 +204,7 @@ const sameSnapshot = (observation, snapshot) => observation?.key === snapshot.ke
 export function createTodayTrendScheduler({
     controller, committer, getStore, getStorageId, getChat = () => [], getFloor = () => null, random = Math.random, now = () => Date.now(),
     getCalendarStore = () => null, getPromptScope = null, wait = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds)),
-    commitFeedbackMs = 240,
+    commitFeedbackMs = 240, buildHistoryPlan = planTodayTrendHistoryBatches, buildHistoryBatch = buildTodayTrendHistoryBatch,
 } = {}) {
     if (!controller || typeof controller.generate !== 'function') throw new TypeError('今日风向调度器缺少生成控制器');
     if (!committer || typeof committer.commitStore !== 'function' || typeof committer.invalidateCommits !== 'function') throw new TypeError('今日风向调度器缺少事务提交器');
@@ -332,7 +332,7 @@ export function createTodayTrendScheduler({
         if (chance >= 100) return true;
         return (typeof random === 'function' ? random() : Math.random()) * 100 < chance;
     };
-    const run = async ({ kind, storageId, floor, incidentProbability, target = null, summaryOnly = false } = {}) => {
+    const run = async ({ kind, storageId, floor, incidentProbability, target = null, summaryOnly = false, batchEnabled = false, recentAssistantCount, mergeAssistantCount } = {}) => {
         const id = String(storageId || getStorageId() || '').trim();
         if (!id) throw new Error('今日风向生成缺少有效聊天');
         if (activeTask) {
@@ -348,7 +348,7 @@ export function createTodayTrendScheduler({
             id: ++sequence, kind, storageId: id, floor: currentFloor,
             pendingTurns: Number.isInteger(pendingTurns) && pendingTurns >= 0 ? pendingTurns : 0,
             incidentProbability, target, summaryOnly: summaryOnly === true,
-            abortController: new AbortController(),
+            abortController: new AbortController(), batchEnabled: batchEnabled === true, recentAssistantCount, mergeAssistantCount,
         });
         terminalTask = null;
         activeTask = task;
@@ -361,9 +361,77 @@ export function createTodayTrendScheduler({
                 throw error;
             }
             if (!isActive(task)) throw cancelled();
+            const chat = task.batchEnabled ? getChat() : null;
+            let historyPlan = null;
+            if (task.batchEnabled) {
+                historyPlan = buildHistoryPlan({ messages: chat, recentAssistantCount: task.recentAssistantCount, mergeAssistantCount: task.mergeAssistantCount });
+            }
+            if (!isActive(task)) throw cancelled();
             const source = await getStore();
             if (!isActive(task)) throw cancelled();
             const useCanonical = committer.supportsCanonical === true;
+            if (task.batchEnabled) {
+                if (!useCanonical || typeof committer.loadCanonical !== 'function') {
+                    throw Object.assign(new Error('今日风向批处理需要 canonical 提交器'), { code: 'TT_V2_REQUIRED' });
+                }
+                let batchScope = null;
+                let batchPreset = null;
+                for (let batchIndex = 0; batchIndex < historyPlan.batchCount; batchIndex += 1) {
+                    if (!isActive(task)) throw cancelled();
+                    const batchChat = getChat();
+                    const batch = historyPlan.batches[batchIndex];
+                    const batchAssistantCount = batch.assistantEnd;
+                    const canonical = await committer.loadCanonical();
+                    if (!isActive(task)) throw cancelled();
+                    const facade = buildReadOnlyShadow(canonical);
+                    batchScope = facade.scopes[id];
+                    batchPreset = facade.presets?.[batchScope?.presetId];
+                    if (!batchScope || !batchPreset) throw new Error('当前聊天尚未今日风向');
+                    const batchPromptScope = getPromptScope ? await getPromptScope(id, canonical) : null;
+                    if (getPromptScope && typeof batchPromptScope !== 'string') throw new Error('今日风向 canonical prompt scope 不可用');
+                    const generated = await controller.generate({
+                        signal: task.abortController.signal, scope: batchScope, preset: batchPreset, storageId: id,
+                        characterId: batchScope.characterId, characterName: batchScope.characterName,
+                        assistantCount: batchAssistantCount, allowIncident: rollIncident(batchScope.dynamicsSettings?.incident?.enabled
+                            ? (incidentProbability === undefined ? batchScope.dynamicsSettings.incident.probability : incidentProbability) : 0),
+                        target: null, summaryOnly: false, storyDate: trustedStoryDateFor(id), promptScope: batchPromptScope,
+                        historyBatch: buildHistoryBatch(batchChat, historyPlan, batchIndex),
+                        onPhase: next => { if (isActive(task)) setPhase(next, null); },
+                    });
+                    if (!isActive(task)) throw cancelled();
+                    setPhase('committing', null);
+                    const commitStartedAt = now();
+                    const committed = await committer.commitStore(store => {
+                        if (historyMessageDigest(getChat()) !== historyPlan.sourceDigest) {
+                            throw invalidHistoryInput('历史正文窗口消息源在批次生成期间已变化');
+                        }
+                        const current = buildReadOnlyShadow(store).scopes[id];
+                        const currentPreset = buildReadOnlyShadow(store).presets?.[current?.presetId];
+                        if (!isActive(task)) return store;
+                        if (!current || current.presetId !== batchPreset.id || currentPreset?.revision !== batchPreset.revision
+                            || JSON.stringify(current) !== JSON.stringify(batchScope)) {
+                            throw new Error('今日风向资料在批次生成期间已修改，迟到结果已丢弃');
+                        }
+                        const trustedStoryDate = trustedStoryDateFor(id);
+                        const generatedAt = now();
+                        const nextScope = { ...generated.scope,
+                            operation: { ...current.operation, lastSuccessfulAssistantCount: batchAssistantCount, lastSuccessfulRunAt: generatedAt },
+                            injection: current.injection, generationSnapshots: current.generationSnapshots };
+                        return applyTodayTrendGenerationToV2(store, id, nextScope, generated.history ?? { events: [] }, {
+                            trustedStoryDate, assistantCount: batchAssistantCount, generatedAt, snapshot: true,
+                        });
+                    }, { active: () => isActive(task) }, { canonical: true, scopeId: id });
+                    if (!committed || !isActive(task)) throw cancelled();
+                    const remainingFeedback = Math.max(0, commitFeedbackMs - Math.max(0, now() - commitStartedAt));
+                    if (remainingFeedback > 0) await wait(remainingFeedback);
+                    if (!isActive(task)) throw cancelled();
+                }
+                baselines.set(id, task.floor);
+                const currentObservation = observations.get(id);
+                if (currentObservation) { currentObservation.pendingTurns = 0; touch(currentObservation); }
+                setPhase('completed', null);
+                return true;
+            }
             const originalScope = source?.scopes?.[id];
             let scope = originalScope;
             let canonicalRerollSource = null;
@@ -411,6 +479,7 @@ export function createTodayTrendScheduler({
                 characterId: scope.characterId, characterName: scope.characterName,
                 assistantCount: task.floor, allowIncident: rollIncident(effectiveIncidentProbability),
                 target: task.target, summaryOnly: task.summaryOnly, storyDate: trustedStoryDate, promptScope,
+                ...(task.batchEnabled ? { historyBatch: buildHistoryBatch(chat, historyPlan, 0) } : {}),
                 onPhase: next => { if (isActive(task)) setPhase(next, null); },
             });
             if (!isActive(task)) throw cancelled();

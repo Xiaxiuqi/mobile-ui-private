@@ -29,7 +29,7 @@ dynamics 必须仅含 active 与 archived。事件仅含 id,type,lifecycle,title
     return { systemPrompt, userPrompt };
 }
 
-export function buildTodayTrendGenerationEnvelope({ context, preset, scope, promptScope = null, assistantCount = 0, allowIncident = false, target = null, storyDate = null, summaryOnly = false } = {}) {
+export function buildTodayTrendGenerationEnvelope({ context, preset, scope, promptScope = null, assistantCount = 0, allowIncident = false, target = null, storyDate = null, summaryOnly = false, historyBatch = null } = {}) {
     if (!context || typeof context !== 'object') throw new TypeError('今日风向生成提示词缺少上下文');
     if (!preset || typeof preset !== 'object') throw new TypeError('今日风向生成提示词缺少世界预设');
     if (!scope || typeof scope !== 'object') throw new TypeError('今日风向生成提示词缺少角色资料');
@@ -49,7 +49,8 @@ dynamics 非 null 时必须仅含 active、archived。事件仅含 id,type,lifec
         block('user_data', `${context.user?.name || ''}\n${context.user?.description || ''}`, 720),
         block('character_data', [context.character?.description, context.character?.personality, context.character?.scenario, context.character?.firstMessage, context.character?.exampleMessages].filter(Boolean).join('\n'), 2800),
         block('world_book_data', context.worldBookText, 6000),
-        block('main_chat_data', [context.mainChatText, context.latestChatText].filter(Boolean).join('\n'), 9000),
+        Array.isArray(historyBatch) ? block('history_batch_data', historyBatch.map(message => `${message.role}：${message.content}`).join('\n'), 9000)
+            : block('main_chat_data', [context.mainChatText, context.latestChatText].filter(Boolean).join('\n'), 9000),
         block('world_rule', preset.moduleRules?.world, 600),
         block('reputation_rule', preset.moduleRules?.reputation, 600),
         block('faction_rule', preset.moduleRules?.faction, 600),

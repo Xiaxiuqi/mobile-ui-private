@@ -4413,6 +4413,112 @@ assert.equal(phase5ChainRefreshes.length, 1, '真实生产链成功提交只能�
 assert.equal([...phase5ChainHarness.records.keys()].some(key => key.startsWith(TODAY_TREND_V2_JOURNAL_PREFIX)), false,
     '真实生产链 accepted 后不得残留开放 journal');
 assert.equal(await phase5ChainAuthority.release({ readV2: true, serveV2: false }), true, '阶段 5 生产链 harness 必须释放 authority owner');
+
+const phase3BatchChat = Array.from({ length: 8 }, (_, index) => ({ role: 'assistant', content: `阶段3批次正文${index + 1}` }));
+let phase3BatchCanonical = structuredClone(migratedValidV2);
+let phase3BatchLoadCalls = 0;
+let phase3BatchCommitCalls = 0;
+const phase3BatchInputs = [];
+const phase3BatchCounts = [];
+const phase3BatchCommitter = {
+    supportsCanonical: true,
+    invalidateCommits: () => {},
+    loadCanonical: async () => { phase3BatchLoadCalls += 1; return structuredClone(phase3BatchCanonical); },
+    commitStore: async (mutate, _task, options) => {
+        assert.deepEqual(options, { canonical: true, scopeId: 'chat' }, '阶段3批处理每批必须显式走 canonical 提交器');
+        phase3BatchCommitCalls += 1;
+        phase3BatchCanonical = await mutate(structuredClone(phase3BatchCanonical));
+        return buildReadOnlyShadow(phase3BatchCanonical);
+    },
+};
+const phase3BatchScheduler = createTodayTrendScheduler({
+    controller: { generate: async input => {
+        phase3BatchInputs.push(input.historyBatch);
+        phase3BatchCounts.push(input.assistantCount);
+        return { scope: input.scope };
+    } },
+    committer: phase3BatchCommitter, getStore: async () => buildReadOnlyShadow(phase3BatchCanonical),
+    getStorageId: () => 'chat', getChat: () => phase3BatchChat, getFloor: () => 8,
+});
+await phase3BatchScheduler.manual({ batchEnabled: true, recentAssistantCount: 8, mergeAssistantCount: 3 });
+assert.equal(phase3BatchInputs.length, 3, '阶段3合法窗口必须按合并大小串行调用三次 AI');
+assert.deepEqual(phase3BatchCounts, [3, 6, 8], '阶段3每批提交边界必须使用当前批最后一个 assistant 序号');
+assert.deepEqual(phase3BatchInputs.map(batch => batch.length), [3, 3, 2], '阶段3每批正文必须只包含当前批及其上下文消息');
+assert.equal(phase3BatchCommitCalls, 3, '阶段3每批成功后必须立即提交一次');
+assert.equal(phase3BatchLoadCalls, 3, '阶段3必须在每个批次开始前重新读取 canonical scope');
+assert.equal(phase3BatchCanonical.globalEnvelope.payload.scopes.chat.payload.operation.lastSuccessfulAssistantCount, 8,
+    '阶段3最终成功边界必须落在最后短批的 assistant 末端');
+
+let phase3InvalidStoreReads = 0;
+let phase3InvalidAiCalls = 0;
+const phase3InvalidScheduler = createTodayTrendScheduler({
+    controller: { generate: async () => { phase3InvalidAiCalls += 1; return { scope: valid.scopes.chat }; } },
+    committer: { invalidateCommits: () => {}, commitStore: async () => { throw new Error('不得写入'); } },
+    getStore: async () => { phase3InvalidStoreReads += 1; return valid; }, getStorageId: () => 'chat',
+    getChat: () => phase3BatchChat,
+});
+await assert.rejects(() => phase3InvalidScheduler.manual({ batchEnabled: true, recentAssistantCount: 0, mergeAssistantCount: 1 }),
+    error => error?.code === 'TT_HISTORY_WINDOW_INVALID', '阶段3非法窗口必须 fail-closed');
+assert.equal(phase3InvalidStoreReads, 0, '阶段3非法窗口不得读取 store');
+assert.equal(phase3InvalidAiCalls, 0, '阶段3非法窗口不得调用 AI');
+
+let phase3FailureCanonical = structuredClone(migratedValidV2);
+let phase3FailureCalls = 0;
+let phase3FailureCommits = 0;
+const phase3FailureScheduler = createTodayTrendScheduler({
+    controller: { generate: async input => {
+        phase3FailureCalls += 1;
+        if (phase3FailureCalls === 2) throw new Error('阶段3第二批失败');
+        return { scope: input.scope };
+    } },
+    committer: {
+        supportsCanonical: true, invalidateCommits: () => {},
+        loadCanonical: async () => structuredClone(phase3FailureCanonical),
+        commitStore: async mutate => { phase3FailureCommits += 1; phase3FailureCanonical = await mutate(structuredClone(phase3FailureCanonical)); return buildReadOnlyShadow(phase3FailureCanonical); },
+    },
+    getStore: async () => buildReadOnlyShadow(phase3FailureCanonical), getStorageId: () => 'chat', getChat: () => phase3BatchChat,
+});
+await assert.rejects(() => phase3FailureScheduler.manual({ batchEnabled: true, recentAssistantCount: 8, mergeAssistantCount: 3 }), /阶段3第二批失败/,
+    '阶段3批次失败必须向调用方报告');
+assert.equal(phase3FailureCalls, 2, '阶段3第二批失败后不得请求第三批');
+assert.equal(phase3FailureCommits, 1, '阶段3第二批失败后必须保留第一批成功提交');
+assert.equal(phase3FailureCanonical.globalEnvelope.payload.scopes.chat.payload.operation.lastSuccessfulAssistantCount, 3,
+    '阶段3批次失败后 canonical 必须停留在最后成功边界');
+
+
+let phase3RaceChat = Array.from({ length: 8 }, (_, index) => ({ role: 'assistant', content: `竞态批次正文${index + 1}` }));
+let phase3RaceCanonical = structuredClone(migratedValidV2);
+let phase3RaceRelease;
+let phase3RaceCalls = 0;
+let phase3RaceCommits = 0;
+const phase3RaceScheduler = createTodayTrendScheduler({
+    controller: { generate: async input => {
+        phase3RaceCalls += 1;
+        if (phase3RaceCalls === 1) await new Promise(resolve => { phase3RaceRelease = () => resolve(); });
+        return { scope: input.scope };
+    } },
+    committer: {
+        supportsCanonical: true, invalidateCommits: () => {},
+        loadCanonical: async () => structuredClone(phase3RaceCanonical),
+        commitStore: async mutate => {
+            phase3RaceCommits += 1;
+            phase3RaceCanonical = await mutate(structuredClone(phase3RaceCanonical));
+            return buildReadOnlyShadow(phase3RaceCanonical);
+        },
+    },
+    getStore: async () => buildReadOnlyShadow(phase3RaceCanonical), getStorageId: () => 'chat', getChat: () => phase3RaceChat,
+});
+const phase3RaceRun = phase3RaceScheduler.manual({ batchEnabled: true, recentAssistantCount: 8, mergeAssistantCount: 3 });
+for (let index = 0; index < 20 && typeof phase3RaceRelease !== 'function'; index += 1) await Promise.resolve();
+assert.equal(typeof phase3RaceRelease, 'function', '阶段3竞态测试必须等待第一批 AI 请求进入挂起态');
+phase3RaceChat[0] = { ...phase3RaceChat[0], content: '竞态期间被修改的正文' };
+phase3RaceRelease();
+await assert.rejects(() => phase3RaceRun, error => error?.code === 'TT_HISTORY_WINDOW_INVALID', '阶段3生成期间聊天变化必须拒绝迟到批次');
+assert.equal(phase3RaceCalls, 1, '阶段3聊天变化后不得继续请求下一批');
+assert.equal(phase3RaceCommits, 1, '阶段3聊天变化只允许尝试当前批提交，不能继续后续提交');
+assert.equal(phase3RaceCanonical.globalEnvelope.payload.scopes.chat.payload.operation.lastSuccessfulAssistantCount, 7,
+    '阶段3聊天变化后必须保留旧 canonical 成功边界');
+
 phase5ChainAuthority.close();
 
 const phase6RemovedState = (id, eventId = 'service') => ({

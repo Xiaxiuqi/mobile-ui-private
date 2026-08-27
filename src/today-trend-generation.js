@@ -299,12 +299,13 @@ export function createTodayTrendGenerationController({
             if (input.summaryOnly === true && input.target) throw new TypeError('summary-only 不得与定向刷新同时使用');
             const requireHistory = Object.hasOwn(input, 'storyDate');
             assertActive(input.signal);
-            const context = await gather({ ...input, getCtx, worldBookNames: input.preset.source?.worldBookNames,
+            const context = await gather({ ...input, getCtx, historyBatch: input.historyBatch,
+                worldBookNames: input.preset.source?.worldBookNames,
                 includeExistingChat: input.preset.source?.includeExistingChat, userRequirements: input.preset.source?.userRequirements });
             assertActive(input.signal);
             const prompts = buildGeneration({ context, preset: input.preset, scope: input.scope, promptScope: input.promptScope,
                 assistantCount: input.assistantCount, allowIncident: input.allowIncident === true, target: input.target,
-                storyDate: input.storyDate ?? null, summaryOnly: input.summaryOnly === true });
+                storyDate: input.storyDate ?? null, summaryOnly: input.summaryOnly === true, historyBatch: input.historyBatch });
             input.onPhase?.('generating');
             const raw = await callAI(prompts.systemPrompt, prompts.userPrompt, { isolated: true, signal: input.signal });
             assertActive(input.signal);

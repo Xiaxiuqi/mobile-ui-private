@@ -25667,7 +25667,8 @@ ${error.message}`);
     includeExistingChat = true,
     userRequirements = "",
     worldBookMaxChars = 6e3,
-    collectContext = gatherContext
+    collectContext = gatherContext,
+    historyBatch = null
   } = {}) {
     if (typeof getCtx !== "function") throw new TypeError("\u4ECA\u65E5\u98CE\u5411\u4E0A\u4E0B\u6587\u7F3A\u5C11\u4E0A\u4E0B\u6587\u8BFB\u53D6\u5668");
     const id2 = text7(storageId, 120);
@@ -25698,6 +25699,7 @@ ${error.message}`);
       characterId: roleId,
       characterName: roleName,
       source: { worldBookNames: selectedBooks, includeExistingChat: includeExistingChat === true, userRequirements: text7(userRequirements) },
+      historyBatch: Array.isArray(historyBatch) ? historyBatch : null,
       user: { name: text7(host?.userName, 120), description: text7(host?.userDesc) },
       character: {
         description: text7(host?.cardDesc),
@@ -25707,8 +25709,8 @@ ${error.message}`);
         exampleMessages: text7(host?.cardMesExample)
       },
       worldBookText: text7(host?.worldBookText, worldBookMaxChars),
-      mainChatText: includeExistingChat === true ? text7(host?.mainChatText, 8e3) : "",
-      latestChatText: includeExistingChat === true ? text7(host?.latestChatText, 1600) : ""
+      mainChatText: Array.isArray(historyBatch) ? "" : includeExistingChat === true ? text7(host?.mainChatText, 8e3) : "",
+      latestChatText: Array.isArray(historyBatch) ? "" : includeExistingChat === true ? text7(host?.latestChatText, 1600) : ""
     };
   }
 
@@ -25745,7 +25747,7 @@ ${context.user?.description || ""}`, 720),
     ].filter(Boolean).join("\n\n");
     return { systemPrompt, userPrompt };
   }
-  function buildTodayTrendGenerationEnvelope({ context, preset, scope, promptScope = null, assistantCount = 0, allowIncident = false, target = null, storyDate = null, summaryOnly = false } = {}) {
+  function buildTodayTrendGenerationEnvelope({ context, preset, scope, promptScope = null, assistantCount = 0, allowIncident = false, target = null, storyDate = null, summaryOnly = false, historyBatch = null } = {}) {
     if (!context || typeof context !== "object") throw new TypeError("\u4ECA\u65E5\u98CE\u5411\u751F\u6210\u63D0\u793A\u8BCD\u7F3A\u5C11\u4E0A\u4E0B\u6587");
     if (!preset || typeof preset !== "object") throw new TypeError("\u4ECA\u65E5\u98CE\u5411\u751F\u6210\u63D0\u793A\u8BCD\u7F3A\u5C11\u4E16\u754C\u9884\u8BBE");
     if (!scope || typeof scope !== "object") throw new TypeError("\u4ECA\u65E5\u98CE\u5411\u751F\u6210\u63D0\u793A\u8BCD\u7F3A\u5C11\u89D2\u8272\u8D44\u6599");
@@ -25764,7 +25766,7 @@ dynamics \u975E null \u65F6\u5FC5\u987B\u4EC5\u542B active\u3001archived\u3002\u
 ${context.user?.description || ""}`, 720),
       block("character_data", [context.character?.description, context.character?.personality, context.character?.scenario, context.character?.firstMessage, context.character?.exampleMessages].filter(Boolean).join("\n"), 2800),
       block("world_book_data", context.worldBookText, 6e3),
-      block("main_chat_data", [context.mainChatText, context.latestChatText].filter(Boolean).join("\n"), 9e3),
+      Array.isArray(historyBatch) ? block("history_batch_data", historyBatch.map((message) => `${message.role}\uFF1A${message.content}`).join("\n"), 9e3) : block("main_chat_data", [context.mainChatText, context.latestChatText].filter(Boolean).join("\n"), 9e3),
       block("world_rule", preset.moduleRules?.world, 600),
       block("reputation_rule", preset.moduleRules?.reputation, 600),
       block("faction_rule", preset.moduleRules?.faction, 600),
@@ -26094,6 +26096,7 @@ ${targetInstruction}`
         const context = await gather({
           ...input,
           getCtx,
+          historyBatch: input.historyBatch,
           worldBookNames: input.preset.source?.worldBookNames,
           includeExistingChat: input.preset.source?.includeExistingChat,
           userRequirements: input.preset.source?.userRequirements
@@ -26108,7 +26111,8 @@ ${targetInstruction}`
           allowIncident: input.allowIncident === true,
           target: input.target,
           storyDate: input.storyDate ?? null,
-          summaryOnly: input.summaryOnly === true
+          summaryOnly: input.summaryOnly === true,
+          historyBatch: input.historyBatch
         });
         input.onPhase?.("generating");
         const raw = await callAI(prompts.systemPrompt, prompts.userPrompt, { isolated: true, signal: input.signal });
@@ -26171,6 +26175,106 @@ ${targetInstruction}`
   };
   var hashHex = (state) => state.map((value) => (value >>> 0).toString(16).padStart(8, "0")).join("");
   var validFloor = (value, fallback = 0) => Number.isInteger(value) && value >= 0 ? value : fallback;
+  var historyMessageText = (message) => {
+    for (const key of ["mes", "message", "content"]) {
+      if (typeof message?.[key] === "string" && message[key].trim()) return message[key].trim();
+    }
+    return "";
+  };
+  var historyMessageRole = (message) => {
+    const role = typeof message?.role === "string" ? message.role.toLowerCase().trim() : "";
+    if (role === "user" || message?.is_user === true) return "user";
+    if (role === "assistant" || role === "" && message?.is_user !== true && message?.is_system !== true) return "assistant";
+    return null;
+  };
+  var invalidHistoryInput = (message) => Object.assign(new Error(message), { code: "TT_HISTORY_WINDOW_INVALID" });
+  var historyMessageDigest = (messages) => {
+    let hash = 2166136261;
+    const update = (value) => {
+      const text9 = String(value);
+      for (let index = 0; index < text9.length; index += 1) hash = Math.imul(hash ^ text9.charCodeAt(index), 16777619);
+      hash = Math.imul(hash ^ 31, 16777619);
+    };
+    for (const message of messages) {
+      const role = historyMessageRole(message);
+      const content = historyMessageText(message);
+      update(role);
+      update(content);
+    }
+    return `fnv1a32:${(hash >>> 0).toString(16).padStart(8, "0")}`;
+  };
+  var validateHistoryPlan = (plan, messages) => {
+    if (!plan || typeof plan !== "object" || Array.isArray(plan) || !Array.isArray(plan.batches) || !Number.isSafeInteger(plan.assistantCount) || plan.assistantCount < 1 || !Number.isSafeInteger(plan.recentAssistantCount) || plan.recentAssistantCount < 1 || !Number.isSafeInteger(plan.mergeAssistantCount) || plan.mergeAssistantCount < 1 || !Number.isSafeInteger(plan.windowStart) || !Number.isSafeInteger(plan.windowEnd) || !Number.isSafeInteger(plan.batchCount) || plan.batchCount < 1 || plan.batches.length !== plan.batchCount || typeof plan.sourceDigest !== "string") {
+      throw invalidHistoryInput("\u5386\u53F2\u6B63\u6587\u7A97\u53E3\u89C4\u5212\u7ED3\u6784\u65E0\u6548");
+    }
+    if (plan.windowEnd !== plan.assistantCount || plan.windowStart !== plan.assistantCount - plan.recentAssistantCount + 1 || plan.recentAssistantCount > plan.assistantCount || plan.mergeAssistantCount > plan.recentAssistantCount || plan.batchCount !== Math.ceil(plan.recentAssistantCount / plan.mergeAssistantCount)) {
+      throw invalidHistoryInput("\u5386\u53F2\u6B63\u6587\u7A97\u53E3\u89C4\u5212\u8FB9\u754C\u65E0\u6548");
+    }
+    for (const [index, batch] of plan.batches.entries()) {
+      if (!batch || typeof batch !== "object" || Object.keys(batch).sort().join(",") !== "assistantEnd,assistantStart,index" || batch.index !== index || !Number.isSafeInteger(batch.assistantStart) || !Number.isSafeInteger(batch.assistantEnd) || batch.assistantStart !== plan.windowStart + index * plan.mergeAssistantCount || batch.assistantEnd !== Math.min(plan.assistantCount, batch.assistantStart + plan.mergeAssistantCount - 1)) {
+        throw invalidHistoryInput("\u5386\u53F2\u6B63\u6587\u7A97\u53E3\u6279\u6B21\u8FB9\u754C\u65E0\u6548");
+      }
+    }
+    if (!Array.isArray(messages) || historyMessageDigest(messages) !== plan.sourceDigest) {
+      throw invalidHistoryInput("\u5386\u53F2\u6B63\u6587\u7A97\u53E3\u6D88\u606F\u6E90\u5DF2\u53D8\u5316");
+    }
+  };
+  function planTodayTrendHistoryBatches({ messages, recentAssistantCount, mergeAssistantCount } = {}) {
+    if (!Array.isArray(messages)) throw invalidHistoryInput("\u5386\u53F2\u6B63\u6587\u7A97\u53E3\u6D88\u606F\u5FC5\u987B\u662F\u6570\u7EC4");
+    let assistantCount = 0;
+    for (const message of messages) {
+      if (!message || typeof message !== "object" || !historyMessageText(message)) {
+        throw invalidHistoryInput("\u5386\u53F2\u6B63\u6587\u7A97\u53E3\u4E0D\u5F97\u5305\u542B\u7A7A\u6D88\u606F");
+      }
+      if (!historyMessageRole(message)) throw invalidHistoryInput("\u5386\u53F2\u6B63\u6587\u7A97\u53E3\u5305\u542B\u65E0\u6548\u89D2\u8272");
+      if (historyMessageRole(message) === "assistant") assistantCount += 1;
+    }
+    if (!Number.isInteger(recentAssistantCount) || recentAssistantCount < 1 || recentAssistantCount > assistantCount) {
+      throw invalidHistoryInput("\u5386\u53F2\u6B63\u6587\u7A97\u53E3 recentAssistantCount \u8D8A\u754C");
+    }
+    if (!Number.isInteger(mergeAssistantCount) || mergeAssistantCount < 1 || mergeAssistantCount > recentAssistantCount) {
+      throw invalidHistoryInput("\u5386\u53F2\u6B63\u6587\u7A97\u53E3 mergeAssistantCount \u8D8A\u754C");
+    }
+    const windowStart = assistantCount - recentAssistantCount + 1;
+    const batchCount = Math.ceil(recentAssistantCount / mergeAssistantCount);
+    return Object.freeze({
+      assistantCount,
+      recentAssistantCount,
+      mergeAssistantCount,
+      windowStart,
+      windowEnd: assistantCount,
+      sourceDigest: historyMessageDigest(messages),
+      batchCount,
+      batches: Object.freeze(Array.from({ length: batchCount }, (_, index) => {
+        const start = windowStart + index * mergeAssistantCount;
+        return Object.freeze({
+          index,
+          assistantStart: start,
+          assistantEnd: Math.min(assistantCount, start + mergeAssistantCount - 1)
+        });
+      }))
+    });
+  }
+  function buildTodayTrendHistoryBatch(messages, plan, batchIndex) {
+    if (!Number.isInteger(batchIndex) || batchIndex < 0) {
+      throw invalidHistoryInput("\u5386\u53F2\u6B63\u6587\u7A97\u53E3\u6279\u6B21\u65E0\u6548");
+    }
+    validateHistoryPlan(plan, messages);
+    if (batchIndex >= plan.batchCount) throw invalidHistoryInput("\u5386\u53F2\u6B63\u6587\u7A97\u53E3\u6279\u6B21\u65E0\u6548");
+    const batch = plan.batches[batchIndex];
+    const selected = [];
+    let assistantOrdinal = 0;
+    for (const message of messages) {
+      const role = historyMessageRole(message);
+      if (!role || !historyMessageText(message)) throw invalidHistoryInput("\u5386\u53F2\u6B63\u6587\u7A97\u53E3\u6D88\u606F\u65E0\u6548");
+      const ordinal = role === "assistant" ? ++assistantOrdinal : assistantOrdinal + 1;
+      if (ordinal >= batch.assistantStart && ordinal <= batch.assistantEnd) {
+        selected.push(Object.freeze({ role, content: historyMessageText(message) }));
+      }
+    }
+    if (!selected.some((message) => message.role === "assistant")) throw invalidHistoryInput("\u5386\u53F2\u6B63\u6587\u7A97\u53E3\u6279\u6B21\u7F3A\u5C11 assistant \u6D88\u606F");
+    return Object.freeze(selected);
+  }
   var createTurnSnapshot = (chat, hostFloor = null) => {
     const sessionHash = [...HASH_SEEDS];
     let messageCount = 0;
@@ -26228,7 +26332,9 @@ ${targetInstruction}`
     getCalendarStore = () => null,
     getPromptScope = null,
     wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
-    commitFeedbackMs = 240
+    commitFeedbackMs = 240,
+    buildHistoryPlan = planTodayTrendHistoryBatches,
+    buildHistoryBatch = buildTodayTrendHistoryBatch
   } = {}) {
     if (!controller || typeof controller.generate !== "function") throw new TypeError("\u4ECA\u65E5\u98CE\u5411\u8C03\u5EA6\u5668\u7F3A\u5C11\u751F\u6210\u63A7\u5236\u5668");
     if (!committer || typeof committer.commitStore !== "function" || typeof committer.invalidateCommits !== "function") throw new TypeError("\u4ECA\u65E5\u98CE\u5411\u8C03\u5EA6\u5668\u7F3A\u5C11\u4E8B\u52A1\u63D0\u4EA4\u5668");
@@ -26369,7 +26475,7 @@ ${targetInstruction}`
       if (chance >= 100) return true;
       return (typeof random === "function" ? random() : Math.random()) * 100 < chance;
     };
-    const run = async ({ kind, storageId, floor, incidentProbability, target = null, summaryOnly = false } = {}) => {
+    const run = async ({ kind, storageId, floor, incidentProbability, target = null, summaryOnly = false, batchEnabled = false, recentAssistantCount, mergeAssistantCount } = {}) => {
       const id2 = String(storageId || getStorageId2() || "").trim();
       if (!id2) throw new Error("\u4ECA\u65E5\u98CE\u5411\u751F\u6210\u7F3A\u5C11\u6709\u6548\u804A\u5929");
       if (activeTask) {
@@ -26389,7 +26495,10 @@ ${targetInstruction}`
         incidentProbability,
         target,
         summaryOnly: summaryOnly === true,
-        abortController: new AbortController()
+        abortController: new AbortController(),
+        batchEnabled: batchEnabled === true,
+        recentAssistantCount,
+        mergeAssistantCount
       });
       terminalTask = null;
       activeTask = task;
@@ -26402,9 +26511,94 @@ ${targetInstruction}`
           throw error;
         }
         if (!isActive(task)) throw cancelled();
+        const chat = task.batchEnabled ? getChat() : null;
+        let historyPlan = null;
+        if (task.batchEnabled) {
+          historyPlan = buildHistoryPlan({ messages: chat, recentAssistantCount: task.recentAssistantCount, mergeAssistantCount: task.mergeAssistantCount });
+        }
+        if (!isActive(task)) throw cancelled();
         const source = await getStore();
         if (!isActive(task)) throw cancelled();
         const useCanonical = committer.supportsCanonical === true;
+        if (task.batchEnabled) {
+          if (!useCanonical || typeof committer.loadCanonical !== "function") {
+            throw Object.assign(new Error("\u4ECA\u65E5\u98CE\u5411\u6279\u5904\u7406\u9700\u8981 canonical \u63D0\u4EA4\u5668"), { code: "TT_V2_REQUIRED" });
+          }
+          let batchScope = null;
+          let batchPreset = null;
+          for (let batchIndex = 0; batchIndex < historyPlan.batchCount; batchIndex += 1) {
+            if (!isActive(task)) throw cancelled();
+            const batchChat = getChat();
+            const batch = historyPlan.batches[batchIndex];
+            const batchAssistantCount = batch.assistantEnd;
+            const canonical3 = await committer.loadCanonical();
+            if (!isActive(task)) throw cancelled();
+            const facade = buildReadOnlyShadow(canonical3);
+            batchScope = facade.scopes[id2];
+            batchPreset = facade.presets?.[batchScope?.presetId];
+            if (!batchScope || !batchPreset) throw new Error("\u5F53\u524D\u804A\u5929\u5C1A\u672A\u4ECA\u65E5\u98CE\u5411");
+            const batchPromptScope = getPromptScope ? await getPromptScope(id2, canonical3) : null;
+            if (getPromptScope && typeof batchPromptScope !== "string") throw new Error("\u4ECA\u65E5\u98CE\u5411 canonical prompt scope \u4E0D\u53EF\u7528");
+            const generated2 = await controller.generate({
+              signal: task.abortController.signal,
+              scope: batchScope,
+              preset: batchPreset,
+              storageId: id2,
+              characterId: batchScope.characterId,
+              characterName: batchScope.characterName,
+              assistantCount: batchAssistantCount,
+              allowIncident: rollIncident(batchScope.dynamicsSettings?.incident?.enabled ? incidentProbability === void 0 ? batchScope.dynamicsSettings.incident.probability : incidentProbability : 0),
+              target: null,
+              summaryOnly: false,
+              storyDate: trustedStoryDateFor(id2),
+              promptScope: batchPromptScope,
+              historyBatch: buildHistoryBatch(batchChat, historyPlan, batchIndex),
+              onPhase: (next) => {
+                if (isActive(task)) setPhase(next, null);
+              }
+            });
+            if (!isActive(task)) throw cancelled();
+            setPhase("committing", null);
+            const commitStartedAt2 = now2();
+            const committed2 = await committer.commitStore((store) => {
+              if (historyMessageDigest(getChat()) !== historyPlan.sourceDigest) {
+                throw invalidHistoryInput("\u5386\u53F2\u6B63\u6587\u7A97\u53E3\u6D88\u606F\u6E90\u5728\u6279\u6B21\u751F\u6210\u671F\u95F4\u5DF2\u53D8\u5316");
+              }
+              const current = buildReadOnlyShadow(store).scopes[id2];
+              const currentPreset = buildReadOnlyShadow(store).presets?.[current?.presetId];
+              if (!isActive(task)) return store;
+              if (!current || current.presetId !== batchPreset.id || currentPreset?.revision !== batchPreset.revision || JSON.stringify(current) !== JSON.stringify(batchScope)) {
+                throw new Error("\u4ECA\u65E5\u98CE\u5411\u8D44\u6599\u5728\u6279\u6B21\u751F\u6210\u671F\u95F4\u5DF2\u4FEE\u6539\uFF0C\u8FDF\u5230\u7ED3\u679C\u5DF2\u4E22\u5F03");
+              }
+              const trustedStoryDate2 = trustedStoryDateFor(id2);
+              const generatedAt = now2();
+              const nextScope = {
+                ...generated2.scope,
+                operation: { ...current.operation, lastSuccessfulAssistantCount: batchAssistantCount, lastSuccessfulRunAt: generatedAt },
+                injection: current.injection,
+                generationSnapshots: current.generationSnapshots
+              };
+              return applyTodayTrendGenerationToV2(store, id2, nextScope, generated2.history ?? { events: [] }, {
+                trustedStoryDate: trustedStoryDate2,
+                assistantCount: batchAssistantCount,
+                generatedAt,
+                snapshot: true
+              });
+            }, { active: () => isActive(task) }, { canonical: true, scopeId: id2 });
+            if (!committed2 || !isActive(task)) throw cancelled();
+            const remainingFeedback2 = Math.max(0, commitFeedbackMs - Math.max(0, now2() - commitStartedAt2));
+            if (remainingFeedback2 > 0) await wait(remainingFeedback2);
+            if (!isActive(task)) throw cancelled();
+          }
+          baselines.set(id2, task.floor);
+          const currentObservation = observations.get(id2);
+          if (currentObservation) {
+            currentObservation.pendingTurns = 0;
+            touch(currentObservation);
+          }
+          setPhase("completed", null);
+          return true;
+        }
         const originalScope = source?.scopes?.[id2];
         let scope = originalScope;
         let canonicalRerollSource = null;
@@ -26457,6 +26651,7 @@ ${targetInstruction}`
           summaryOnly: task.summaryOnly,
           storyDate: trustedStoryDate,
           promptScope,
+          ...task.batchEnabled ? { historyBatch: buildHistoryBatch(chat, historyPlan, 0) } : {},
           onPhase: (next) => {
             if (isActive(task)) setPhase(next, null);
           }
