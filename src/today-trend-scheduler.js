@@ -39,6 +39,121 @@ const updateHashNumber = (state, value) => {
 };
 const hashHex = state => state.map(value => (value >>> 0).toString(16).padStart(8, '0')).join('');
 const validFloor = (value, fallback = 0) => Number.isInteger(value) && value >= 0 ? value : fallback;
+
+const historyMessageText = message => {
+    for (const key of ['mes', 'message', 'content']) {
+        if (typeof message?.[key] === 'string' && message[key].trim()) return message[key].trim();
+    }
+    return '';
+};
+const historyMessageRole = message => {
+    const role = typeof message?.role === 'string' ? message.role.toLowerCase().trim() : '';
+    if (role === 'user' || message?.is_user === true) return 'user';
+    if (role === 'assistant' || (role === '' && message?.is_user !== true && message?.is_system !== true)) return 'assistant';
+    return null;
+};
+const invalidHistoryInput = message => Object.assign(new Error(message), { code: 'TT_HISTORY_WINDOW_INVALID' });
+const historyMessageDigest = messages => {
+    let hash = 2166136261;
+    const update = value => {
+        const text = String(value);
+        for (let index = 0; index < text.length; index += 1) hash = Math.imul(hash ^ text.charCodeAt(index), 16777619);
+        hash = Math.imul(hash ^ 0x1f, 16777619);
+    };
+    for (const message of messages) {
+        const role = historyMessageRole(message);
+        const content = historyMessageText(message);
+        update(role);
+        update(content);
+    }
+    return `fnv1a32:${(hash >>> 0).toString(16).padStart(8, '0')}`;
+};
+
+const validateHistoryPlan = (plan, messages) => {
+    if (!plan || typeof plan !== 'object' || Array.isArray(plan) || !Array.isArray(plan.batches)
+        || !Number.isSafeInteger(plan.assistantCount) || plan.assistantCount < 1
+        || !Number.isSafeInteger(plan.recentAssistantCount) || plan.recentAssistantCount < 1
+        || !Number.isSafeInteger(plan.mergeAssistantCount) || plan.mergeAssistantCount < 1
+        || !Number.isSafeInteger(plan.windowStart) || !Number.isSafeInteger(plan.windowEnd)
+        || !Number.isSafeInteger(plan.batchCount) || plan.batchCount < 1
+        || plan.batches.length !== plan.batchCount || typeof plan.sourceDigest !== 'string') {
+        throw invalidHistoryInput('历史正文窗口规划结构无效');
+    }
+    if (plan.windowEnd !== plan.assistantCount || plan.windowStart !== plan.assistantCount - plan.recentAssistantCount + 1
+        || plan.recentAssistantCount > plan.assistantCount || plan.mergeAssistantCount > plan.recentAssistantCount
+        || plan.batchCount !== Math.ceil(plan.recentAssistantCount / plan.mergeAssistantCount)) {
+        throw invalidHistoryInput('历史正文窗口规划边界无效');
+    }
+    for (const [index, batch] of plan.batches.entries()) {
+        if (!batch || typeof batch !== 'object' || Object.keys(batch).sort().join(',') !== 'assistantEnd,assistantStart,index'
+            || batch.index !== index || !Number.isSafeInteger(batch.assistantStart) || !Number.isSafeInteger(batch.assistantEnd)
+            || batch.assistantStart !== plan.windowStart + index * plan.mergeAssistantCount
+            || batch.assistantEnd !== Math.min(plan.assistantCount, batch.assistantStart + plan.mergeAssistantCount - 1)) {
+            throw invalidHistoryInput('历史正文窗口批次边界无效');
+        }
+    }
+    if (!Array.isArray(messages) || historyMessageDigest(messages) !== plan.sourceDigest) {
+        throw invalidHistoryInput('历史正文窗口消息源已变化');
+    }
+};
+
+/**
+ * Validate the chat and calculate only scalar batch boundaries. Message bodies are
+ * deliberately materialized by buildTodayTrendHistoryBatch, one batch at a time.
+ */
+export function planTodayTrendHistoryBatches({ messages, recentAssistantCount, mergeAssistantCount } = {}) {
+    if (!Array.isArray(messages)) throw invalidHistoryInput('历史正文窗口消息必须是数组');
+    let assistantCount = 0;
+    for (const message of messages) {
+        if (!message || typeof message !== 'object' || !historyMessageText(message)) {
+            throw invalidHistoryInput('历史正文窗口不得包含空消息');
+        }
+        if (!historyMessageRole(message)) throw invalidHistoryInput('历史正文窗口包含无效角色');
+        if (historyMessageRole(message) === 'assistant') assistantCount += 1;
+    }
+    if (!Number.isInteger(recentAssistantCount) || recentAssistantCount < 1 || recentAssistantCount > assistantCount) {
+        throw invalidHistoryInput('历史正文窗口 recentAssistantCount 越界');
+    }
+    if (!Number.isInteger(mergeAssistantCount) || mergeAssistantCount < 1 || mergeAssistantCount > recentAssistantCount) {
+        throw invalidHistoryInput('历史正文窗口 mergeAssistantCount 越界');
+    }
+    const windowStart = assistantCount - recentAssistantCount + 1;
+    const batchCount = Math.ceil(recentAssistantCount / mergeAssistantCount);
+    return Object.freeze({
+        assistantCount, recentAssistantCount, mergeAssistantCount, windowStart, windowEnd: assistantCount,
+        sourceDigest: historyMessageDigest(messages),
+        batchCount,
+        batches: Object.freeze(Array.from({ length: batchCount }, (_, index) => {
+            const start = windowStart + index * mergeAssistantCount;
+            return Object.freeze({
+                index, assistantStart: start,
+                assistantEnd: Math.min(assistantCount, start + mergeAssistantCount - 1),
+            });
+        })),
+    });
+}
+
+/** Materialize exactly one validated history batch, preserving source order and message boundaries. */
+export function buildTodayTrendHistoryBatch(messages, plan, batchIndex) {
+    if (!Number.isInteger(batchIndex) || batchIndex < 0) {
+        throw invalidHistoryInput('历史正文窗口批次无效');
+    }
+    validateHistoryPlan(plan, messages);
+    if (batchIndex >= plan.batchCount) throw invalidHistoryInput('历史正文窗口批次无效');
+    const batch = plan.batches[batchIndex];
+    const selected = [];
+    let assistantOrdinal = 0;
+    for (const message of messages) {
+        const role = historyMessageRole(message);
+        if (!role || !historyMessageText(message)) throw invalidHistoryInput('历史正文窗口消息无效');
+        const ordinal = role === 'assistant' ? ++assistantOrdinal : assistantOrdinal + 1;
+        if (ordinal >= batch.assistantStart && ordinal <= batch.assistantEnd) {
+            selected.push(Object.freeze({ role, content: historyMessageText(message) }));
+        }
+    }
+    if (!selected.some(message => message.role === 'assistant')) throw invalidHistoryInput('历史正文窗口批次缺少 assistant 消息');
+    return Object.freeze(selected);
+}
 const createTurnSnapshot = (chat, hostFloor = null) => {
     const sessionHash = [...HASH_SEEDS];
     let messageCount = 0;

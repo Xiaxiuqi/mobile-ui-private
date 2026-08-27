@@ -50,7 +50,9 @@ import {
     buildTodayTrendRuleRegenerationEnvelope as buildCanonicalTodayTrendRuleRegenerationEnvelope,
 } from '../src/prompts/today-trend/envelopes.js';
 import { createTodayTrendGenerationController } from '../src/today-trend-generation.js';
-import { createTodayTrendScheduler as createTodayTrendSchedulerBase } from '../src/today-trend-scheduler.js';
+import {
+    buildTodayTrendHistoryBatch, createTodayTrendScheduler as createTodayTrendSchedulerBase, planTodayTrendHistoryBatches,
+} from '../src/today-trend-scheduler.js';
 import { createPhoneHostEventController } from '../src/phone-host-events.js';
 import { renderTodayTrendInjection } from '../src/today-trend-injection.js';
 import { renderTodayTrendApp } from '../src/today-trend-view.js';
@@ -85,6 +87,63 @@ try {
 }
 
 const createTodayTrendScheduler = options => createTodayTrendSchedulerBase({ commitFeedbackMs: 0, ...options });
+
+const historyWindowMessages = [
+    { role: 'user', content: '用户一' }, { role: 'assistant', content: '助手一' },
+    { role: 'user', content: '用户二' }, { role: 'assistant', content: '助手二' },
+    { role: 'user', content: '用户三' }, { role: 'assistant', content: '助手三' },
+    { role: 'user', content: '用户四' }, { role: 'assistant', content: '助手四' },
+    { role: 'user', content: '用户五' }, { role: 'assistant', content: '助手五' },
+];
+const historyPlan = planTodayTrendHistoryBatches({ messages: historyWindowMessages, recentAssistantCount: 4, mergeAssistantCount: 3 });
+assert.deepEqual({
+    assistantCount: historyPlan.assistantCount, windowStart: historyPlan.windowStart, windowEnd: historyPlan.windowEnd,
+    batchCount: historyPlan.batchCount, batches: historyPlan.batches,
+}, {
+    assistantCount: 5, windowStart: 2, windowEnd: 5, batchCount: 2,
+    batches: [
+        { index: 0, assistantStart: 2, assistantEnd: 4 },
+        { index: 1, assistantStart: 5, assistantEnd: 5 },
+    ],
+}, '历史正文规划必须按真实 assistantCount 计算闭合窗口和最后短批');
+assert.equal(Object.hasOwn(historyPlan, 'messages'), false, '批次规划不得预构造或常驻正文窗口');
+assert.equal(typeof historyPlan.sourceDigest, 'string', '批次规划必须绑定消息源摘要');
+assert.deepEqual(Object.keys(historyPlan.batches[0]).sort(), ['assistantEnd', 'assistantStart', 'index'],
+    '批次描述只能保留标量边界');
+assert.deepEqual(buildTodayTrendHistoryBatch(historyWindowMessages, historyPlan, 0), [
+    { role: 'user', content: '用户二' }, { role: 'assistant', content: '助手二' },
+    { role: 'user', content: '用户三' }, { role: 'assistant', content: '助手三' },
+    { role: 'user', content: '用户四' }, { role: 'assistant', content: '助手四' },
+], '历史批次必须保持原始顺序、角色和消息边界');
+assert.deepEqual(buildTodayTrendHistoryBatch(historyWindowMessages, historyPlan, 1), [
+    { role: 'user', content: '用户五' }, { role: 'assistant', content: '助手五' },
+], '最后短批必须只包含其 assistant 范围及对应上下文');
+const changedHistoryMessages = historyWindowMessages.map(message => ({ ...message }));
+changedHistoryMessages[3].content = '迟到修改';
+assert.throws(() => buildTodayTrendHistoryBatch(changedHistoryMessages, historyPlan, 0),
+    error => error?.code === 'TT_HISTORY_WINDOW_INVALID', '消息源变化后不得复用旧批次规划');
+for (const invalidPlan of [
+    null,
+    { ...historyPlan, batchCount: 1 },
+    { ...historyPlan, sourceDigest: '' },
+    { ...historyPlan, batches: [{ index: 0, assistantStart: 2, assistantEnd: 4, content: '不得携带正文' }, historyPlan.batches[1]] },
+    { ...historyPlan, batches: [{ index: 0, assistantStart: 3, assistantEnd: 4 }, historyPlan.batches[1]] },
+]) {
+    assert.throws(() => buildTodayTrendHistoryBatch(historyWindowMessages, invalidPlan, 0),
+        error => error?.code === 'TT_HISTORY_WINDOW_INVALID', '伪造批次规划必须 fail-closed');
+}
+for (const input of [
+    { messages: historyWindowMessages, recentAssistantCount: 0, mergeAssistantCount: 1 },
+    { messages: historyWindowMessages, recentAssistantCount: 6, mergeAssistantCount: 1 },
+    { messages: historyWindowMessages, recentAssistantCount: 2, mergeAssistantCount: 3 },
+    { messages: historyWindowMessages, recentAssistantCount: 2, mergeAssistantCount: 0 },
+    { messages: [{ role: 'system', content: '系统消息' }], recentAssistantCount: 1, mergeAssistantCount: 1 },
+    { messages: [{ role: 'assistant', content: '   ' }], recentAssistantCount: 1, mergeAssistantCount: 1 },
+    { messages: [{ role: 'unknown', content: '未知角色' }], recentAssistantCount: 1, mergeAssistantCount: 1 },
+]) {
+    assert.throws(() => planTodayTrendHistoryBatches(input), error => error?.code === 'TT_HISTORY_WINDOW_INVALID',
+        '历史正文规划必须拒绝越界、空消息和无效角色');
+}
 
 assert.equal(TODAY_TREND_VERSION, 1);
 const originalDiagnosticWindow = globalThis.window;
