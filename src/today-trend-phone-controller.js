@@ -8,7 +8,7 @@ const draftFrom = data => ({ presetName: String(data.get('presetName') || ''), w
 
 export function createTodayTrendPhoneController({ state, deps, container }) {
     if (!container?.addEventListener || typeof deps.getStorageId !== 'function') throw new TypeError('今日风向手机控制器依赖无效');
-    let dispatcher = null, settings = false, initializing = false, initializationOpen = false, reinitializing = false, initializationMode = 'reuse', error = null, renderEpoch = 0;
+    let dispatcher = null, settings = false, batchEnabled = false, initializing = false, initializationOpen = false, reinitializing = false, initializationMode = 'reuse', error = null, renderEpoch = 0;
     let initAbort = null, lastScope = null, lastPresets = [], lastView = { name: 'world', mode: 'content' };
     let unsubscribeGeneration = null, destroyed = false, lastTerminalPhase = '', completedReloadEpoch = 0, retentionSaveEpoch = 0;
     let retentionRevisions = null, retentionSaving = false, retentionDraft = null;
@@ -18,6 +18,7 @@ export function createTodayTrendPhoneController({ state, deps, container }) {
     const loadingDetailIds = new Set();
     let detailStorageId = '';
     const store = () => deps.getTodayTrendStore?.();
+    const assistantCount = () => (deps.getCtx?.()?.chat || []).filter(message => message?.role === 'assistant').length;
     const uiScope = async id => typeof deps.getTodayTrendUiScope === 'function'
         ? deps.getTodayTrendUiScope(id) : (await store())?.scopes?.[id] || null;
     const worldBooks = () => getReadableWorldBookNames(deps.getCtx?.());
@@ -71,10 +72,11 @@ export function createTodayTrendPhoneController({ state, deps, container }) {
         }
         lastScope = scope; lastPresets = Object.values(current?.presets || {}); retentionRevisions = revisions;
         const currentFloor = deps.getTodayTrendCurrentFloor?.();
+        const currentAssistantCount = assistantCount();
         container.innerHTML = renderTodayTrendApp({ scope, presets: Object.values(current?.presets || {}), worldBooks: worldBooks(),
             view: lastView,
             generation: deps.getTodayTrendGenerationState?.() || {}, currentFloor, error, initializing, initializationDraft, initializationOpen, reinitializing, initializationMode,
-            detailById, loadingDetailIds, retentionRevisions, retentionSaving, retentionDraft, diagnosticCopyStatus });
+            detailById, loadingDetailIds, retentionRevisions, retentionSaving, retentionDraft, diagnosticCopyStatus, assistantCount: currentAssistantCount, batchEnabled });
         const focusSelector = pendingFocusSelector;
         pendingFocusSelector = '';
         restoreFocus(focusSelector, epoch);
@@ -89,8 +91,8 @@ export function createTodayTrendPhoneController({ state, deps, container }) {
             ? 'form[data-today-trend-form="retention-settings"] input:invalid'
             : code === 'TT_SETTINGS_REVISION_CONFLICT' ? '.pm-today-trend-error' : '';
         container.innerHTML = renderTodayTrendApp({ scope: lastScope, presets: lastPresets, worldBooks: worldBooks(), view: lastView,
-            currentFloor: deps.getTodayTrendCurrentFloor?.(), error, initializing: false, initializationDraft, initializationOpen, reinitializing, initializationMode,
-            detailById, loadingDetailIds, retentionRevisions, retentionSaving, retentionDraft, diagnosticCopyStatus });
+            currentFloor: deps.getTodayTrendCurrentFloor?.(), assistantCount: assistantCount(), error, initializing: false, initializationDraft, initializationOpen, reinitializing, initializationMode,
+            detailById, loadingDetailIds, retentionRevisions, retentionSaving, retentionDraft, diagnosticCopyStatus, batchEnabled });
         restoreFocus(pendingFocusSelector, renderEpoch);
         pendingFocusSelector = '';
     };
@@ -146,7 +148,7 @@ export function createTodayTrendPhoneController({ state, deps, container }) {
     const generate = async (module, itemId, options = {}) => {
         error = null; await render();
         try {
-            await (module ? deps.generateTodayTrendModule?.(module, itemId, options) : deps.generateTodayTrend?.({}));
+            await (module ? deps.generateTodayTrendModule?.(module, itemId, options) : deps.generateTodayTrend?.(options));
         } catch (cause) {
             if (cause?.name === 'AbortError') { await render(); return false; }
             report(cause); return false;
@@ -173,6 +175,22 @@ export function createTodayTrendPhoneController({ state, deps, container }) {
     const click = event => {
         const button = event.target.closest?.('button[data-action]');
         if (!button || !container.contains(button) || button.disabled) return;
+        if (button.dataset.action === 'today-trend-toggle-batch') {
+            batchEnabled = !batchEnabled;
+            return rerender();
+        }
+        if (button.dataset.action === 'today-trend-batch-generate') {
+            const form = button.closest('form[data-today-trend-form="batch-settings"]');
+            const data = form ? formValues(form) : null;
+            if (!form?.checkValidity?.()) { form?.reportValidity?.(); return; }
+            const currentCount = assistantCount();
+            const recentAssistantCount = Number(data?.get('recentAssistantCount'));
+            const mergeAssistantCount = Number(data?.get('mergeAssistantCount'));
+            if (!Number.isSafeInteger(currentCount) || currentCount < 1) return;
+            if (!Number.isSafeInteger(recentAssistantCount) || recentAssistantCount < 1 || recentAssistantCount > currentCount) return;
+            if (!Number.isSafeInteger(mergeAssistantCount) || mergeAssistantCount < 1 || mergeAssistantCount > recentAssistantCount) return;
+            return generate(null, null, { batchEnabled: true, recentAssistantCount, mergeAssistantCount });
+        }
         if (button.dataset.action === 'today-trend-open-settings') { settings = true; rerender(); }
         if (button.dataset.action === 'today-trend-close-settings') { settings = false; retentionDraft = null; rerender(); }
         if (button.dataset.action === 'today-trend-use-preset') { initializationMode = 'reuse'; error = null; rerender(); }
@@ -298,7 +316,14 @@ export function createTodayTrendPhoneController({ state, deps, container }) {
             });
         }
     };
-    container.addEventListener('click', click, true); container.addEventListener('submit', submit);
+    const change = event => {
+        const input = event.target.closest?.('input[name="batchEnabled"]');
+        if (!input || !container.contains(input) || input.disabled) return;
+        batchEnabled = input.checked === true;
+        rerender();
+    };
+    container.addEventListener('click', click, true); container.addEventListener('change', change);
+    container.addEventListener('submit', submit);
     unsubscribeGeneration = deps.subscribeTodayTrendGeneration?.(generationChanged) || null;
     const destroy = () => {
         if (destroyed) return false;
@@ -312,6 +337,7 @@ export function createTodayTrendPhoneController({ state, deps, container }) {
         unsubscribeGeneration = null;
         dispatcher.destroy();
         container.removeEventListener('click', click, true);
+        container.removeEventListener('change', change);
         container.removeEventListener('submit', submit);
         return true;
     };

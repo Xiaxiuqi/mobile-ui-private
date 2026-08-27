@@ -13,8 +13,9 @@ export function installTodayTrendPhoneUi(state, deps = {}) {
             const store = await deps.getTodayTrendStore?.();
             const scope = await (typeof deps.getTodayTrendUiScope === 'function' ? deps.getTodayTrendUiScope(storageId) : store?.scopes?.[storageId] || null);
             if (phoneWindow !== state.phoneWindow || !container.isConnected) return false;
-            container.innerHTML = renderTodayTrendApp({ scope,
-                currentFloor: deps.getTodayTrendCurrentFloor?.() });
+            const currentFloor = deps.getTodayTrendCurrentFloor?.();
+            const assistantCount = (deps.getCtx?.()?.chat || []).filter(message => message?.role === 'assistant').length;
+            container.innerHTML = renderTodayTrendApp({ scope, currentFloor, assistantCount });
             return true;
         }
         controller?.destroy();

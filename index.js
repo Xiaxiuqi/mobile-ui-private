@@ -27911,6 +27911,20 @@ ${targetInstruction}`
   }
 
   // src/today-trend-settings-view.js
+  function batchSettingsGroup(assistantCount, generationBusy, batchEnabled) {
+    const count = Number.isSafeInteger(assistantCount) && assistantCount >= 0 ? assistantCount : 0;
+    const disabled = generationBusy || count < 1;
+    const defaultMerge = Math.min(5, Math.max(count, 1));
+    const details = batchEnabled ? `
+        <p class="pm-today-trend-retention-help">\u5F53\u524D\u804A\u5929 AI \u56DE\u590D\u7D2F\u8BA1\u5C42\u6570\uFF1A${count}\u3002\u6279\u91CF\u53C2\u6570\u4EC5\u7528\u4E8E\u672C\u6B21\u624B\u52A8\u66F4\u65B0\uFF0C\u4E0D\u4F1A\u5199\u5165\u8BBE\u7F6E\u3002</p>
+        <label class="pm-today-trend-field"><span>\u624B\u52A8\u5904\u7406\u6700\u8FD1 assistant \u5C42\u6570</span><input class="pm-today-trend-input" name="recentAssistantCount" type="number" inputmode="numeric" min="1" max="${Math.max(count, 1)}" step="1" required value="1" ${disabled ? "disabled" : ""}></label>
+        <label class="pm-today-trend-field"><span>\u6BCF\u591A\u5C11\u5C42\u5408\u5E76\u4E3A\u4E00\u6B21</span><input class="pm-today-trend-input" name="mergeAssistantCount" type="number" inputmode="numeric" min="1" max="${Math.max(count, 1)}" step="1" required value="${defaultMerge}" ${disabled ? "disabled" : ""}></label>
+        <p class="pm-today-trend-retention-help">generationSnapshots\uFF1A\u56FA\u5B9A\u4FDD\u7559\u6700\u8FD1 ${TODAY_TREND_LIMITS.generationSnapshots} \u4E2A\u8BB0\u5F55\u3002\u8BE5\u5BB9\u91CF\u4E0D\u53EF\u914D\u7F6E\uFF0C\u4E5F\u4E0D\u4F1A\u56E0\u6253\u5F00\u6216\u4FDD\u5B58\u8BBE\u7F6E\u89E6\u53D1\u751F\u6210\u6216\u6E05\u7406\u3002</p>
+        <div class="pm-today-trend-form-actions"><button type="button" data-action="today-trend-batch-generate" ${disabled ? "disabled" : ""}>${generationBusy ? "\u6B63\u5728\u6279\u91CF\u66F4\u65B0" : "\u624B\u52A8\u6279\u91CF\u66F4\u65B0"}</button></div>` : "";
+    return `<fieldset class="pm-today-trend-batch-settings"><legend>\u6EAF\u53CA\u65E2\u5F80\u697C\u5C42\u66F4\u65B0</legend>
+        <label class="pm-today-trend-switch pm-today-trend-batch-switch"><span><b>\u542F\u7528\u6EAF\u53CA\u65E2\u5F80\u697C\u5C42\u66F4\u65B0</b><small>\u5F00\u542F\u540E\u663E\u793A\u672C\u6B21\u6279\u91CF\u5904\u7406\u53C2\u6570\uFF1B\u4E0D\u4F1A\u5199\u5165\u8BBE\u7F6E\u3002</small></span><input name="batchEnabled" type="checkbox" role="switch" aria-checked="${batchEnabled === true}"${batchEnabled ? " checked" : ""}${generationBusy ? " disabled" : ""}><i aria-hidden="true"></i></label>${details}
+    </fieldset>`;
+  }
   function retentionSettingsGroup(scope, revisions2, saving, generationBusy, draft) {
     const settings = scope.historyRetentionSettings || {
       archivedDetailLatestEventCount: 2,
@@ -27941,12 +27955,14 @@ ${targetInstruction}`
     retentionRevisions = null,
     retentionSaving = false,
     retentionDraft = null,
-    errorHtml = ""
+    errorHtml = "",
+    assistantCount = 0,
+    batchEnabled = false
   } = {}) {
     if (!scope) return '<section class="pm-today-trend-settings"><h3>APP \u603B\u8BBE\u7F6E</h3><p class="pm-today-trend-empty">\u8BF7\u5148\u521B\u5EFA\u6216\u7ED1\u5B9A\u4E16\u754C\u9884\u8BBE\u3002</p></section>';
     const options2 = presets.map((preset) => `<option value="${escapeAttr(preset.id)}" ${preset.id === scope.presetId ? "selected" : ""}>${escapeHtml(preset.name)}</option>`).join("");
     const rules = [["world", "\u4E16\u754C\u6001\u52BF\u89C4\u5219"], ["reputation", "\u4E2A\u4EBA\u98CE\u8BC4\u89C4\u5219"], ["faction", "\u52BF\u529B\u56FE\u8C31\u89C4\u5219"], ["dynamics", "\u52A8\u6001\u603B\u89C4\u5219"], ["incident", "\u7A81\u53D1\u4E8B\u4EF6\u89C4\u5219"], ["rumor", "\u6D41\u8A00\u871A\u8BED\u89C4\u5219"], ["underground", "\u5730\u4E0B\u7EBF\u89C4\u5219"]].map(([name, label]) => `<div class="pm-today-trend-rule-row"><span>${label}</span>${trendActionMenu({ id: `app-rule:${name}`, open: menuOpenId === `app-rule:${name}`, label: `${label}\u64CD\u4F5C`, actions: [{ action: `today-trend-edit-${name}-rule`, icon: EDIT_ICON_SVG, label: `\u7F16\u8F91${label}`, attrs: 'data-rule-return="settings"' }, { action: `today-trend-regenerate-${name}-rule`, icon: REFRESH_ICON_SVG, label: `\u91CD\u65B0\u751F\u6210${label}` }] })}</div>`).join("");
-    return `<section class="pm-today-trend-settings">${trendModuleHead({ title: "APP \u603B\u8BBE\u7F6E", menuId: "app-settings", menuOpenId, actions: [{ action: "today-trend-close-settings", icon: BACK_ICON_SVG, label: "\u8FD4\u56DE\u4ECA\u65E5\u98CE\u5411" }] })}${errorHtml}<form class="pm-today-trend-editor" data-today-trend-form="app-settings"><label class="pm-today-trend-field">\u5F53\u524D\u4E16\u754C\u9884\u8BBE<select class="pm-today-trend-input" name="presetId">${options2}</select></label><p class="pm-today-trend-preset-warning">\u5207\u6362\u4E16\u754C\u9884\u8BBE\u4F1A\u91CD\u5EFA\u5F53\u524D\u4F5C\u7528\u57DF\u3002\u5207\u6362\u5B8C\u6210\u540E\u8BF7\u91CD\u65B0\u6253\u5F00\u672C\u9875\uFF0C\u518D\u5355\u72EC\u786E\u8BA4\u5F52\u6863\u4FDD\u7559\u8BBE\u7F6E\u3002</p><div class="pm-today-trend-form-actions pm-today-trend-preset-actions"><button type="button" data-action="today-trend-new-preset">\u65B0\u5EFA</button><button type="button" data-action="today-trend-delete-preset">\u5220\u9664</button><button type="button" data-action="today-trend-reinitialize">\u91CD\u5EFA</button><button type="button" data-action="today-trend-rename-preset">\u91CD\u547D\u540D</button></div><label class="pm-today-trend-field">\u8C03\u7528\u65B9\u5F0F<select class="pm-today-trend-input" name="mode"><option value="manual" ${scope.operation?.mode === "manual" ? "selected" : ""}>\u624B\u52A8</option><option value="auto" ${scope.operation?.mode === "auto" ? "selected" : ""}>\u81EA\u52A8</option></select></label><label class="pm-today-trend-field">\u81EA\u52A8\u8C03\u7528\uFF1A\u6BCF N \u697C\u6267\u884C\u4E00\u6B21<input class="pm-today-trend-input" name="intervalFloors" type="number" min="1" max="1000" required value="${escapeAttr(String(scope.operation?.intervalFloors || 1))}"></label><label class="pm-today-trend-switch pm-today-trend-injection-switch"><span><b>\u6B63\u6587\u6CE8\u5165</b><small>\u5F00\u542F\u540E\uFF0C\u89D2\u8272\u56DE\u590D\u65F6\u4F1A\u53C2\u8003\u5F53\u524D\u4F1A\u8BDD\u4E2D\u7684\u4ECA\u65E5\u98CE\u5411\u3002</small></span><input name="injectionEnabled" type="checkbox" role="switch" aria-checked="${scope.injection?.enabled === true}"${scope.injection?.enabled ? " checked" : ""}><i aria-hidden="true"></i></label><label class="pm-today-trend-switch pm-today-trend-minimal-ui-switch"><span><b>\u6781\u7B80 UI</b><small>\u5F00\u542F\u540E\uFF0C\u901A\u8FC7\u5173\u7CFB\u56FE\u6807\u5207\u6362\u72B6\u6001\u5E76\u9690\u85CF\u5173\u7CFB\u91CF\u8868\u3002</small></span><input name="minimalUi" type="checkbox" role="switch" aria-checked="${scope.injection?.minimalUi === true}"${scope.injection?.minimalUi ? " checked" : ""}><i aria-hidden="true"></i></label><div class="pm-today-trend-form-actions pm-today-trend-settings-save"><button type="submit">\u4FDD\u5B58\u8BBE\u7F6E</button></div></form><form class="pm-today-trend-editor" data-today-trend-form="retention-settings">${retentionSettingsGroup(scope, retentionRevisions, retentionSaving, generationBusy, retentionDraft)}</form><section class="pm-today-trend-rule"><h3>\u63D0\u793A\u8BCD\u603B\u89C8</h3>${rules}</section></section>`;
+    return `<section class="pm-today-trend-settings">${trendModuleHead({ title: "APP \u603B\u8BBE\u7F6E", menuId: "app-settings", menuOpenId, actions: [{ action: "today-trend-close-settings", icon: BACK_ICON_SVG, label: "\u8FD4\u56DE\u4ECA\u65E5\u98CE\u5411" }] })}${errorHtml}<form class="pm-today-trend-editor" data-today-trend-form="app-settings"><label class="pm-today-trend-field">\u5F53\u524D\u4E16\u754C\u9884\u8BBE<select class="pm-today-trend-input" name="presetId">${options2}</select></label><p class="pm-today-trend-preset-warning">\u5207\u6362\u4E16\u754C\u9884\u8BBE\u4F1A\u91CD\u5EFA\u5F53\u524D\u4F5C\u7528\u57DF\u3002\u5207\u6362\u5B8C\u6210\u540E\u8BF7\u91CD\u65B0\u6253\u5F00\u672C\u9875\uFF0C\u518D\u5355\u72EC\u786E\u8BA4\u5F52\u6863\u4FDD\u7559\u8BBE\u7F6E\u3002</p><div class="pm-today-trend-form-actions pm-today-trend-preset-actions"><button type="button" data-action="today-trend-new-preset">\u65B0\u5EFA</button><button type="button" data-action="today-trend-delete-preset">\u5220\u9664</button><button type="button" data-action="today-trend-reinitialize">\u91CD\u5EFA</button><button type="button" data-action="today-trend-rename-preset">\u91CD\u547D\u540D</button></div><label class="pm-today-trend-field">\u8C03\u7528\u65B9\u5F0F<select class="pm-today-trend-input" name="mode"><option value="manual" ${scope.operation?.mode === "manual" ? "selected" : ""}>\u624B\u52A8</option><option value="auto" ${scope.operation?.mode === "auto" ? "selected" : ""}>\u81EA\u52A8</option></select></label><label class="pm-today-trend-field">\u81EA\u52A8\u8C03\u7528\uFF1A\u6BCF N \u697C\u6267\u884C\u4E00\u6B21<input class="pm-today-trend-input" name="intervalFloors" type="number" min="1" max="1000" required value="${escapeAttr(String(scope.operation?.intervalFloors || 1))}"></label><label class="pm-today-trend-switch pm-today-trend-injection-switch"><span><b>\u6B63\u6587\u6CE8\u5165</b><small>\u5F00\u542F\u540E\uFF0C\u89D2\u8272\u56DE\u590D\u65F6\u4F1A\u53C2\u8003\u5F53\u524D\u4F1A\u8BDD\u4E2D\u7684\u4ECA\u65E5\u98CE\u5411\u3002</small></span><input name="injectionEnabled" type="checkbox" role="switch" aria-checked="${scope.injection?.enabled === true}"${scope.injection?.enabled ? " checked" : ""}><i aria-hidden="true"></i></label><label class="pm-today-trend-switch pm-today-trend-minimal-ui-switch"><span><b>\u6781\u7B80 UI</b><small>\u5F00\u542F\u540E\uFF0C\u901A\u8FC7\u5173\u7CFB\u56FE\u6807\u5207\u6362\u72B6\u6001\u5E76\u9690\u85CF\u5173\u7CFB\u91CF\u8868\u3002</small></span><input name="minimalUi" type="checkbox" role="switch" aria-checked="${scope.injection?.minimalUi === true}"${scope.injection?.minimalUi ? " checked" : ""}><i aria-hidden="true"></i></label><div class="pm-today-trend-form-actions pm-today-trend-settings-save"><button type="submit">\u4FDD\u5B58\u8BBE\u7F6E</button></div></form><form class="pm-today-trend-editor" data-today-trend-form="batch-settings">${batchSettingsGroup(assistantCount, generationBusy, batchEnabled)}</form><form class="pm-today-trend-editor" data-today-trend-form="retention-settings">${retentionSettingsGroup(scope, retentionRevisions, retentionSaving, generationBusy, retentionDraft)}</form><section class="pm-today-trend-rule"><h3>\u63D0\u793A\u8BCD\u603B\u89C8</h3>${rules}</section></section>`;
   }
 
   // src/today-trend-world-view.js
@@ -28039,6 +28055,8 @@ ${targetInstruction}`
     view = { name: "world", mode: "content" },
     generation = {},
     currentFloor,
+    assistantCount = 0,
+    batchEnabled = false,
     error = null,
     initializing = false,
     initializationDraft,
@@ -28071,6 +28089,8 @@ ${targetInstruction}`
       presets,
       generationBusy: busy,
       menuOpenId: view.menuOpenId,
+      assistantCount,
+      batchEnabled,
       retentionRevisions,
       retentionSaving,
       retentionDraft,
@@ -28086,7 +28106,7 @@ ${targetInstruction}`
   var draftFrom = (data) => ({ presetName: String(data.get("presetName") || ""), worldBookNames: data.getAll("worldBookNames"), includeExistingChat: data.get("includeExistingChat") === "on", userRequirements: String(data.get("userRequirements") || "") });
   function createTodayTrendPhoneController({ state, deps, container }) {
     if (!container?.addEventListener || typeof deps.getStorageId !== "function") throw new TypeError("\u4ECA\u65E5\u98CE\u5411\u624B\u673A\u63A7\u5236\u5668\u4F9D\u8D56\u65E0\u6548");
-    let dispatcher = null, settings = false, initializing = false, initializationOpen = false, reinitializing = false, initializationMode = "reuse", error = null, renderEpoch = 0;
+    let dispatcher = null, settings = false, batchEnabled = false, initializing = false, initializationOpen = false, reinitializing = false, initializationMode = "reuse", error = null, renderEpoch = 0;
     let initAbort = null, lastScope = null, lastPresets = [], lastView = { name: "world", mode: "content" };
     let unsubscribeGeneration = null, destroyed = false, lastTerminalPhase = "", completedReloadEpoch = 0, retentionSaveEpoch = 0;
     let retentionRevisions = null, retentionSaving = false, retentionDraft = null;
@@ -28096,6 +28116,7 @@ ${targetInstruction}`
     const loadingDetailIds = /* @__PURE__ */ new Set();
     let detailStorageId = "";
     const store = () => deps.getTodayTrendStore?.();
+    const assistantCount = () => (deps.getCtx?.()?.chat || []).filter((message) => message?.role === "assistant").length;
     const uiScope = async (id2) => typeof deps.getTodayTrendUiScope === "function" ? deps.getTodayTrendUiScope(id2) : (await store())?.scopes?.[id2] || null;
     const worldBooks = () => getReadableWorldBookNames(deps.getCtx?.());
     const restoreFocus = (selector, epoch) => {
@@ -28146,6 +28167,7 @@ ${targetInstruction}`
       lastPresets = Object.values(current?.presets || {});
       retentionRevisions = revisions2;
       const currentFloor = deps.getTodayTrendCurrentFloor?.();
+      const currentAssistantCount = assistantCount();
       container.innerHTML = renderTodayTrendApp({
         scope,
         presets: Object.values(current?.presets || {}),
@@ -28164,7 +28186,9 @@ ${targetInstruction}`
         retentionRevisions,
         retentionSaving,
         retentionDraft,
-        diagnosticCopyStatus
+        diagnosticCopyStatus,
+        assistantCount: currentAssistantCount,
+        batchEnabled
       });
       const focusSelector = pendingFocusSelector;
       pendingFocusSelector = "";
@@ -28183,6 +28207,7 @@ ${targetInstruction}`
         worldBooks: worldBooks(),
         view: lastView,
         currentFloor: deps.getTodayTrendCurrentFloor?.(),
+        assistantCount: assistantCount(),
         error,
         initializing: false,
         initializationDraft,
@@ -28194,7 +28219,8 @@ ${targetInstruction}`
         retentionRevisions,
         retentionSaving,
         retentionDraft,
-        diagnosticCopyStatus
+        diagnosticCopyStatus,
+        batchEnabled
       });
       restoreFocus(pendingFocusSelector, renderEpoch);
       pendingFocusSelector = "";
@@ -28252,7 +28278,7 @@ ${targetInstruction}`
       error = null;
       await render();
       try {
-        await (module ? deps.generateTodayTrendModule?.(module, itemId, options2) : deps.generateTodayTrend?.({}));
+        await (module ? deps.generateTodayTrendModule?.(module, itemId, options2) : deps.generateTodayTrend?.(options2));
       } catch (cause) {
         if (cause?.name === "AbortError") {
           await render();
@@ -28299,6 +28325,25 @@ ${targetInstruction}`
     const click = (event) => {
       const button = event.target.closest?.("button[data-action]");
       if (!button || !container.contains(button) || button.disabled) return;
+      if (button.dataset.action === "today-trend-toggle-batch") {
+        batchEnabled = !batchEnabled;
+        return rerender();
+      }
+      if (button.dataset.action === "today-trend-batch-generate") {
+        const form = button.closest('form[data-today-trend-form="batch-settings"]');
+        const data = form ? formValues(form) : null;
+        if (!form?.checkValidity?.()) {
+          form?.reportValidity?.();
+          return;
+        }
+        const currentCount = assistantCount();
+        const recentAssistantCount = Number(data?.get("recentAssistantCount"));
+        const mergeAssistantCount = Number(data?.get("mergeAssistantCount"));
+        if (!Number.isSafeInteger(currentCount) || currentCount < 1) return;
+        if (!Number.isSafeInteger(recentAssistantCount) || recentAssistantCount < 1 || recentAssistantCount > currentCount) return;
+        if (!Number.isSafeInteger(mergeAssistantCount) || mergeAssistantCount < 1 || mergeAssistantCount > recentAssistantCount) return;
+        return generate(null, null, { batchEnabled: true, recentAssistantCount, mergeAssistantCount });
+      }
       if (button.dataset.action === "today-trend-open-settings") {
         settings = true;
         rerender();
@@ -28465,7 +28510,14 @@ ${targetInstruction}`
         });
       }
     };
+    const change = (event) => {
+      const input = event.target.closest?.('input[name="batchEnabled"]');
+      if (!input || !container.contains(input) || input.disabled) return;
+      batchEnabled = input.checked === true;
+      rerender();
+    };
     container.addEventListener("click", click, true);
+    container.addEventListener("change", change);
     container.addEventListener("submit", submit);
     unsubscribeGeneration = deps.subscribeTodayTrendGeneration?.(generationChanged) || null;
     const destroy = () => {
@@ -28480,6 +28532,7 @@ ${targetInstruction}`
       unsubscribeGeneration = null;
       dispatcher.destroy();
       container.removeEventListener("click", click, true);
+      container.removeEventListener("change", change);
       container.removeEventListener("submit", submit);
       return true;
     };
@@ -28499,10 +28552,9 @@ ${targetInstruction}`
         const store = await deps.getTodayTrendStore?.();
         const scope = await (typeof deps.getTodayTrendUiScope === "function" ? deps.getTodayTrendUiScope(storageId) : store?.scopes?.[storageId] || null);
         if (phoneWindow !== state.phoneWindow || !container.isConnected) return false;
-        container.innerHTML = renderTodayTrendApp({
-          scope,
-          currentFloor: deps.getTodayTrendCurrentFloor?.()
-        });
+        const currentFloor = deps.getTodayTrendCurrentFloor?.();
+        const assistantCount = (deps.getCtx?.()?.chat || []).filter((message) => message?.role === "assistant").length;
+        container.innerHTML = renderTodayTrendApp({ scope, currentFloor, assistantCount });
         return true;
       }
       controller?.destroy();

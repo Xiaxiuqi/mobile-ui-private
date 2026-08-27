@@ -613,7 +613,7 @@ rejectStaleReload(new Error('旧聊天重读失败'));
 await new Promise(resolve => setTimeout(resolve, 0));
 assert.equal(generationReloadCalls, 2, '连续完整提交必须各自触发 store 重读');
 assert.doesNotMatch(controllerContainer.innerHTML, /旧聊天重读失败/, '切换聊天后不得显示旧 storageId 的异步重读错误');
-assert.deepEqual(controllerListeners.map(item => controllerListenerKey(item.type, item.capture)).sort(), ['click:bubble', 'click:capture', 'keydown:bubble', 'submit:bubble', 'submit:bubble'], '控制器必须恰好注册并区分自身与动作分发器的 click、submit 与 keydown 代理事件');
+assert.deepEqual(controllerListeners.map(item => controllerListenerKey(item.type, item.capture)).sort(), ['change:bubble', 'click:bubble', 'click:capture', 'keydown:bubble', 'submit:bubble', 'submit:bubble'], '控制器必须恰好注册并区分自身与动作分发器的 change、click、submit 与 keydown 代理事件');
 assert.equal(phoneController.destroy(), true, '首次销毁控制器必须执行清理');
 assert.equal(phoneController.destroy(), false, '重复销毁控制器必须幂等');
 assert.equal(controllerCancelReason, 'today-trend-page-destroyed', '销毁控制器必须取消初始化任务');
@@ -5903,6 +5903,63 @@ phase10DetailDispatcher.destroy();
 const phase11SettingsHtml = renderTodayTrendSettingsView({
     scope: phase10UiScope, presets: Object.values(valid.presets), retentionRevisions: phase11RetentionState,
 });
+const phase12BatchOffHtml = renderTodayTrendSettingsView({
+    scope: phase10UiScope, presets: Object.values(valid.presets), assistantCount: 8,
+});
+assert.match(phase12BatchOffHtml, /name="batchEnabled"[^>]*role="switch"/, '批处理默认必须提供关闭状态开关');
+assert.doesNotMatch(phase12BatchOffHtml, /name="recentAssistantCount"|name="mergeAssistantCount"|today-trend-batch-generate/, '批处理关闭时不得显示详情控件');
+const phase12BatchOnHtml = renderTodayTrendSettingsView({
+    scope: phase10UiScope, presets: Object.values(valid.presets), assistantCount: 8, batchEnabled: true,
+});
+assert.match(phase12BatchOnHtml, /name="batchEnabled"[^>]*checked/, '批处理开启状态必须反映在开关上');
+assert.match(phase12BatchOnHtml, new RegExp(`generationSnapshots：固定保留最近 ${TODAY_TREND_LIMITS.generationSnapshots} 个记录`), '固定容量说明必须来自统一容量常量');
+assert.match(phase12BatchOnHtml, /name="recentAssistantCount"[^>]*max="8"/, '批处理窗口上限必须来自当前 assistantCount');
+assert.match(phase12BatchOnHtml, /data-action="today-trend-batch-generate"/, '开启批处理后必须显示手动更新动作');
+const phase12BatchListeners = [];
+let phase12GeneratedOptions = null;
+const phase12BatchContainer = {
+    innerHTML: '', contains: () => true,
+    addEventListener: (type, listener, capture = false) => phase12BatchListeners.push({ type, listener, capture }),
+    removeEventListener: () => {}, querySelector: () => null,
+};
+const phase12BatchController = createTodayTrendPhoneController({
+    state: { phoneWindow: { querySelector: selector => selector === '.pm-today-trend-page' ? phase12BatchContainer : null } },
+    container: phase12BatchContainer,
+    deps: {
+        getStorageId: () => 'chat', getTodayTrendStore: async () => valid,
+        getTodayTrendUiScope: async () => phase10UiScope, getCtx: () => ({ chat: [{ role: 'user' }, { role: 'assistant' }, { role: 'assistant' }] }),
+        getTodayTrendCurrentFloor: () => 33, getTodayTrendGenerationState: () => ({ phase: 'idle' }),
+        subscribeTodayTrendGeneration: () => () => {}, generateTodayTrend: options => { phase12GeneratedOptions = options; return Promise.resolve(); },
+    },
+});
+await phase12BatchController.render();
+const phase12OpenSettingsButton = { disabled: false, dataset: { action: 'today-trend-open-settings' }, closest: selector => selector === 'button[data-action]' ? phase12OpenSettingsButton : null };
+phase12BatchListeners.find(item => item.type === 'click' && item.capture)?.listener({ target: phase12OpenSettingsButton });
+await new Promise(resolve => setTimeout(resolve, 0));
+const phase12BatchToggle = { disabled: false, checked: true, closest: selector => selector === 'input[name="batchEnabled"]' ? phase12BatchToggle : null };
+phase12BatchListeners.find(item => item.type === 'change')?.listener({ target: phase12BatchToggle });
+await new Promise(resolve => setTimeout(resolve, 0));
+assert.match(phase12BatchContainer.innerHTML, /name="recentAssistantCount"/, 'controller 切换批处理开关后必须显示详情字段');
+const phase12BatchForm = {
+    values: new Map([['recentAssistantCount', '2'], ['mergeAssistantCount', '1']]),
+    checkValidity: () => true, reportValidity: () => {},
+};
+const phase12FormData = globalThis.FormData;
+globalThis.FormData = class { constructor(form) { this.values = form.values; } get(name) { return this.values.get(name) ?? null; } };
+const phase12BatchButton = {
+    disabled: false, dataset: { action: 'today-trend-batch-generate' },
+    closest: selector => selector === 'button[data-action]' ? phase12BatchButton : selector === 'form[data-today-trend-form="batch-settings"]' ? phase12BatchForm : null,
+};
+phase12BatchListeners.find(item => item.type === 'click' && item.capture)?.listener({ target: phase12BatchButton });
+await new Promise(resolve => setTimeout(resolve, 0));
+assert.deepEqual(phase12GeneratedOptions, { batchEnabled: true, recentAssistantCount: 2, mergeAssistantCount: 1 }, '批处理按钮必须透传调用级参数');
+phase12BatchForm.checkValidity = () => false;
+phase12GeneratedOptions = null;
+phase12BatchListeners.find(item => item.type === 'click' && item.capture)?.listener({ target: phase12BatchButton });
+await new Promise(resolve => setTimeout(resolve, 0));
+assert.equal(phase12GeneratedOptions, null, '非法批处理表单不得发起生成请求');
+globalThis.FormData = phase12FormData;
+phase12BatchController.destroy();
 for (const [name, maximum] of [['archivedDetailLatestEventCount', 80], ['archivedDetailRetentionFloors', 1000]]) {
     assert.match(phase11SettingsHtml, new RegExp(`name="${name}"[^>]*min="0"[^>]*max="${maximum}"[^>]*step="1"[^>]*required`),
         `retention 设置必须为 ${name} 提供整数范围契约`);
