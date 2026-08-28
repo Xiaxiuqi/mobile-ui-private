@@ -97,8 +97,10 @@ const historyWindowMessages = [
 ];
 assert.equal(countTodayTrendAssistantMessages([
     { mes: '用户消息', is_user: true }, { mes: '宿主助手消息' },
-    { role: 'assistant', content: '标准助手消息' }, { mes: '系统消息', is_system: true },
-]), 2, 'Today Trend UI assistantCount 必须兼容宿主 is_user 消息形态且排除系统消息');
+    { role: 'assistant', content: '标准助手消息' }, { mes: '隐藏但仍是 AI 楼层', is_system: true },
+    { role: 'system', content: '非 narrator 的 system 角色仍按数据库口径计入' },
+    { mes: '旁白消息', extra: { type: 'narrator' } },
+]), 4, 'Today Trend UI assistantCount 必须采用数据库 AI 楼层口径：保留 is_system/role system AI 并排除 narrator');
 const historyPlan = planTodayTrendHistoryBatches({ messages: historyWindowMessages, recentAssistantCount: 4, mergeAssistantCount: 3 });
 assert.deepEqual({
     assistantCount: historyPlan.assistantCount, windowStart: historyPlan.windowStart, windowEnd: historyPlan.windowEnd,
@@ -141,7 +143,6 @@ for (const input of [
     { messages: historyWindowMessages, recentAssistantCount: 6, mergeAssistantCount: 1 },
     { messages: historyWindowMessages, recentAssistantCount: 2, mergeAssistantCount: 3 },
     { messages: historyWindowMessages, recentAssistantCount: 2, mergeAssistantCount: 0 },
-    { messages: [{ role: 'system', content: '系统消息' }], recentAssistantCount: 1, mergeAssistantCount: 1 },
     { messages: [{ role: 'assistant', content: '   ' }], recentAssistantCount: 1, mergeAssistantCount: 1 },
     { messages: [{ role: 'unknown', content: '未知角色' }], recentAssistantCount: 1, mergeAssistantCount: 1 },
 ]) {
@@ -3086,8 +3087,8 @@ const roleParsingScheduler = createTodayTrendScheduler({
     controller: { generate: async ({ scope }) => ({ scope }) }, committer: schedulerCommitter,
     getStore: async () => ({ scopes: {} }), getStorageId: () => 'role-parsing-chat',
 });
-const nonAssistantSnapshot = roleParsingScheduler.observe([{ role: 'user', content: '用户消息' }, { role: 'system', content: '系统消息' }]);
-assert.equal(nonAssistantSnapshot.assistantCount, 0, 'role/content 形态的用户和系统消息不得被误判为 assistant 楼层');
+const nonAssistantSnapshot = roleParsingScheduler.observe([{ role: 'user', content: '用户消息' }, { role: 'system', content: '旁白消息', extra: { type: 'narrator' } }]);
+assert.equal(nonAssistantSnapshot.assistantCount, 0, 'role/content 形态的用户和 narrator 消息不得被误判为 assistant 楼层');
 assert.equal(nonAssistantSnapshot.lastIsAssistant, false, '非 assistant 尾消息必须阻止自动生成调度');
 await new Promise(resolve => setTimeout(resolve, 0));
 assert.equal(schedulerCalls, 1, '非 assistant 尾消息不得启动额外自动生成');

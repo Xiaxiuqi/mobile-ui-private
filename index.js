@@ -26156,8 +26156,9 @@ ${targetInstruction}`
   };
   var messageRole = (message) => {
     const role = typeof message?.role === "string" ? message.role.toLowerCase() : "";
-    if (message?.is_system === true || role === "system") return "system";
-    if (message?.is_user === true || role === "user") return "user";
+    if (message?.is_user === true) return "user";
+    if (role === "user") return "user";
+    if (message?.extra?.type === "narrator") return "system";
     return "assistant";
   };
   var updateHashCode = (state, code) => {
@@ -26184,10 +26185,12 @@ ${targetInstruction}`
   var historyMessageRole = (message) => {
     const role = typeof message?.role === "string" ? message.role.toLowerCase().trim() : "";
     if (role === "user" || message?.is_user === true) return "user";
-    if (role === "assistant" || role === "" && message?.is_user !== true && message?.is_system !== true) return "assistant";
+    if (message?.extra?.type === "narrator") return null;
+    if (role === "assistant" || role === "system" || role === "" && message?.is_user !== true) return "assistant";
     return null;
   };
-  var countTodayTrendAssistantMessages = (messages) => Array.isArray(messages) ? messages.filter((message) => historyMessageRole(message) === "assistant" && historyMessageText(message)).length : 0;
+  var isDatabaseAiMessage = (message) => Boolean(message && typeof message === "object" && !message.is_user && message?.extra?.type !== "narrator");
+  var countTodayTrendAssistantMessages = (messages) => Array.isArray(messages) ? messages.filter(isDatabaseAiMessage).length : 0;
   var invalidHistoryInput = (message) => Object.assign(new Error(message), { code: "TT_HISTORY_WINDOW_INVALID" });
   var historyMessageDigest = (messages) => {
     let hash = 2166136261;

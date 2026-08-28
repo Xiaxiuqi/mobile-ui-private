@@ -20,8 +20,9 @@ const messageText = message => {
 };
 const messageRole = message => {
     const role = typeof message?.role === 'string' ? message.role.toLowerCase() : '';
-    if (message?.is_system === true || role === 'system') return 'system';
-    if (message?.is_user === true || role === 'user') return 'user';
+    if (message?.is_user === true) return 'user';
+    if (role === 'user') return 'user';
+    if (message?.extra?.type === 'narrator') return 'system';
     return 'assistant';
 };
 const updateHashCode = (state, code) => {
@@ -49,11 +50,14 @@ const historyMessageText = message => {
 const historyMessageRole = message => {
     const role = typeof message?.role === 'string' ? message.role.toLowerCase().trim() : '';
     if (role === 'user' || message?.is_user === true) return 'user';
-    if (role === 'assistant' || (role === '' && message?.is_user !== true && message?.is_system !== true)) return 'assistant';
+    if (message?.extra?.type === 'narrator') return null;
+    if (role === 'assistant' || role === 'system' || (role === '' && message?.is_user !== true)) return 'assistant';
     return null;
 };
+const isDatabaseAiMessage = message => Boolean(message && typeof message === 'object'
+    && !message.is_user && message?.extra?.type !== 'narrator');
 export const countTodayTrendAssistantMessages = messages => Array.isArray(messages)
-    ? messages.filter(message => historyMessageRole(message) === 'assistant' && historyMessageText(message)).length
+    ? messages.filter(isDatabaseAiMessage).length
     : 0;
 const invalidHistoryInput = message => Object.assign(new Error(message), { code: 'TT_HISTORY_WINDOW_INVALID' });
 const historyMessageDigest = messages => {
