@@ -55,7 +55,7 @@ const historyMessageRole = message => {
     return null;
 };
 const isDatabaseAiMessage = message => Boolean(message && typeof message === 'object'
-    && !message.is_user && message?.extra?.type !== 'narrator');
+    && !message.is_user);
 export const countTodayTrendAssistantMessages = messages => Array.isArray(messages)
     ? messages.filter(isDatabaseAiMessage).length
     : 0;

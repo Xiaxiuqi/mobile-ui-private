@@ -26189,7 +26189,7 @@ ${targetInstruction}`
     if (role === "assistant" || role === "system" || role === "" && message?.is_user !== true) return "assistant";
     return null;
   };
-  var isDatabaseAiMessage = (message) => Boolean(message && typeof message === "object" && !message.is_user && message?.extra?.type !== "narrator");
+  var isDatabaseAiMessage = (message) => Boolean(message && typeof message === "object" && !message.is_user);
   var countTodayTrendAssistantMessages = (messages) => Array.isArray(messages) ? messages.filter(isDatabaseAiMessage).length : 0;
   var invalidHistoryInput = (message) => Object.assign(new Error(message), { code: "TT_HISTORY_WINDOW_INVALID" });
   var historyMessageDigest = (messages) => {

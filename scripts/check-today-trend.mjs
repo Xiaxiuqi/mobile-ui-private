@@ -100,7 +100,7 @@ assert.equal(countTodayTrendAssistantMessages([
     { role: 'assistant', content: '标准助手消息' }, { mes: '隐藏但仍是 AI 楼层', is_system: true },
     { role: 'system', content: '非 narrator 的 system 角色仍按数据库口径计入' },
     { mes: '旁白消息', extra: { type: 'narrator' } },
-]), 4, 'Today Trend UI assistantCount 必须采用数据库 AI 楼层口径：保留 is_system/role system AI 并排除 narrator');
+]), 5, 'Today Trend UI assistantCount 必须采用数据库 AI 楼层口径：所有 !is_user 消息均计入 AI 楼层');
 const historyPlan = planTodayTrendHistoryBatches({ messages: historyWindowMessages, recentAssistantCount: 4, mergeAssistantCount: 3 });
 assert.deepEqual({
     assistantCount: historyPlan.assistantCount, windowStart: historyPlan.windowStart, windowEnd: historyPlan.windowEnd,
