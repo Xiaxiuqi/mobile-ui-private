@@ -1,4 +1,5 @@
 import { createTodayTrendPhoneController } from './today-trend-phone-controller.js';
+import { countTodayTrendAssistantMessages } from './today-trend-scheduler.js';
 import { renderTodayTrendApp } from './today-trend-view.js';
 
 export function installTodayTrendPhoneUi(state, deps = {}) {
@@ -14,7 +15,7 @@ export function installTodayTrendPhoneUi(state, deps = {}) {
             const scope = await (typeof deps.getTodayTrendUiScope === 'function' ? deps.getTodayTrendUiScope(storageId) : store?.scopes?.[storageId] || null);
             if (phoneWindow !== state.phoneWindow || !container.isConnected) return false;
             const currentFloor = deps.getTodayTrendCurrentFloor?.();
-            const assistantCount = (deps.getCtx?.()?.chat || []).filter(message => message?.role === 'assistant').length;
+            const assistantCount = countTodayTrendAssistantMessages(deps.getCtx?.()?.chat);
             container.innerHTML = renderTodayTrendApp({ scope, currentFloor, assistantCount });
             return true;
         }

@@ -52,6 +52,9 @@ const historyMessageRole = message => {
     if (role === 'assistant' || (role === '' && message?.is_user !== true && message?.is_system !== true)) return 'assistant';
     return null;
 };
+export const countTodayTrendAssistantMessages = messages => Array.isArray(messages)
+    ? messages.filter(message => historyMessageRole(message) === 'assistant' && historyMessageText(message)).length
+    : 0;
 const invalidHistoryInput = message => Object.assign(new Error(message), { code: 'TT_HISTORY_WINDOW_INVALID' });
 const historyMessageDigest = messages => {
     let hash = 2166136261;

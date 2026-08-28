@@ -51,7 +51,7 @@ import {
 } from '../src/prompts/today-trend/envelopes.js';
 import { createTodayTrendGenerationController } from '../src/today-trend-generation.js';
 import {
-    buildTodayTrendHistoryBatch, createTodayTrendScheduler as createTodayTrendSchedulerBase, planTodayTrendHistoryBatches,
+    buildTodayTrendHistoryBatch, countTodayTrendAssistantMessages, createTodayTrendScheduler as createTodayTrendSchedulerBase, planTodayTrendHistoryBatches,
 } from '../src/today-trend-scheduler.js';
 import { createPhoneHostEventController } from '../src/phone-host-events.js';
 import { renderTodayTrendInjection } from '../src/today-trend-injection.js';
@@ -95,6 +95,10 @@ const historyWindowMessages = [
     { role: 'user', content: '用户四' }, { role: 'assistant', content: '助手四' },
     { role: 'user', content: '用户五' }, { role: 'assistant', content: '助手五' },
 ];
+assert.equal(countTodayTrendAssistantMessages([
+    { mes: '用户消息', is_user: true }, { mes: '宿主助手消息' },
+    { role: 'assistant', content: '标准助手消息' }, { mes: '系统消息', is_system: true },
+]), 2, 'Today Trend UI assistantCount 必须兼容宿主 is_user 消息形态且排除系统消息');
 const historyPlan = planTodayTrendHistoryBatches({ messages: historyWindowMessages, recentAssistantCount: 4, mergeAssistantCount: 3 });
 assert.deepEqual({
     assistantCount: historyPlan.assistantCount, windowStart: historyPlan.windowStart, windowEnd: historyPlan.windowEnd,
@@ -4414,6 +4418,155 @@ assert.equal([...phase5ChainHarness.records.keys()].some(key => key.startsWith(T
     '真实生产链 accepted 后不得残留开放 journal');
 assert.equal(await phase5ChainAuthority.release({ readV2: true, serveV2: false }), true, '阶段 5 生产链 harness 必须释放 authority owner');
 
+const phase5MultiHarness = createAuthorityHarness();
+const phase5MultiAuthority = createTodayTrendV2Authority({
+    readEntry: phase5MultiHarness.readEntry,
+    compareAndSwap: phase5MultiHarness.compareAndSwap,
+    tabId: 'phase-5-multi-owner', BroadcastChannelImpl: undefined,
+});
+await phase5MultiAuthority.acquire({ readV2: true, writeV2: true, initialStore: valid });
+let phase5MultiNow = 12000;
+const phase5MultiPhases = [];
+const phase5MultiJournal = createTodayTrendJournal({
+    listKeys: async () => [...phase5MultiHarness.records.keys()], readEntry: phase5MultiHarness.readEntry,
+    writeEntry: async (key, value) => {
+        phase5MultiHarness.records.set(key, structuredClone(value));
+        phase5MultiPhases.push(value.phase);
+        return true;
+    },
+    deleteEntry: async key => phase5MultiHarness.records.delete(key), now: () => ++phase5MultiNow,
+    transactionId: () => `phase-5-multi-${phase5MultiNow}`,
+});
+const phase5MultiCasWrites = [];
+const phase5MultiOriginalCas = phase5MultiHarness.compareAndSwap;
+assert.equal(await phase5MultiAuthority.release({ readV2: true, serveV2: false }), true,
+    '阶段 5 多批 trace harness 初始化 owner 必须显式 release');
+const phase5MultiAuthorityWithTrace = createTodayTrendV2Authority({
+    readEntry: phase5MultiHarness.readEntry,
+    compareAndSwap: async request => {
+        phase5MultiCasWrites.push(request.writes.map(entry => entry.key));
+        return phase5MultiOriginalCas(request);
+    },
+    tabId: 'phase-5-multi-owner', BroadcastChannelImpl: undefined,
+});
+await phase5MultiAuthorityWithTrace.acquire({ readV2: true, writeV2: true, initialStore: valid });
+const phase5MultiStorage = createTodayTrendStorage({
+    v2Authority: phase5MultiAuthorityWithTrace, journal: phase5MultiJournal, storage: memoryStorage(),
+});
+const phase5MultiRuntime = {};
+const phase5MultiRefreshes = [];
+let phase5MultiBatch = 0;
+const phase5MultiCommitter = createTodayTrendCommitter({
+    runtime: phase5MultiRuntime, load: phase5MultiStorage.load, loadCanonical: phase5MultiStorage.loadCanonical,
+    save: phase5MultiStorage.save, storageStatus: phase5MultiStorage.status, journal: phase5MultiJournal,
+    refreshInjection: async store => { phase5MultiRefreshes.push(structuredClone(store)); return { failedWrites: 0, failedKeys: [] }; },
+});
+const phase5MultiChat = Array.from({ length: 4 }, (_, index) => ({ role: 'assistant', content: `真实多批正文${index + 1}` }));
+const phase5MultiController = {
+    generate: async ({ scope, assistantCount }) => {
+        phase5MultiBatch += 1;
+        const generatedScope = structuredClone(scope);
+        generatedScope.world.items[0].summary = `真实多批第${phase5MultiBatch}批-${assistantCount}`;
+        return { scope: generatedScope, history: { events: [] } };
+    },
+};
+const phase5MultiScheduler = createTodayTrendScheduler({
+    controller: phase5MultiController, committer: phase5MultiCommitter, getStore: phase5MultiStorage.load,
+    getStorageId: () => 'chat', getChat: () => phase5MultiChat,
+    getCalendarStore: () => ({ version: 1, scopes: { chat: { baseDate: '2025-04-15' } } }),
+    getFloor: () => 4, commitFeedbackMs: 0,
+});
+await phase5MultiScheduler.manual({ batchEnabled: true, recentAssistantCount: 4, mergeAssistantCount: 2 });
+const phase5MultiPersisted = (await phase5MultiAuthorityWithTrace.load()).v2Store.globalEnvelope.payload.scopes.chat.payload;
+assert.equal(phase5MultiBatch, 2, '真实 committer 多批 harness 必须逐批调用 AI');
+assert.equal(phase5MultiPersisted.world.items[0].summary, '真实多批第2批-4',
+    '真实多批提交的第二批必须读取并保留第一批 canonical 内容');
+assert.equal(phase5MultiRefreshes.length, 2, '真实 committer 多批成功必须每批只刷新一次 candidate 注入');
+assert.equal(phase5MultiCasWrites.filter(keys => keys.includes(TODAY_TREND_V2_STORAGE_KEY)
+    && keys.includes(TODAY_TREND_V2_AUTHORITY_KEY)
+    && keys.some(key => key.startsWith(TODAY_TREND_V2_JOURNAL_PREFIX))).length, 2,
+    '真实多批每次提交都必须将 store、authority 与 journal 放入同一个 CAS');
+assert.ok(phase5MultiPhases.filter(phase => phase === 'accepted').length >= 2,
+    '真实多批必须完成每批 journal accepted 终态');
+assert.equal([...phase5MultiHarness.records.keys()].some(key => key.startsWith(TODAY_TREND_V2_JOURNAL_PREFIX)), false,
+    '真实多批 accepted 后不得残留开放 journal');
+
+let phase5MultiDrifted = false;
+const phase5CanonicalDriftCommitter = createTodayTrendCommitter({
+    runtime: {}, load: phase5MultiStorage.load, loadCanonical: phase5MultiStorage.loadCanonical,
+    save: phase5MultiStorage.save, storageStatus: phase5MultiStorage.status, journal: phase5MultiJournal,
+    refreshInjection: async store => {
+        if (!phase5MultiDrifted) {
+            phase5MultiDrifted = true;
+            const current = await phase5MultiAuthorityWithTrace.load();
+            const drifted = structuredClone(current.v2Store);
+            const scope = drifted.globalEnvelope.payload.scopes.chat.payload;
+            scope.world.items[0].summary = '批间外部 canonical 修改';
+            await phase5MultiAuthorityWithTrace.save(drifted, { scopeId: 'chat' });
+        }
+        return { failedWrites: 0, failedKeys: [] };
+    },
+});
+let phase5CanonicalDriftCalls = 0;
+const phase5CanonicalDriftScheduler = createTodayTrendScheduler({
+    controller: { generate: async ({ scope, assistantCount }) => {
+        phase5CanonicalDriftCalls += 1;
+        const generatedScope = structuredClone(scope);
+        generatedScope.world.items[0].summary = `漂移前生成${assistantCount}`;
+        return { scope: generatedScope, history: { events: [] } };
+    } },
+    committer: phase5CanonicalDriftCommitter, getStore: phase5MultiStorage.load,
+    getStorageId: () => 'chat', getChat: () => phase5MultiChat,
+    getCalendarStore: () => ({ version: 1, scopes: { chat: { baseDate: '2025-04-15' } } }), getFloor: () => 4,
+});
+await phase5CanonicalDriftScheduler.manual({ batchEnabled: true, recentAssistantCount: 4, mergeAssistantCount: 2 });
+assert.equal(phase5CanonicalDriftCalls, 2, '批间 canonical 内容变化若发生在已完成批之后，不得误判为当前批迟到结果');
+assert.equal((await phase5MultiAuthorityWithTrace.load()).v2Store.globalEnvelope.payload.scopes.chat.payload.world.items[0].summary,
+    '漂移前生成4', '后续批必须基于批间最新 canonical 内容提交，而非覆盖外部变化');
+
+let phase5LateRelease;
+let phase5LateRefreshEntered = false;
+let phase5LateRefreshCalls = 0;
+const phase5LateBefore = structuredClone((await phase5MultiAuthorityWithTrace.load()).v2Store);
+const phase5LateRuntime = {};
+const phase5LateCommitter = createTodayTrendCommitter({
+    runtime: phase5LateRuntime, load: phase5MultiStorage.load, loadCanonical: phase5MultiStorage.loadCanonical,
+    save: phase5MultiStorage.save, storageStatus: phase5MultiStorage.status, journal: phase5MultiJournal,
+    refreshInjection: async () => {
+        phase5LateRefreshCalls += 1;
+        if (phase5LateRefreshCalls === 1) {
+            phase5LateRefreshEntered = true;
+            await new Promise(resolve => { phase5LateRelease = resolve; });
+        }
+        return { failedWrites: 0, failedKeys: [] };
+    },
+});
+const phase5LateScheduler = createTodayTrendScheduler({
+    controller: { generate: async ({ scope }) => ({ scope: { ...scope, world: { items: [{ ...scope.world.items[0], summary: '取消后的迟到结果' }] } }, history: { events: [] } }) },
+    committer: phase5LateCommitter, getStore: phase5MultiStorage.load, getStorageId: () => 'chat',
+    getChat: () => phase5MultiChat, getCalendarStore: () => ({ version: 1, scopes: { chat: { baseDate: '2025-04-15' } } }),
+    getFloor: () => 4,
+});
+const phase5LateRun = phase5LateScheduler.manual();
+for (let index = 0; index < 100 && !phase5LateRefreshEntered; index += 1) {
+    await new Promise(resolve => setImmediate(resolve));
+}
+assert.equal(phase5LateRefreshEntered, true, '真实 committer 取消矩阵必须等待 candidate 已写入后的注入阶段');
+phase5LateScheduler.cancel('phase-5-late-cancel');
+phase5LateRelease();
+await assert.rejects(() => phase5LateRun, error => error?.name === 'AbortError', '取消后的真实 candidate 注入迟到必须回滚并报告 AbortError');
+const phase5LateAfter = (await phase5MultiAuthorityWithTrace.load()).v2Store;
+assert.deepEqual(buildReadOnlyShadow(phase5LateAfter), buildReadOnlyShadow(phase5LateBefore),
+    '取消后的迟到 candidate 必须经真实 compensation CAS 恢复 previous canonical 内容');
+assert.ok(phase5LateAfter.globalEnvelope.revision > phase5LateBefore.globalEnvelope.revision,
+    '取消补偿必须通过新的 canonical revision 写入，而不是回写旧 revision');
+assert.equal(phase5LateCommitter.isBlocked(), false, '可完成 previous 注入补偿的取消不得留下 blocked journal');
+assert.equal([...phase5MultiHarness.records.keys()].some(key => key.startsWith(TODAY_TREND_V2_JOURNAL_PREFIX)), false,
+    '取消补偿完成后不得残留 journal 或 pending injection 状态');
+assert.equal(phase5LateRuntime.pendingInjectionStore, undefined,
+    '取消补偿完成后不得残留 pending injection store');
+await phase5MultiAuthorityWithTrace.release({ readV2: true, serveV2: false });
+
 const phase3BatchChat = Array.from({ length: 8 }, (_, index) => ({ role: 'assistant', content: `阶段3批次正文${index + 1}` }));
 let phase3BatchCanonical = structuredClone(migratedValidV2);
 let phase3BatchLoadCalls = 0;
@@ -5927,7 +6080,7 @@ const phase12BatchController = createTodayTrendPhoneController({
     container: phase12BatchContainer,
     deps: {
         getStorageId: () => 'chat', getTodayTrendStore: async () => valid,
-        getTodayTrendUiScope: async () => phase10UiScope, getCtx: () => ({ chat: [{ role: 'user' }, { role: 'assistant' }, { role: 'assistant' }] }),
+        getTodayTrendUiScope: async () => phase10UiScope, getCtx: () => ({ chat: [{ role: 'user', content: '用户消息' }, { role: 'assistant', content: '助手一' }, { role: 'assistant', content: '助手二' }] }),
         getTodayTrendCurrentFloor: () => 33, getTodayTrendGenerationState: () => ({ phase: 'idle' }),
         subscribeTodayTrendGeneration: () => () => {}, generateTodayTrend: options => { phase12GeneratedOptions = options; return Promise.resolve(); },
     },
@@ -5950,8 +6103,7 @@ const phase12BatchButton = {
     disabled: false, dataset: { action: 'today-trend-batch-generate' },
     closest: selector => selector === 'button[data-action]' ? phase12BatchButton : selector === 'form[data-today-trend-form="batch-settings"]' ? phase12BatchForm : null,
 };
-phase12BatchListeners.find(item => item.type === 'click' && item.capture)?.listener({ target: phase12BatchButton });
-await new Promise(resolve => setTimeout(resolve, 0));
+await phase12BatchListeners.find(item => item.type === 'click' && item.capture)?.listener({ target: phase12BatchButton });
 assert.deepEqual(phase12GeneratedOptions, { batchEnabled: true, recentAssistantCount: 2, mergeAssistantCount: 1 }, '批处理按钮必须透传调用级参数');
 phase12BatchForm.checkValidity = () => false;
 phase12GeneratedOptions = null;

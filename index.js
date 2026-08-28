@@ -26187,6 +26187,7 @@ ${targetInstruction}`
     if (role === "assistant" || role === "" && message?.is_user !== true && message?.is_system !== true) return "assistant";
     return null;
   };
+  var countTodayTrendAssistantMessages = (messages) => Array.isArray(messages) ? messages.filter((message) => historyMessageRole(message) === "assistant" && historyMessageText(message)).length : 0;
   var invalidHistoryInput = (message) => Object.assign(new Error(message), { code: "TT_HISTORY_WINDOW_INVALID" });
   var historyMessageDigest = (messages) => {
     let hash = 2166136261;
@@ -28116,7 +28117,7 @@ ${targetInstruction}`
     const loadingDetailIds = /* @__PURE__ */ new Set();
     let detailStorageId = "";
     const store = () => deps.getTodayTrendStore?.();
-    const assistantCount = () => (deps.getCtx?.()?.chat || []).filter((message) => message?.role === "assistant").length;
+    const assistantCount = () => countTodayTrendAssistantMessages(deps.getCtx?.()?.chat);
     const uiScope = async (id2) => typeof deps.getTodayTrendUiScope === "function" ? deps.getTodayTrendUiScope(id2) : (await store())?.scopes?.[id2] || null;
     const worldBooks = () => getReadableWorldBookNames(deps.getCtx?.());
     const restoreFocus = (selector, epoch) => {
@@ -28553,7 +28554,7 @@ ${targetInstruction}`
         const scope = await (typeof deps.getTodayTrendUiScope === "function" ? deps.getTodayTrendUiScope(storageId) : store?.scopes?.[storageId] || null);
         if (phoneWindow !== state.phoneWindow || !container.isConnected) return false;
         const currentFloor = deps.getTodayTrendCurrentFloor?.();
-        const assistantCount = (deps.getCtx?.()?.chat || []).filter((message) => message?.role === "assistant").length;
+        const assistantCount = countTodayTrendAssistantMessages(deps.getCtx?.()?.chat);
         container.innerHTML = renderTodayTrendApp({ scope, currentFloor, assistantCount });
         return true;
       }

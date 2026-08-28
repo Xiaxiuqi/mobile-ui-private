@@ -1,6 +1,7 @@
 import { createTodayTrendActionDispatcher } from './today-trend-actions.js';
 import { generationErrorMessage } from './ai.js';
 import { getReadableWorldBookNames } from './worldbook-config.js';
+import { countTodayTrendAssistantMessages } from './today-trend-scheduler.js';
 import { renderTodayTrendApp } from './today-trend-view.js';
 
 const formValues = form => new FormData(form);
@@ -18,7 +19,7 @@ export function createTodayTrendPhoneController({ state, deps, container }) {
     const loadingDetailIds = new Set();
     let detailStorageId = '';
     const store = () => deps.getTodayTrendStore?.();
-    const assistantCount = () => (deps.getCtx?.()?.chat || []).filter(message => message?.role === 'assistant').length;
+    const assistantCount = () => countTodayTrendAssistantMessages(deps.getCtx?.()?.chat);
     const uiScope = async id => typeof deps.getTodayTrendUiScope === 'function'
         ? deps.getTodayTrendUiScope(id) : (await store())?.scopes?.[id] || null;
     const worldBooks = () => getReadableWorldBookNames(deps.getCtx?.());
