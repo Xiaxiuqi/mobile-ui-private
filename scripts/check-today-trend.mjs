@@ -4574,6 +4574,7 @@ let phase3BatchLoadCalls = 0;
 let phase3BatchCommitCalls = 0;
 const phase3BatchInputs = [];
 const phase3BatchCounts = [];
+const phase3BatchStates = [];
 const phase3BatchCommitter = {
     supportsCanonical: true,
     invalidateCommits: () => {},
@@ -4594,12 +4595,19 @@ const phase3BatchScheduler = createTodayTrendScheduler({
     committer: phase3BatchCommitter, getStore: async () => buildReadOnlyShadow(phase3BatchCanonical),
     getStorageId: () => 'chat', getChat: () => phase3BatchChat, getFloor: () => 8,
 });
+const phase3BatchUnsubscribe = phase3BatchScheduler.subscribe(snapshot => {
+    if (snapshot.task?.batchIndex !== undefined) phase3BatchStates.push({
+        batchIndex: snapshot.task.batchIndex, batchCount: snapshot.task.batchCount,
+    });
+});
 await phase3BatchScheduler.manual({ batchEnabled: true, recentAssistantCount: 8, mergeAssistantCount: 3 });
+phase3BatchUnsubscribe();
 assert.equal(phase3BatchInputs.length, 3, '阶段3合法窗口必须按合并大小串行调用三次 AI');
 assert.deepEqual(phase3BatchCounts, [3, 6, 8], '阶段3每批提交边界必须使用当前批最后一个 assistant 序号');
 assert.deepEqual(phase3BatchInputs.map(batch => batch.length), [3, 3, 2], '阶段3每批正文必须只包含当前批及其上下文消息');
 assert.equal(phase3BatchCommitCalls, 3, '阶段3每批成功后必须立即提交一次');
 assert.equal(phase3BatchLoadCalls, 3, '阶段3必须在每个批次开始前重新读取 canonical scope');
+assert.deepEqual([...new Set(phase3BatchStates.map(item => `${item.batchIndex}/${item.batchCount}`))], ['0/3', '1/3', '2/3'], '阶段3状态订阅必须发布当前批次进度');
 assert.equal(phase3BatchCanonical.globalEnvelope.payload.scopes.chat.payload.operation.lastSuccessfulAssistantCount, 8,
     '阶段3最终成功边界必须落在最后短批的 assistant 末端');
 
@@ -6063,7 +6071,8 @@ const phase12BatchOffHtml = renderTodayTrendSettingsView({
 assert.match(phase12BatchOffHtml, /name="batchEnabled"[^>]*role="switch"/, '批处理默认必须提供关闭状态开关');
 assert.doesNotMatch(phase12BatchOffHtml, /name="recentAssistantCount"|name="mergeAssistantCount"|today-trend-batch-generate/, '批处理关闭时不得显示详情控件');
 const phase12BatchOnHtml = renderTodayTrendSettingsView({
-    scope: phase10UiScope, presets: Object.values(valid.presets), assistantCount: 8, batchEnabled: true,
+    scope: phase10UiScope, presets: Object.values(valid.presets), assistantCount: 8,
+    batchDraft: { enabled: true, recentAssistantCount: 4, mergeAssistantCount: 2 },
 });
 assert.match(phase12BatchOnHtml, /name="batchEnabled"[^>]*checked/, '批处理开启状态必须反映在开关上');
 assert.match(phase12BatchOnHtml, new RegExp(`generationSnapshots：固定保留最近 ${TODAY_TREND_LIMITS.generationSnapshots} 个记录`), '固定容量说明必须来自统一容量常量');
@@ -6071,6 +6080,9 @@ assert.match(phase12BatchOnHtml, /name="recentAssistantCount"[^>]*max="8"/, '批
 assert.match(phase12BatchOnHtml, /data-action="today-trend-batch-generate"/, '开启批处理后必须显示手动更新动作');
 const phase12BatchListeners = [];
 let phase12GeneratedOptions = null;
+let phase12UiScope = structuredClone(phase10UiScope);
+let phase12SaveCalls = 0;
+let phase12FailSaveCall = null;
 const phase12BatchContainer = {
     innerHTML: '', contains: () => true,
     addEventListener: (type, listener, capture = false) => phase12BatchListeners.push({ type, listener, capture }),
@@ -6080,20 +6092,48 @@ const phase12BatchController = createTodayTrendPhoneController({
     state: { phoneWindow: { querySelector: selector => selector === '.pm-today-trend-page' ? phase12BatchContainer : null } },
     container: phase12BatchContainer,
     deps: {
-        getStorageId: () => 'chat', getTodayTrendStore: async () => valid,
-        getTodayTrendUiScope: async () => phase10UiScope, getCtx: () => ({ chat: [{ role: 'user', content: '用户消息' }, { role: 'assistant', content: '助手一' }, { role: 'assistant', content: '助手二' }] }),
+        getStorageId: () => 'chat', getTodayTrendStore: async () => ({ ...valid, scopes: { ...valid.scopes, chat: phase12UiScope } }),
+        getTodayTrendUiScope: async () => phase12UiScope, getCtx: () => ({ chat: [{ role: 'user', content: '用户消息' }, { role: 'assistant', content: '助手一' }, { role: 'assistant', content: '助手二' }] }),
         getTodayTrendCurrentFloor: () => 33, getTodayTrendGenerationState: () => ({ phase: 'idle' }),
-        subscribeTodayTrendGeneration: () => () => {}, generateTodayTrend: options => { phase12GeneratedOptions = options; return Promise.resolve(); },
+        subscribeTodayTrendGeneration: () => () => {},
+        saveTodayTrendSettings: async ({ operation }) => {
+            phase12SaveCalls += 1;
+            if (phase12SaveCalls === phase12FailSaveCall) throw new Error('模拟批处理草稿保存失败');
+            phase12UiScope.operation = { ...phase12UiScope.operation, ...operation };
+            valid.scopes.chat.operation = { ...valid.scopes.chat.operation, ...operation };
+            return { scope: phase12UiScope };
+        },
+        generateTodayTrend: options => { phase12GeneratedOptions = options; return Promise.resolve(); },
     },
 });
 await phase12BatchController.render();
 const phase12OpenSettingsButton = { disabled: false, dataset: { action: 'today-trend-open-settings' }, closest: selector => selector === 'button[data-action]' ? phase12OpenSettingsButton : null };
 phase12BatchListeners.find(item => item.type === 'click' && item.capture)?.listener({ target: phase12OpenSettingsButton });
-await new Promise(resolve => setTimeout(resolve, 0));
-const phase12BatchToggle = { disabled: false, checked: true, closest: selector => selector === 'input[name="batchEnabled"]' ? phase12BatchToggle : null };
-phase12BatchListeners.find(item => item.type === 'change')?.listener({ target: phase12BatchToggle });
-await new Promise(resolve => setTimeout(resolve, 0));
+await new Promise(resolve => setTimeout(resolve, 10));
+const phase12BatchToggle = { name: 'batchEnabled', disabled: false, checked: true, closest: selector => selector.includes('input[name="batchEnabled"]') ? phase12BatchToggle : null };
+await phase12BatchListeners.find(item => item.type === 'change')?.listener({ target: phase12BatchToggle });
 assert.match(phase12BatchContainer.innerHTML, /name="recentAssistantCount"/, 'controller 切换批处理开关后必须显示详情字段');
+const phase12RecentInput = { name: 'recentAssistantCount', value: '4', disabled: false,
+    closest: selector => selector.includes('input[name="recentAssistantCount"]') ? phase12RecentInput : null };
+const phase12MergeInput = { name: 'mergeAssistantCount', value: '2', disabled: false,
+    closest: selector => selector.includes('input[name="mergeAssistantCount"]') ? phase12MergeInput : null };
+const phase12ChangeListener = phase12BatchListeners.find(item => item.type === 'change')?.listener;
+const phase12RapidSaves = [phase12ChangeListener({ target: phase12RecentInput }), phase12ChangeListener({ target: phase12MergeInput })];
+await Promise.all(phase12RapidSaves);
+assert.deepEqual(phase12UiScope.operation.batchDraft, { enabled: true, recentAssistantCount: 4, mergeAssistantCount: 2 },
+    '快速连续修改批处理参数不得因旧 render 快照覆盖已保存字段');
+phase12FailSaveCall = phase12SaveCalls + 2;
+const phase12Input = (name, value) => ({ name, value: String(value), disabled: false,
+    closest() { return this; } });
+const phase12FailedQueueSaves = [
+    phase12ChangeListener({ target: phase12Input('recentAssistantCount', 5) }),
+    phase12ChangeListener({ target: phase12Input('mergeAssistantCount', 3) }),
+    phase12ChangeListener({ target: phase12Input('recentAssistantCount', 6) }),
+];
+await Promise.all(phase12FailedQueueSaves);
+assert.equal(phase12SaveCalls, 6, '批处理草稿队列中单次保存失败后仍必须继续执行后续变更');
+assert.deepEqual(phase12UiScope.operation.batchDraft, { enabled: true, recentAssistantCount: 6, mergeAssistantCount: 2 },
+    '批处理草稿队列后续保存必须基于最近 canonical 状态合并，而不是丢失此前字段');
 const phase12BatchForm = {
     values: new Map([['recentAssistantCount', '2'], ['mergeAssistantCount', '1']]),
     checkValidity: () => true, reportValidity: () => {},

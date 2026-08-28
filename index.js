@@ -8962,7 +8962,19 @@ ${entry2.content}` : entry2.content;
     scope.presetId = normalizeId(value.presetId, "TT_SCOPE", "\u4E16\u754C\u9884\u8BBE ID");
     if (presetIds && !presetIds.has(scope.presetId)) fail("TT_SCOPE_PRESET", "\u89D2\u8272\u8D44\u6599\u5F15\u7528\u7684\u4E16\u754C\u9884\u8BBE\u4E0D\u5B58\u5728");
     const operation = plainRecord8(value.operation) ? value.operation : fail("TT_SCOPE", "\u8FD0\u884C\u8BBE\u7F6E\u65E0\u6548");
-    scope.operation = { enabled: requiredBoolean(operation.enabled, "TT_SCOPE", "\u8FD0\u884C\u5F00\u5173"), mode: assertEnum(operation.mode, TODAY_TREND_OPERATION_MODES, "TT_SCOPE", "\u8FD0\u884C\u6A21\u5F0F"), intervalFloors: Number.isInteger(operation.intervalFloors) && operation.intervalFloors >= 1 && operation.intervalFloors <= TODAY_TREND_LIMITS.intervalFloors ? operation.intervalFloors : fail("TT_SCOPE", "\u81EA\u52A8\u8C03\u7528\u697C\u5C42\u65E0\u6548"), lastSuccessfulAssistantCount: timestamp4(operation.lastSuccessfulAssistantCount), lastSuccessfulRunAt: timestamp4(operation.lastSuccessfulRunAt) };
+    const normalizedOperation = { enabled: requiredBoolean(operation.enabled, "TT_SCOPE", "\u8FD0\u884C\u5F00\u5173"), mode: assertEnum(operation.mode, TODAY_TREND_OPERATION_MODES, "TT_SCOPE", "\u8FD0\u884C\u6A21\u5F0F"), intervalFloors: Number.isInteger(operation.intervalFloors) && operation.intervalFloors >= 1 && operation.intervalFloors <= TODAY_TREND_LIMITS.intervalFloors ? operation.intervalFloors : fail("TT_SCOPE", "\u81EA\u52A8\u8C03\u7528\u697C\u5C42\u65E0\u6548"), lastSuccessfulAssistantCount: timestamp4(operation.lastSuccessfulAssistantCount), lastSuccessfulRunAt: timestamp4(operation.lastSuccessfulRunAt) };
+    if (operation.batchDraft !== void 0) {
+      const rawBatchDraft = operation.batchDraft;
+      if (!plainRecord8(rawBatchDraft)) fail("TT_SCOPE", "\u6279\u5904\u7406\u53C2\u6570\u65E0\u6548");
+      const batchDraft = {
+        enabled: rawBatchDraft.enabled === void 0 ? false : requiredBoolean(rawBatchDraft.enabled, "TT_SCOPE", "\u6279\u5904\u7406\u5F00\u5173"),
+        recentAssistantCount: timestamp4(rawBatchDraft.recentAssistantCount, 1),
+        mergeAssistantCount: timestamp4(rawBatchDraft.mergeAssistantCount, 1)
+      };
+      if (batchDraft.recentAssistantCount < 1 || batchDraft.mergeAssistantCount < 1 || batchDraft.mergeAssistantCount > batchDraft.recentAssistantCount) fail("TT_SCOPE", "\u6279\u5904\u7406\u53C2\u6570\u65E0\u6548");
+      normalizedOperation.batchDraft = batchDraft;
+    }
+    scope.operation = normalizedOperation;
     const injection = plainRecord8(value.injection) ? value.injection : fail("TT_SCOPE", "\u6B63\u6587\u6CE8\u5165\u8BBE\u7F6E\u65E0\u6548");
     scope.injection = { enabled: requiredBoolean(injection.enabled, "TT_SCOPE", "\u6B63\u6587\u6CE8\u5165\u5F00\u5173"), minimalUi: injection.minimalUi === true };
     const world = plainRecord8(value.world) ? value.world : fail("TT_SCOPE", "\u4E16\u754C\u6001\u52BF\u65E0\u6548");
@@ -9732,6 +9744,7 @@ ${entry2.content}` : entry2.content;
   var datePattern = /^\d{4}-\d{2}-\d{2}$/;
   var validDate = (value) => typeof value === "string" && datePattern.test(value) && Number.isFinite((/* @__PURE__ */ new Date(`${value}T12:00:00Z`)).getTime()) && (/* @__PURE__ */ new Date(`${value}T12:00:00Z`)).toISOString().slice(0, 10) === value;
   var projectionText = (stage) => ["day-summary", "period-summary", "span-stage"].includes(stage.kind) ? stage.summary : stage.text;
+  var resolveLatestStage = (event) => event.stages.reduce((selected, stage) => !selected || stage.sourceStageEnd > selected.sourceStageEnd || stage.sourceStageEnd === selected.sourceStageEnd && stage.sourceStageStart > selected.sourceStageStart || stage.sourceStageEnd === selected.sourceStageEnd && stage.sourceStageStart === selected.sourceStageStart && stage.id > selected.id ? stage : selected, null);
   var DETAIL_CAPACITY = 80;
   var canonical2 = (value) => {
     if (Array.isArray(value)) return `[${value.map(canonical2).join(",")}]`;
@@ -10170,7 +10183,7 @@ ${entry2.content}` : entry2.content;
       appendStageProjections(event, item.stages, trustedStoryDate, Number.isSafeInteger(assistantCount) ? assistantCount : null);
       if (!event.stages.length) fail2("TT_HISTORY_SCHEMA_INVALID", "history producer \u4E0D\u5F97\u4EA7\u751F\u7A7A event \u5386\u53F2");
       planPeriodCompaction(event, payload, item.periodSummaries, assistantCount);
-      event.latestStage = projectionText(event.stages.at(-1));
+      event.latestStage = projectionText(resolveLatestStage(event));
       event.capacityCompatibilityPending = event.stages.length === 40;
     }
     for (const event of payload.dynamics.active) {
@@ -25949,12 +25962,22 @@ ${targetInstruction}`
   function normalizeGeneration(parsed, { scope, preset, allowIncident }) {
     if (!scope || !preset) throw new TypeError("\u4ECA\u65E5\u98CE\u5411\u751F\u6210\u7F3A\u5C11\u5F53\u524D\u8D44\u6599");
     const generatedFactions = parsed.factions === null ? null : withoutDirectParentChildLinks(parsed.factions);
+    const normalizeEventLatestStage = (event) => {
+      if (!event || !Array.isArray(event.stages) || !event.stages.length) return event;
+      const latestStage = event.stages.at(-1);
+      return event.latestStage === latestStage ? event : { ...event, latestStage };
+    };
+    const normalizeDynamicsLatestStages = (dynamics) => dynamics === null ? null : {
+      ...dynamics,
+      active: dynamics.active.map(normalizeEventLatestStage),
+      archived: dynamics.archived.map(normalizeEventLatestStage)
+    };
     const candidate = {
       ...scope,
       world: parsed.world ?? scope.world,
       reputation: parsed.reputation ?? scope.reputation,
       factions: generatedFactions ?? scope.factions,
-      dynamics: parsed.dynamics ?? scope.dynamics
+      dynamics: parsed.dynamics === null ? scope.dynamics : normalizeDynamicsLatestStages(parsed.dynamics)
     };
     for (const previous of scope.dynamics.active) {
       const nextEvents2 = [...candidate.dynamics.active, ...candidate.dynamics.archived];
@@ -26365,7 +26388,9 @@ ${targetInstruction}`
       kind: task.kind,
       storageId: task.storageId,
       floor: task.floor,
-      target: task.target ? Object.freeze({ ...task.target }) : null
+      target: task.target ? Object.freeze({ ...task.target }) : null,
+      ...Number.isSafeInteger(task.batchIndex) && task.batchIndex >= 0 ? { batchIndex: task.batchIndex } : {},
+      ...Number.isSafeInteger(task.batchCount) && task.batchCount > 0 ? { batchCount: task.batchCount } : {}
     }) : null;
     const state = () => Object.freeze({
       phase,
@@ -26490,7 +26515,7 @@ ${targetInstruction}`
       const observation = observations.get(id2);
       if (observation) touch(observation);
       const pendingTurns = observation?.pendingTurns;
-      const task = Object.freeze({
+      const task = {
         id: ++sequence,
         kind,
         storageId: id2,
@@ -26502,8 +26527,10 @@ ${targetInstruction}`
         abortController: new AbortController(),
         batchEnabled: batchEnabled === true,
         recentAssistantCount,
-        mergeAssistantCount
-      });
+        mergeAssistantCount,
+        batchIndex: null,
+        batchCount: null
+      };
       terminalTask = null;
       activeTask = task;
       setPhase("queued", null);
@@ -26519,6 +26546,8 @@ ${targetInstruction}`
         let historyPlan = null;
         if (task.batchEnabled) {
           historyPlan = buildHistoryPlan({ messages: chat, recentAssistantCount: task.recentAssistantCount, mergeAssistantCount: task.mergeAssistantCount });
+          task.batchCount = historyPlan.batchCount;
+          publish();
         }
         if (!isActive(task)) throw cancelled();
         const source = await getStore();
@@ -26532,6 +26561,8 @@ ${targetInstruction}`
           let batchPreset = null;
           for (let batchIndex = 0; batchIndex < historyPlan.batchCount; batchIndex += 1) {
             if (!isActive(task)) throw cancelled();
+            task.batchIndex = batchIndex;
+            publish();
             const batchChat = getChat();
             const batch = historyPlan.batches[batchIndex];
             const batchAssistantCount = batch.assistantEnd;
@@ -27100,18 +27131,39 @@ ${targetInstruction}`
     const saveSettings = async ({ presetId, operation, injection } = {}) => {
       const identity = currentIdentity(getStorageId2());
       const selected = String(presetId || "").trim();
+      if (typeof committer.loadCanonical !== "function") throw Object.assign(new Error("\u4ECA\u65E5\u98CE\u5411\u8BBE\u7F6E\u9700\u8981 canonical \u5B58\u50A8\u80FD\u529B"), { code: "TT_V2_CANONICAL_REQUIRED" });
+      const canonical3 = await committer.loadCanonical();
+      const currentEnvelope = canonical3?.globalEnvelope?.payload?.scopes?.[identity.storageId];
+      if (!currentEnvelope?.payload) throw Object.assign(new Error("\u5F53\u524D\u804A\u5929\u5C1A\u672A\u521D\u59CB\u5316\u4ECA\u65E5\u98CE\u5411"), { code: "TT_V2_SCHEMA_INVALID" });
+      if (selected && selected !== currentEnvelope.payload.presetId) {
+        const committed2 = await committer.commitStore((store) => {
+          const facade = buildReadOnlyShadow(store);
+          const current = facade.scopes[identity.storageId];
+          if (!current) throw new Error("\u5F53\u524D\u804A\u5929\u5C1A\u672A\u521D\u59CB\u5316\u4ECA\u65E5\u98CE\u5411");
+          if (!facade.presets[selected]) throw new Error("\u9009\u62E9\u7684\u4E16\u754C\u9884\u8BBE\u4E0D\u5B58\u5728");
+          const next = Object.assign(createEmptyTodayTrendScope(), identity, { presetId: selected });
+          next.operation = { ...next.operation, ...operation };
+          next.injection = { ...next.injection, ...injection };
+          facade.scopes[identity.storageId] = next;
+          return normalizeTodayTrendV2Candidate(facade, store);
+        }, null, { canonical: true, scopeId: identity.storageId, expectedScopeRevision: currentEnvelope.revision });
+        if (!committed2) throw new Error("\u4ECA\u65E5\u98CE\u5411\u8BBE\u7F6E\u4FDD\u5B58\u5DF2\u53D6\u6D88");
+        if (operation?.enabled) scheduler.arm(identity.storageId);
+        else scheduler.cancel("today-trend-stopped");
+        return committed2;
+      }
       const committed = await committer.commitStore((store) => {
-        const current = store.scopes[identity.storageId];
-        if (!current) throw new Error("\u5F53\u524D\u804A\u5929\u5C1A\u672A\u521D\u59CB\u5316\u4ECA\u65E5\u98CE\u5411");
-        const next = selected && selected !== current.presetId ? (() => {
-          if (!store.presets[selected]) throw new Error("\u9009\u62E9\u7684\u4E16\u754C\u9884\u8BBE\u4E0D\u5B58\u5728");
-          return Object.assign(createEmptyTodayTrendScope(), identity, { presetId: selected });
-        })() : current;
-        next.operation = { ...next.operation, ...operation };
-        next.injection = { ...next.injection, ...injection };
-        store.scopes[identity.storageId] = next;
+        const scopes = store.globalEnvelope.payload.scopes;
+        const envelope = scopes[identity.storageId];
+        if (!envelope?.payload) throw Object.assign(new Error("\u5F53\u524D\u804A\u5929\u5C1A\u672A\u521D\u59CB\u5316\u4ECA\u65E5\u98CE\u5411"), { code: "TT_V2_SCHEMA_INVALID" });
+        const current = envelope.payload;
+        scopes[identity.storageId] = { ...envelope, payload: {
+          ...current,
+          operation: { ...current.operation, ...operation },
+          injection: { ...current.injection, ...injection }
+        } };
         return store;
-      });
+      }, null, { canonical: true, scopeId: identity.storageId, expectedScopeRevision: currentEnvelope.revision });
       if (!committed) throw new Error("\u4ECA\u65E5\u98CE\u5411\u8BBE\u7F6E\u4FDD\u5B58\u5DF2\u53D6\u6D88");
       if (operation?.enabled) scheduler.arm(identity.storageId);
       else scheduler.cancel("today-trend-stopped");
@@ -27690,14 +27742,15 @@ ${targetInstruction}`
     if (!visible) return "";
     return `<span class="pm-today-trend-inline-actions">${actions.map((action) => trendIconButton({ ...action, className: `pm-today-trend-inline-action${action.className ? ` ${action.className}` : ""}` })).join("")}</span>`;
   }
-  function trendFloorStatus({ currentFloor, syncedFloor = 0, phase = "idle", lastError = null, busy = false, targetFloor = null, targeted = false } = {}) {
+  function trendFloorStatus({ currentFloor, syncedFloor = 0, phase = "idle", lastError = null, busy = false, targetFloor = null, batchIndex = null, batchCount = null, targeted = false } = {}) {
     const synced = Number.isInteger(syncedFloor) && syncedFloor >= 0 ? syncedFloor : 0;
     const currentFloorProvided = currentFloor !== void 0;
     const floor = Number.isInteger(currentFloor) && currentFloor >= 0 ? currentFloor : currentFloorProvided ? null : synced;
     const target = Number.isInteger(targetFloor) && targetFloor >= 0 ? targetFloor : null;
     const terminalState = phase === "failed" ? "failed" : phase === "canceled" ? "canceled" : null;
     const state = busy ? "updating" : terminalState || (floor === null ? "unavailable" : floor > 0 && synced === floor ? "synced" : "unsynced");
-    const status = busy ? targeted ? "\u6B63\u5728\u66F4\u65B0\u6A21\u5757" : target === null ? "\u6B63\u5728\u540C\u6B65" : `\u540C\u6B65\u4EFB\u52A1 #${target}` : terminalState === "failed" ? "\u540C\u6B65\u5931\u8D25" : terminalState === "canceled" ? "\u5DF2\u7EC8\u6B62" : floor === null ? "\u697C\u5C42\u4E0D\u53EF\u7528" : floor > 0 && synced === floor ? "\u5DF2\u540C\u6B65" : floor > 0 ? "\u5F85\u540C\u6B65" : "\u5C1A\u672A\u540C\u6B65";
+    const batchStatus = Number.isSafeInteger(batchIndex) && batchIndex >= 0 && Number.isSafeInteger(batchCount) && batchCount > 0 ? `\u7B2C ${batchIndex + 1}/${batchCount} \u6279` : Number.isSafeInteger(batchCount) && batchCount > 0 ? `\u51C6\u5907\u6279\u5904\u7406\uFF08\u5171 ${batchCount} \u6279\uFF09` : "";
+    const status = busy ? targeted ? "\u6B63\u5728\u66F4\u65B0\u6A21\u5757" : batchStatus || (target === null ? "\u6B63\u5728\u540C\u6B65" : `\u540C\u6B65\u4EFB\u52A1 #${target}`) : terminalState === "failed" ? "\u540C\u6B65\u5931\u8D25" : terminalState === "canceled" ? "\u5DF2\u7EC8\u6B62" : floor === null ? "\u697C\u5C42\u4E0D\u53EF\u7528" : floor > 0 && synced === floor ? "\u5DF2\u540C\u6B65" : floor > 0 ? "\u5F85\u540C\u6B65" : "\u5C1A\u672A\u540C\u6B65";
     const reading = floor === null ? "#--" : `#${floor}`;
     const statusTitle = terminalState === "failed" && lastError ? ` title="${escapeAttr(lastError)}"` : "";
     const readingHtml = `<span class="pm-today-trend-floor-reading"><strong class="pm-today-trend-floor-value">${reading}</strong></span>`;
@@ -27915,18 +27968,21 @@ ${targetInstruction}`
   }
 
   // src/today-trend-settings-view.js
-  function batchSettingsGroup(assistantCount, generationBusy, batchEnabled) {
+  function batchSettingsGroup(assistantCount, generationBusy, batchDraft = {}) {
     const count = Number.isSafeInteger(assistantCount) && assistantCount >= 0 ? assistantCount : 0;
     const disabled = generationBusy || count < 1;
     const defaultMerge = Math.min(5, Math.max(count, 1));
+    const batchEnabled = batchDraft.enabled === true;
+    const recentAssistantCount = Number.isSafeInteger(batchDraft.recentAssistantCount) ? batchDraft.recentAssistantCount : 1;
+    const mergeAssistantCount = Number.isSafeInteger(batchDraft.mergeAssistantCount) ? batchDraft.mergeAssistantCount : defaultMerge;
     const details = batchEnabled ? `
-        <p class="pm-today-trend-retention-help">\u5F53\u524D\u804A\u5929 AI \u56DE\u590D\u7D2F\u8BA1\u5C42\u6570\uFF1A${count}\u3002\u6279\u91CF\u53C2\u6570\u4EC5\u7528\u4E8E\u672C\u6B21\u624B\u52A8\u66F4\u65B0\uFF0C\u4E0D\u4F1A\u5199\u5165\u8BBE\u7F6E\u3002</p>
-        <label class="pm-today-trend-field"><span>\u624B\u52A8\u5904\u7406\u6700\u8FD1 assistant \u5C42\u6570</span><input class="pm-today-trend-input" name="recentAssistantCount" type="number" inputmode="numeric" min="1" max="${Math.max(count, 1)}" step="1" required value="1" ${disabled ? "disabled" : ""}></label>
-        <label class="pm-today-trend-field"><span>\u6BCF\u591A\u5C11\u5C42\u5408\u5E76\u4E3A\u4E00\u6B21</span><input class="pm-today-trend-input" name="mergeAssistantCount" type="number" inputmode="numeric" min="1" max="${Math.max(count, 1)}" step="1" required value="${defaultMerge}" ${disabled ? "disabled" : ""}></label>
+        <p class="pm-today-trend-retention-help">\u5F53\u524D\u804A\u5929 AI \u56DE\u590D\u7D2F\u8BA1\u5C42\u6570\uFF1A${count}\u3002\u6279\u91CF\u53C2\u6570\u4F1A\u4FDD\u5B58\u5230\u5F53\u524D\u804A\u5929\u8BBE\u7F6E\u3002</p>
+        <label class="pm-today-trend-field"><span>\u624B\u52A8\u5904\u7406\u6700\u8FD1 assistant \u5C42\u6570</span><input class="pm-today-trend-input" name="recentAssistantCount" type="number" inputmode="numeric" min="1" max="${Math.max(count, 1)}" step="1" required value="${recentAssistantCount}" ${disabled ? "disabled" : ""}></label>
+        <label class="pm-today-trend-field"><span>\u6BCF\u591A\u5C11\u5C42\u5408\u5E76\u4E3A\u4E00\u6B21</span><input class="pm-today-trend-input" name="mergeAssistantCount" type="number" inputmode="numeric" min="1" max="${Math.max(count, 1)}" step="1" required value="${mergeAssistantCount}" ${disabled ? "disabled" : ""}></label>
         <p class="pm-today-trend-retention-help">generationSnapshots\uFF1A\u56FA\u5B9A\u4FDD\u7559\u6700\u8FD1 ${TODAY_TREND_LIMITS.generationSnapshots} \u4E2A\u8BB0\u5F55\u3002\u8BE5\u5BB9\u91CF\u4E0D\u53EF\u914D\u7F6E\uFF0C\u4E5F\u4E0D\u4F1A\u56E0\u6253\u5F00\u6216\u4FDD\u5B58\u8BBE\u7F6E\u89E6\u53D1\u751F\u6210\u6216\u6E05\u7406\u3002</p>
         <div class="pm-today-trend-form-actions"><button type="button" data-action="today-trend-batch-generate" ${disabled ? "disabled" : ""}>${generationBusy ? "\u6B63\u5728\u6279\u91CF\u66F4\u65B0" : "\u624B\u52A8\u6279\u91CF\u66F4\u65B0"}</button></div>` : "";
     return `<fieldset class="pm-today-trend-batch-settings"><legend>\u6EAF\u53CA\u65E2\u5F80\u697C\u5C42\u66F4\u65B0</legend>
-        <label class="pm-today-trend-switch pm-today-trend-batch-switch"><span><b>\u542F\u7528\u6EAF\u53CA\u65E2\u5F80\u697C\u5C42\u66F4\u65B0</b><small>\u5F00\u542F\u540E\u663E\u793A\u672C\u6B21\u6279\u91CF\u5904\u7406\u53C2\u6570\uFF1B\u4E0D\u4F1A\u5199\u5165\u8BBE\u7F6E\u3002</small></span><input name="batchEnabled" type="checkbox" role="switch" aria-checked="${batchEnabled === true}"${batchEnabled ? " checked" : ""}${generationBusy ? " disabled" : ""}><i aria-hidden="true"></i></label>${details}
+        <label class="pm-today-trend-switch pm-today-trend-batch-switch"><span><b>\u542F\u7528\u6EAF\u53CA\u65E2\u5F80\u697C\u5C42\u66F4\u65B0</b><small>\u5F00\u542F\u540E\u663E\u793A\u5DF2\u4FDD\u5B58\u7684\u6279\u91CF\u5904\u7406\u53C2\u6570\u3002</small></span><input name="batchEnabled" type="checkbox" role="switch" aria-checked="${batchEnabled === true}"${batchEnabled ? " checked" : ""}${generationBusy ? " disabled" : ""}><i aria-hidden="true"></i></label>${details}
     </fieldset>`;
   }
   function retentionSettingsGroup(scope, revisions2, saving, generationBusy, draft) {
@@ -27961,12 +28017,12 @@ ${targetInstruction}`
     retentionDraft = null,
     errorHtml = "",
     assistantCount = 0,
-    batchEnabled = false
+    batchDraft = {}
   } = {}) {
     if (!scope) return '<section class="pm-today-trend-settings"><h3>APP \u603B\u8BBE\u7F6E</h3><p class="pm-today-trend-empty">\u8BF7\u5148\u521B\u5EFA\u6216\u7ED1\u5B9A\u4E16\u754C\u9884\u8BBE\u3002</p></section>';
     const options2 = presets.map((preset) => `<option value="${escapeAttr(preset.id)}" ${preset.id === scope.presetId ? "selected" : ""}>${escapeHtml(preset.name)}</option>`).join("");
     const rules = [["world", "\u4E16\u754C\u6001\u52BF\u89C4\u5219"], ["reputation", "\u4E2A\u4EBA\u98CE\u8BC4\u89C4\u5219"], ["faction", "\u52BF\u529B\u56FE\u8C31\u89C4\u5219"], ["dynamics", "\u52A8\u6001\u603B\u89C4\u5219"], ["incident", "\u7A81\u53D1\u4E8B\u4EF6\u89C4\u5219"], ["rumor", "\u6D41\u8A00\u871A\u8BED\u89C4\u5219"], ["underground", "\u5730\u4E0B\u7EBF\u89C4\u5219"]].map(([name, label]) => `<div class="pm-today-trend-rule-row"><span>${label}</span>${trendActionMenu({ id: `app-rule:${name}`, open: menuOpenId === `app-rule:${name}`, label: `${label}\u64CD\u4F5C`, actions: [{ action: `today-trend-edit-${name}-rule`, icon: EDIT_ICON_SVG, label: `\u7F16\u8F91${label}`, attrs: 'data-rule-return="settings"' }, { action: `today-trend-regenerate-${name}-rule`, icon: REFRESH_ICON_SVG, label: `\u91CD\u65B0\u751F\u6210${label}` }] })}</div>`).join("");
-    return `<section class="pm-today-trend-settings">${trendModuleHead({ title: "APP \u603B\u8BBE\u7F6E", menuId: "app-settings", menuOpenId, actions: [{ action: "today-trend-close-settings", icon: BACK_ICON_SVG, label: "\u8FD4\u56DE\u4ECA\u65E5\u98CE\u5411" }] })}${errorHtml}<form class="pm-today-trend-editor" data-today-trend-form="app-settings"><label class="pm-today-trend-field">\u5F53\u524D\u4E16\u754C\u9884\u8BBE<select class="pm-today-trend-input" name="presetId">${options2}</select></label><p class="pm-today-trend-preset-warning">\u5207\u6362\u4E16\u754C\u9884\u8BBE\u4F1A\u91CD\u5EFA\u5F53\u524D\u4F5C\u7528\u57DF\u3002\u5207\u6362\u5B8C\u6210\u540E\u8BF7\u91CD\u65B0\u6253\u5F00\u672C\u9875\uFF0C\u518D\u5355\u72EC\u786E\u8BA4\u5F52\u6863\u4FDD\u7559\u8BBE\u7F6E\u3002</p><div class="pm-today-trend-form-actions pm-today-trend-preset-actions"><button type="button" data-action="today-trend-new-preset">\u65B0\u5EFA</button><button type="button" data-action="today-trend-delete-preset">\u5220\u9664</button><button type="button" data-action="today-trend-reinitialize">\u91CD\u5EFA</button><button type="button" data-action="today-trend-rename-preset">\u91CD\u547D\u540D</button></div><label class="pm-today-trend-field">\u8C03\u7528\u65B9\u5F0F<select class="pm-today-trend-input" name="mode"><option value="manual" ${scope.operation?.mode === "manual" ? "selected" : ""}>\u624B\u52A8</option><option value="auto" ${scope.operation?.mode === "auto" ? "selected" : ""}>\u81EA\u52A8</option></select></label><label class="pm-today-trend-field">\u81EA\u52A8\u8C03\u7528\uFF1A\u6BCF N \u697C\u6267\u884C\u4E00\u6B21<input class="pm-today-trend-input" name="intervalFloors" type="number" min="1" max="1000" required value="${escapeAttr(String(scope.operation?.intervalFloors || 1))}"></label><label class="pm-today-trend-switch pm-today-trend-injection-switch"><span><b>\u6B63\u6587\u6CE8\u5165</b><small>\u5F00\u542F\u540E\uFF0C\u89D2\u8272\u56DE\u590D\u65F6\u4F1A\u53C2\u8003\u5F53\u524D\u4F1A\u8BDD\u4E2D\u7684\u4ECA\u65E5\u98CE\u5411\u3002</small></span><input name="injectionEnabled" type="checkbox" role="switch" aria-checked="${scope.injection?.enabled === true}"${scope.injection?.enabled ? " checked" : ""}><i aria-hidden="true"></i></label><label class="pm-today-trend-switch pm-today-trend-minimal-ui-switch"><span><b>\u6781\u7B80 UI</b><small>\u5F00\u542F\u540E\uFF0C\u901A\u8FC7\u5173\u7CFB\u56FE\u6807\u5207\u6362\u72B6\u6001\u5E76\u9690\u85CF\u5173\u7CFB\u91CF\u8868\u3002</small></span><input name="minimalUi" type="checkbox" role="switch" aria-checked="${scope.injection?.minimalUi === true}"${scope.injection?.minimalUi ? " checked" : ""}><i aria-hidden="true"></i></label><div class="pm-today-trend-form-actions pm-today-trend-settings-save"><button type="submit">\u4FDD\u5B58\u8BBE\u7F6E</button></div></form><form class="pm-today-trend-editor" data-today-trend-form="batch-settings">${batchSettingsGroup(assistantCount, generationBusy, batchEnabled)}</form><form class="pm-today-trend-editor" data-today-trend-form="retention-settings">${retentionSettingsGroup(scope, retentionRevisions, retentionSaving, generationBusy, retentionDraft)}</form><section class="pm-today-trend-rule"><h3>\u63D0\u793A\u8BCD\u603B\u89C8</h3>${rules}</section></section>`;
+    return `<section class="pm-today-trend-settings">${trendModuleHead({ title: "APP \u603B\u8BBE\u7F6E", menuId: "app-settings", menuOpenId, actions: [{ action: "today-trend-close-settings", icon: BACK_ICON_SVG, label: "\u8FD4\u56DE\u4ECA\u65E5\u98CE\u5411" }] })}${errorHtml}<form class="pm-today-trend-editor" data-today-trend-form="app-settings"><label class="pm-today-trend-field">\u5F53\u524D\u4E16\u754C\u9884\u8BBE<select class="pm-today-trend-input" name="presetId">${options2}</select></label><p class="pm-today-trend-preset-warning">\u5207\u6362\u4E16\u754C\u9884\u8BBE\u4F1A\u91CD\u5EFA\u5F53\u524D\u4F5C\u7528\u57DF\u3002\u5207\u6362\u5B8C\u6210\u540E\u8BF7\u91CD\u65B0\u6253\u5F00\u672C\u9875\uFF0C\u518D\u5355\u72EC\u786E\u8BA4\u5F52\u6863\u4FDD\u7559\u8BBE\u7F6E\u3002</p><div class="pm-today-trend-form-actions pm-today-trend-preset-actions"><button type="button" data-action="today-trend-new-preset">\u65B0\u5EFA</button><button type="button" data-action="today-trend-delete-preset">\u5220\u9664</button><button type="button" data-action="today-trend-reinitialize">\u91CD\u5EFA</button><button type="button" data-action="today-trend-rename-preset">\u91CD\u547D\u540D</button></div><label class="pm-today-trend-field">\u8C03\u7528\u65B9\u5F0F<select class="pm-today-trend-input" name="mode"><option value="manual" ${scope.operation?.mode === "manual" ? "selected" : ""}>\u624B\u52A8</option><option value="auto" ${scope.operation?.mode === "auto" ? "selected" : ""}>\u81EA\u52A8</option></select></label><label class="pm-today-trend-field">\u81EA\u52A8\u8C03\u7528\uFF1A\u6BCF N \u697C\u6267\u884C\u4E00\u6B21<input class="pm-today-trend-input" name="intervalFloors" type="number" min="1" max="1000" required value="${escapeAttr(String(scope.operation?.intervalFloors || 1))}"></label><label class="pm-today-trend-switch pm-today-trend-injection-switch"><span><b>\u6B63\u6587\u6CE8\u5165</b><small>\u5F00\u542F\u540E\uFF0C\u89D2\u8272\u56DE\u590D\u65F6\u4F1A\u53C2\u8003\u5F53\u524D\u4F1A\u8BDD\u4E2D\u7684\u4ECA\u65E5\u98CE\u5411\u3002</small></span><input name="injectionEnabled" type="checkbox" role="switch" aria-checked="${scope.injection?.enabled === true}"${scope.injection?.enabled ? " checked" : ""}><i aria-hidden="true"></i></label><label class="pm-today-trend-switch pm-today-trend-minimal-ui-switch"><span><b>\u6781\u7B80 UI</b><small>\u5F00\u542F\u540E\uFF0C\u901A\u8FC7\u5173\u7CFB\u56FE\u6807\u5207\u6362\u72B6\u6001\u5E76\u9690\u85CF\u5173\u7CFB\u91CF\u8868\u3002</small></span><input name="minimalUi" type="checkbox" role="switch" aria-checked="${scope.injection?.minimalUi === true}"${scope.injection?.minimalUi ? " checked" : ""}><i aria-hidden="true"></i></label><div class="pm-today-trend-form-actions pm-today-trend-settings-save"><button type="submit">\u4FDD\u5B58\u8BBE\u7F6E</button></div></form><form class="pm-today-trend-editor" data-today-trend-form="batch-settings">${batchSettingsGroup(assistantCount, generationBusy, batchDraft)}</form><form class="pm-today-trend-editor" data-today-trend-form="retention-settings">${retentionSettingsGroup(scope, retentionRevisions, retentionSaving, generationBusy, retentionDraft)}</form><section class="pm-today-trend-rule"><h3>\u63D0\u793A\u8BCD\u603B\u89C8</h3>${rules}</section></section>`;
   }
 
   // src/today-trend-world-view.js
@@ -28060,7 +28116,7 @@ ${targetInstruction}`
     generation = {},
     currentFloor,
     assistantCount = 0,
-    batchEnabled = false,
+    batchDraft = {},
     error = null,
     initializing = false,
     initializationDraft,
@@ -28078,6 +28134,7 @@ ${targetInstruction}`
     const syncedFloor = Number.isInteger(scope?.operation?.lastSuccessfulAssistantCount) && scope.operation.lastSuccessfulAssistantCount >= 0 ? scope.operation.lastSuccessfulAssistantCount : 0;
     const taskIsCurrent = generation.task?.storageId === scope?.storageId;
     const targeted = taskIsCurrent && Boolean(generation.task?.target);
+    const batchProgress = taskIsCurrent && !targeted ? generation.task : null;
     const floorStatus = trendFloorStatus({
       currentFloor,
       syncedFloor,
@@ -28085,6 +28142,8 @@ ${targetInstruction}`
       lastError: taskIsCurrent ? generation.lastError : null,
       busy: busy && taskIsCurrent,
       targetFloor: taskIsCurrent && !targeted ? generation.task?.floor : null,
+      batchIndex: batchProgress?.batchIndex,
+      batchCount: batchProgress?.batchCount,
       targeted
     });
     const preset = presets.find((item) => item.id === scope?.presetId) || null;
@@ -28094,7 +28153,7 @@ ${targetInstruction}`
       generationBusy: busy,
       menuOpenId: view.menuOpenId,
       assistantCount,
-      batchEnabled,
+      batchDraft,
       retentionRevisions,
       retentionSaving,
       retentionDraft,
@@ -28110,10 +28169,11 @@ ${targetInstruction}`
   var draftFrom = (data) => ({ presetName: String(data.get("presetName") || ""), worldBookNames: data.getAll("worldBookNames"), includeExistingChat: data.get("includeExistingChat") === "on", userRequirements: String(data.get("userRequirements") || "") });
   function createTodayTrendPhoneController({ state, deps, container }) {
     if (!container?.addEventListener || typeof deps.getStorageId !== "function") throw new TypeError("\u4ECA\u65E5\u98CE\u5411\u624B\u673A\u63A7\u5236\u5668\u4F9D\u8D56\u65E0\u6548");
-    let dispatcher = null, settings = false, batchEnabled = false, initializing = false, initializationOpen = false, reinitializing = false, initializationMode = "reuse", error = null, renderEpoch = 0;
+    let dispatcher = null, settings = false, initializing = false, initializationOpen = false, reinitializing = false, initializationMode = "reuse", error = null, renderEpoch = 0;
     let initAbort = null, lastScope = null, lastPresets = [], lastView = { name: "world", mode: "content" };
     let unsubscribeGeneration = null, destroyed = false, lastTerminalPhase = "", completedReloadEpoch = 0, retentionSaveEpoch = 0;
     let retentionRevisions = null, retentionSaving = false, retentionDraft = null;
+    let batchDraftSaveQueue = Promise.resolve();
     let diagnosticCopyStatus = "", pendingFocusSelector = "";
     let initializationDraft = { includeExistingChat: true };
     const detailById = /* @__PURE__ */ Object.create(null);
@@ -28156,7 +28216,8 @@ ${targetInstruction}`
       const id2 = deps.getStorageId();
       const scope = await uiScope(id2);
       if (destroyed || epoch !== renderEpoch || state.phoneWindow?.querySelector(".pm-today-trend-page") !== container) return false;
-      const activeView = view || dispatcher?.state() || lastView;
+      if (view?.name === "settings") settings = true;
+      const activeView = view || (settings ? lastView : dispatcher?.state() || lastView);
       lastView = settings ? { ...activeView, name: "settings" } : activeView;
       let revisions2 = retentionRevisions;
       if (lastView.name === "settings" && typeof deps.getTodayTrendRetentionSettingsState === "function") {
@@ -28192,7 +28253,7 @@ ${targetInstruction}`
         retentionDraft,
         diagnosticCopyStatus,
         assistantCount: currentAssistantCount,
-        batchEnabled
+        batchDraft: scope?.operation?.batchDraft
       });
       const focusSelector = pendingFocusSelector;
       pendingFocusSelector = "";
@@ -28224,7 +28285,7 @@ ${targetInstruction}`
         retentionSaving,
         retentionDraft,
         diagnosticCopyStatus,
-        batchEnabled
+        batchDraft: lastScope?.operation?.batchDraft
       });
       restoreFocus(pendingFocusSelector, renderEpoch);
       pendingFocusSelector = "";
@@ -28326,12 +28387,32 @@ ${targetInstruction}`
       if (!scope || typeof deps.saveTodayTrendSettings !== "function") throw new Error("\u4ECA\u65E5\u98CE\u5411\u8BBE\u7F6E\u4FDD\u5B58\u80FD\u529B\u4E0D\u53EF\u7528");
       return deps.saveTodayTrendSettings({ presetId: scope.presetId, operation: { ...scope.operation, enabled }, injection: scope.injection });
     };
+    const saveBatchDraft = async (draft) => {
+      const save = async () => {
+        const current = await store(), scope = current?.scopes?.[deps.getStorageId()];
+        if (!scope || typeof deps.saveTodayTrendSettings !== "function") throw new Error("\u4ECA\u65E5\u98CE\u5411\u8BBE\u7F6E\u4FDD\u5B58\u80FD\u529B\u4E0D\u53EF\u7528");
+        const batchDraft = { ...scope.operation?.batchDraft, ...draft };
+        if (Number.isSafeInteger(batchDraft.recentAssistantCount) && Number.isSafeInteger(batchDraft.mergeAssistantCount) && batchDraft.mergeAssistantCount > batchDraft.recentAssistantCount) {
+          throw new Error("\u6BCF\u6279\u5408\u5E76\u5C42\u6570\u4E0D\u80FD\u8D85\u8FC7\u6700\u8FD1\u5904\u7406\u5C42\u6570");
+        }
+        const committed = await deps.saveTodayTrendSettings({
+          presetId: scope.presetId,
+          operation: { ...scope.operation, batchDraft },
+          injection: scope.injection
+        });
+        if (committed) await rerender();
+        return committed;
+      };
+      const pending = batchDraftSaveQueue.then(save, save);
+      batchDraftSaveQueue = pending.catch(() => {
+      });
+      return pending;
+    };
     const click = (event) => {
       const button = event.target.closest?.("button[data-action]");
       if (!button || !container.contains(button) || button.disabled) return;
       if (button.dataset.action === "today-trend-toggle-batch") {
-        batchEnabled = !batchEnabled;
-        return rerender();
+        return saveBatchDraft({ enabled: !lastScope?.operation?.batchDraft?.enabled }).catch(report);
       }
       if (button.dataset.action === "today-trend-batch-generate") {
         const form = button.closest('form[data-today-trend-form="batch-settings"]');
@@ -28346,7 +28427,7 @@ ${targetInstruction}`
         if (!Number.isSafeInteger(currentCount) || currentCount < 1) return;
         if (!Number.isSafeInteger(recentAssistantCount) || recentAssistantCount < 1 || recentAssistantCount > currentCount) return;
         if (!Number.isSafeInteger(mergeAssistantCount) || mergeAssistantCount < 1 || mergeAssistantCount > recentAssistantCount) return;
-        return generate(null, null, { batchEnabled: true, recentAssistantCount, mergeAssistantCount });
+        return saveBatchDraft({ enabled: true, recentAssistantCount, mergeAssistantCount }).then(() => generate(null, null, { batchEnabled: true, recentAssistantCount, mergeAssistantCount })).catch(report);
       }
       if (button.dataset.action === "today-trend-open-settings") {
         settings = true;
@@ -28515,10 +28596,12 @@ ${targetInstruction}`
       }
     };
     const change = (event) => {
-      const input = event.target.closest?.('input[name="batchEnabled"]');
+      const input = event.target.closest?.('input[name="batchEnabled"], input[name="recentAssistantCount"], input[name="mergeAssistantCount"]');
       if (!input || !container.contains(input) || input.disabled) return;
-      batchEnabled = input.checked === true;
-      rerender();
+      if (input.name === "batchEnabled") return saveBatchDraft({ enabled: input.checked === true }).catch(report);
+      const value = Number(input.value);
+      if (!Number.isSafeInteger(value) || value < 1) return;
+      return saveBatchDraft({ [input.name]: value }).catch(report);
     };
     container.addEventListener("click", click, true);
     container.addEventListener("change", change);

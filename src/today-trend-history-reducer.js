@@ -21,6 +21,11 @@ const validDate = value => typeof value === 'string' && datePattern.test(value)
     && Number.isFinite(new Date(`${value}T12:00:00Z`).getTime())
     && new Date(`${value}T12:00:00Z`).toISOString().slice(0, 10) === value;
 const projectionText = stage => ['day-summary', 'period-summary', 'span-stage'].includes(stage.kind) ? stage.summary : stage.text;
+const resolveLatestStage = event => event.stages.reduce((selected, stage) => !selected
+    || stage.sourceStageEnd > selected.sourceStageEnd
+    || (stage.sourceStageEnd === selected.sourceStageEnd && stage.sourceStageStart > selected.sourceStageStart)
+    || (stage.sourceStageEnd === selected.sourceStageEnd && stage.sourceStageStart === selected.sourceStageStart && stage.id > selected.id)
+    ? stage : selected, null);
 const DETAIL_CAPACITY = 80;
 const canonical = value => {
     if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
@@ -416,7 +421,7 @@ export function applyTodayTrendHistoryProducer(payloadValue, producerValue, {
         appendStageProjections(event, item.stages, trustedStoryDate, Number.isSafeInteger(assistantCount) ? assistantCount : null);
         if (!event.stages.length) fail('TT_HISTORY_SCHEMA_INVALID', 'history producer 不得产生空 event 历史');
         planPeriodCompaction(event, payload, item.periodSummaries, assistantCount);
-        event.latestStage = projectionText(event.stages.at(-1));
+        event.latestStage = projectionText(resolveLatestStage(event));
         event.capacityCompatibilityPending = event.stages.length === 40;
     }
     for (const event of payload.dynamics.active) {

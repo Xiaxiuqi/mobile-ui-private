@@ -9,10 +9,11 @@ const draftFrom = data => ({ presetName: String(data.get('presetName') || ''), w
 
 export function createTodayTrendPhoneController({ state, deps, container }) {
     if (!container?.addEventListener || typeof deps.getStorageId !== 'function') throw new TypeError('今日风向手机控制器依赖无效');
-    let dispatcher = null, settings = false, batchEnabled = false, initializing = false, initializationOpen = false, reinitializing = false, initializationMode = 'reuse', error = null, renderEpoch = 0;
+    let dispatcher = null, settings = false, initializing = false, initializationOpen = false, reinitializing = false, initializationMode = 'reuse', error = null, renderEpoch = 0;
     let initAbort = null, lastScope = null, lastPresets = [], lastView = { name: 'world', mode: 'content' };
     let unsubscribeGeneration = null, destroyed = false, lastTerminalPhase = '', completedReloadEpoch = 0, retentionSaveEpoch = 0;
     let retentionRevisions = null, retentionSaving = false, retentionDraft = null;
+    let batchDraftSaveQueue = Promise.resolve();
     let diagnosticCopyStatus = '', pendingFocusSelector = '';
     let initializationDraft = { includeExistingChat: true };
     const detailById = Object.create(null);
@@ -60,7 +61,8 @@ export function createTodayTrendPhoneController({ state, deps, container }) {
         const id = deps.getStorageId();
         const scope = await uiScope(id);
         if (destroyed || epoch !== renderEpoch || state.phoneWindow?.querySelector('.pm-today-trend-page') !== container) return false;
-        const activeView = view || dispatcher?.state() || lastView;
+        if (view?.name === 'settings') settings = true;
+        const activeView = view || (settings ? lastView : dispatcher?.state() || lastView);
         lastView = settings ? { ...activeView, name: 'settings' } : activeView;
         let revisions = retentionRevisions;
         if (lastView.name === 'settings' && typeof deps.getTodayTrendRetentionSettingsState === 'function') {
@@ -77,7 +79,7 @@ export function createTodayTrendPhoneController({ state, deps, container }) {
         container.innerHTML = renderTodayTrendApp({ scope, presets: Object.values(current?.presets || {}), worldBooks: worldBooks(),
             view: lastView,
             generation: deps.getTodayTrendGenerationState?.() || {}, currentFloor, error, initializing, initializationDraft, initializationOpen, reinitializing, initializationMode,
-            detailById, loadingDetailIds, retentionRevisions, retentionSaving, retentionDraft, diagnosticCopyStatus, assistantCount: currentAssistantCount, batchEnabled });
+            detailById, loadingDetailIds, retentionRevisions, retentionSaving, retentionDraft, diagnosticCopyStatus, assistantCount: currentAssistantCount, batchDraft: scope?.operation?.batchDraft });
         const focusSelector = pendingFocusSelector;
         pendingFocusSelector = '';
         restoreFocus(focusSelector, epoch);
@@ -93,7 +95,7 @@ export function createTodayTrendPhoneController({ state, deps, container }) {
             : code === 'TT_SETTINGS_REVISION_CONFLICT' ? '.pm-today-trend-error' : '';
         container.innerHTML = renderTodayTrendApp({ scope: lastScope, presets: lastPresets, worldBooks: worldBooks(), view: lastView,
             currentFloor: deps.getTodayTrendCurrentFloor?.(), assistantCount: assistantCount(), error, initializing: false, initializationDraft, initializationOpen, reinitializing, initializationMode,
-            detailById, loadingDetailIds, retentionRevisions, retentionSaving, retentionDraft, diagnosticCopyStatus, batchEnabled });
+            detailById, loadingDetailIds, retentionRevisions, retentionSaving, retentionDraft, diagnosticCopyStatus, batchDraft: lastScope?.operation?.batchDraft });
         restoreFocus(pendingFocusSelector, renderEpoch);
         pendingFocusSelector = '';
     };
@@ -173,12 +175,29 @@ export function createTodayTrendPhoneController({ state, deps, container }) {
         if (!scope || typeof deps.saveTodayTrendSettings !== 'function') throw new Error('今日风向设置保存能力不可用');
         return deps.saveTodayTrendSettings({ presetId: scope.presetId, operation: { ...scope.operation, enabled }, injection: scope.injection });
     };
+    const saveBatchDraft = async draft => {
+        const save = async () => {
+            const current = await store(), scope = current?.scopes?.[deps.getStorageId()];
+            if (!scope || typeof deps.saveTodayTrendSettings !== 'function') throw new Error('今日风向设置保存能力不可用');
+            const batchDraft = { ...scope.operation?.batchDraft, ...draft };
+            if (Number.isSafeInteger(batchDraft.recentAssistantCount) && Number.isSafeInteger(batchDraft.mergeAssistantCount)
+                && batchDraft.mergeAssistantCount > batchDraft.recentAssistantCount) {
+                throw new Error('每批合并层数不能超过最近处理层数');
+            }
+            const committed = await deps.saveTodayTrendSettings({ presetId: scope.presetId,
+                operation: { ...scope.operation, batchDraft }, injection: scope.injection });
+            if (committed) await rerender();
+            return committed;
+        };
+        const pending = batchDraftSaveQueue.then(save, save);
+        batchDraftSaveQueue = pending.catch(() => {});
+        return pending;
+    };
     const click = event => {
         const button = event.target.closest?.('button[data-action]');
         if (!button || !container.contains(button) || button.disabled) return;
         if (button.dataset.action === 'today-trend-toggle-batch') {
-            batchEnabled = !batchEnabled;
-            return rerender();
+            return saveBatchDraft({ enabled: !lastScope?.operation?.batchDraft?.enabled }).catch(report);
         }
         if (button.dataset.action === 'today-trend-batch-generate') {
             const form = button.closest('form[data-today-trend-form="batch-settings"]');
@@ -190,7 +209,8 @@ export function createTodayTrendPhoneController({ state, deps, container }) {
             if (!Number.isSafeInteger(currentCount) || currentCount < 1) return;
             if (!Number.isSafeInteger(recentAssistantCount) || recentAssistantCount < 1 || recentAssistantCount > currentCount) return;
             if (!Number.isSafeInteger(mergeAssistantCount) || mergeAssistantCount < 1 || mergeAssistantCount > recentAssistantCount) return;
-            return generate(null, null, { batchEnabled: true, recentAssistantCount, mergeAssistantCount });
+            return saveBatchDraft({ enabled: true, recentAssistantCount, mergeAssistantCount })
+                .then(() => generate(null, null, { batchEnabled: true, recentAssistantCount, mergeAssistantCount })).catch(report);
         }
         if (button.dataset.action === 'today-trend-open-settings') { settings = true; rerender(); }
         if (button.dataset.action === 'today-trend-close-settings') { settings = false; retentionDraft = null; rerender(); }
@@ -318,10 +338,12 @@ export function createTodayTrendPhoneController({ state, deps, container }) {
         }
     };
     const change = event => {
-        const input = event.target.closest?.('input[name="batchEnabled"]');
+        const input = event.target.closest?.('input[name="batchEnabled"], input[name="recentAssistantCount"], input[name="mergeAssistantCount"]');
         if (!input || !container.contains(input) || input.disabled) return;
-        batchEnabled = input.checked === true;
-        rerender();
+        if (input.name === 'batchEnabled') return saveBatchDraft({ enabled: input.checked === true }).catch(report);
+        const value = Number(input.value);
+        if (!Number.isSafeInteger(value) || value < 1) return;
+        return saveBatchDraft({ [input.name]: value }).catch(report);
     };
     container.addEventListener('click', click, true); container.addEventListener('change', change);
     container.addEventListener('submit', submit);
