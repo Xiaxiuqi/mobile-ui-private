@@ -11839,6 +11839,10 @@ ${entry2.content}` : entry2.content;
     const facade = buildReadOnlyShadow(current);
     facade.scopes[storageId] = clone5(generatedScope);
     const merged = mergeTodayTrendV1StoreIntoV2(current, facade, { assistantCount });
+    merged.globalEnvelope.payload.presets = clone5(current.globalEnvelope.payload.presets);
+    for (const [id2, envelope2] of Object.entries(current.globalEnvelope.payload.scopes)) {
+      if (id2 !== storageId) merged.globalEnvelope.payload.scopes[id2] = clone5(envelope2);
+    }
     const envelope = merged.globalEnvelope.payload.scopes[storageId];
     let payload = applyTodayTrendHistoryProducer(envelope.payload, history, {
       trustedStoryDate,

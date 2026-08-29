@@ -1387,6 +1387,14 @@ export function applyTodayTrendGenerationToV2(currentValue, storageId, generated
     const facade = buildReadOnlyShadow(current);
     facade.scopes[storageId] = clone(generatedScope);
     const merged = mergeTodayTrendV1StoreIntoV2(current, facade, { assistantCount });
+    // Generation is a single-scope mutation.  The v1 facade round-trip is only
+    // needed to adapt the generated scope; letting it re-materialize every
+    // other canonical scope can change hidden history/checkpoint state and
+    // makes the authority correctly reject the falsely declared scope range.
+    merged.globalEnvelope.payload.presets = clone(current.globalEnvelope.payload.presets);
+    for (const [id, envelope] of Object.entries(current.globalEnvelope.payload.scopes)) {
+        if (id !== storageId) merged.globalEnvelope.payload.scopes[id] = clone(envelope);
+    }
     const envelope = merged.globalEnvelope.payload.scopes[storageId];
     let payload = applyTodayTrendHistoryProducer(envelope.payload, history, {
         trustedStoryDate, assistantCount, previousPayload: previousEnvelope.payload,

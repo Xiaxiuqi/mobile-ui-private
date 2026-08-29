@@ -4425,13 +4425,18 @@ assert.equal([...phase5ChainHarness.records.keys()].some(key => key.startsWith(T
     '真实生产链 accepted 后不得残留开放 journal');
 assert.equal(await phase5ChainAuthority.release({ readV2: true, serveV2: false }), true, '阶段 5 生产链 harness 必须释放 authority owner');
 
+const batchReadyWithSiblingV2 = structuredClone(batchReadyValidV2);
+batchReadyWithSiblingV2.globalEnvelope.payload.scopes.sibling = copyTodayTrendV2ScopeForBranch(
+    batchReadyValidV2.globalEnvelope.payload.scopes.chat, 'sibling', 0,
+    batchReadyValidV2.globalEnvelope.payload.presets,
+);
 const phase5MultiHarness = createAuthorityHarness();
 const phase5MultiAuthority = createTodayTrendV2Authority({
     readEntry: phase5MultiHarness.readEntry,
     compareAndSwap: phase5MultiHarness.compareAndSwap,
     tabId: 'phase-5-multi-owner', BroadcastChannelImpl: undefined,
 });
-await phase5MultiAuthority.acquire({ readV2: true, writeV2: true, initialStore: batchReadyValidV2 });
+await phase5MultiAuthority.acquire({ readV2: true, writeV2: true, initialStore: batchReadyWithSiblingV2 });
 let phase5MultiNow = 12000;
 const phase5MultiPhases = [];
 const phase5MultiJournal = createTodayTrendJournal({
@@ -4456,7 +4461,7 @@ const phase5MultiAuthorityWithTrace = createTodayTrendV2Authority({
     },
     tabId: 'phase-5-multi-owner', BroadcastChannelImpl: undefined,
 });
-await phase5MultiAuthorityWithTrace.acquire({ readV2: true, writeV2: true, initialStore: batchReadyValidV2 });
+await phase5MultiAuthorityWithTrace.acquire({ readV2: true, writeV2: true, initialStore: batchReadyWithSiblingV2 });
 const phase5MultiStorage = createTodayTrendStorage({
     v2Authority: phase5MultiAuthorityWithTrace, journal: phase5MultiJournal, storage: memoryStorage(),
 });
@@ -4501,6 +4506,9 @@ assert.ok(phase5MultiPhases.filter(phase => phase === 'accepted').length >= 2,
     '真实多批必须完成每批 journal accepted 终态');
 assert.equal([...phase5MultiHarness.records.keys()].some(key => key.startsWith(TODAY_TREND_V2_JOURNAL_PREFIX)), false,
     '真实多批 accepted 后不得残留开放 journal');
+assert.deepEqual((await phase5MultiAuthorityWithTrace.load()).v2Store.globalEnvelope.payload.scopes.sibling,
+    batchReadyWithSiblingV2.globalEnvelope.payload.scopes.sibling,
+    '批量生成只能提交当前 scope，不得因 v1 facade 合并改写 sibling canonical scope');
 
 let phase5MultiDrifted = false;
 const phase5CanonicalDriftCommitter = createTodayTrendCommitter({
