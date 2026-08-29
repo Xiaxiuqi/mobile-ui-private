@@ -4,8 +4,9 @@ import { createTodayTrendScheduler } from './today-trend-scheduler.js';
 import { loadTodayTrendStore, saveTodayTrendStore } from './today-trend-storage.js';
 import { createEmptyTodayTrendScope } from './today-trend-model.js';
 import {
-    resolveTodayTrendV2DetailForTarget, resolveTodayTrendV2RetentionSettingsState, resolveTodayTrendV2UiScope,
-    saveTodayTrendRetentionSettingsToV2, serializeTodayTrendV2ScopeForGeneration,
+    buildReadOnlyShadow, normalizeTodayTrendV2Candidate, resolveTodayTrendV2DetailForTarget,
+    resolveTodayTrendV2RetentionSettingsState, resolveTodayTrendV2UiScope, saveTodayTrendRetentionSettingsToV2,
+    serializeTodayTrendV2ScopeForGeneration,
 } from './today-trend-v2-model.js';
 
 export function installTodayTrend(_state, deps = {}) {
@@ -199,18 +200,38 @@ export function installTodayTrend(_state, deps = {}) {
     const saveSettings = async ({ presetId, operation, injection } = {}) => {
         const identity = currentIdentity(getStorageId());
         const selected = String(presetId || '').trim();
+        if (typeof committer.loadCanonical !== 'function') throw Object.assign(new Error('今日风向设置需要 canonical 存储能力'), { code: 'TT_V2_CANONICAL_REQUIRED' });
+        const canonical = await committer.loadCanonical();
+        const currentEnvelope = canonical?.globalEnvelope?.payload?.scopes?.[identity.storageId];
+        if (!currentEnvelope?.payload) throw Object.assign(new Error('当前聊天尚未初始化今日风向'), { code: 'TT_V2_SCHEMA_INVALID' });
+        if (selected && selected !== currentEnvelope.payload.presetId) {
+            const committed = await committer.commitStore(store => {
+                const facade = buildReadOnlyShadow(store);
+                const current = facade.scopes[identity.storageId];
+                if (!current) throw new Error('当前聊天尚未初始化今日风向');
+                if (!facade.presets[selected]) throw new Error('选择的世界预设不存在');
+                const next = Object.assign(createEmptyTodayTrendScope(), identity, { presetId: selected });
+                next.operation = { ...next.operation, ...operation };
+                next.injection = { ...next.injection, ...injection };
+                facade.scopes[identity.storageId] = next;
+                return normalizeTodayTrendV2Candidate(facade, store);
+            }, null, { canonical: true, scopeId: identity.storageId, expectedScopeRevision: currentEnvelope.revision });
+            if (!committed) throw new Error('今日风向设置保存已取消');
+            if (operation?.enabled) scheduler.arm(identity.storageId); else scheduler.cancel('today-trend-stopped');
+            return committed;
+        }
         const committed = await committer.commitStore(store => {
-            const current = store.scopes[identity.storageId];
-            if (!current) throw new Error('当前聊天尚未初始化今日风向');
-            const next = selected && selected !== current.presetId ? (() => {
-                if (!store.presets[selected]) throw new Error('选择的世界预设不存在');
-                return Object.assign(createEmptyTodayTrendScope(), identity, { presetId: selected });
-            })() : current;
-            next.operation = { ...next.operation, ...operation };
-            next.injection = { ...next.injection, ...injection };
-            store.scopes[identity.storageId] = next;
+            const scopes = store.globalEnvelope.payload.scopes;
+            const envelope = scopes[identity.storageId];
+            if (!envelope?.payload) throw Object.assign(new Error('当前聊天尚未初始化今日风向'), { code: 'TT_V2_SCHEMA_INVALID' });
+            const current = envelope.payload;
+            scopes[identity.storageId] = { ...envelope, payload: {
+                ...current,
+                operation: { ...current.operation, ...operation },
+                injection: { ...current.injection, ...injection },
+            } };
             return store;
-        });
+        }, null, { canonical: true, scopeId: identity.storageId, expectedScopeRevision: currentEnvelope.revision });
         if (!committed) throw new Error('今日风向设置保存已取消');
         if (operation?.enabled) scheduler.arm(identity.storageId); else scheduler.cancel('today-trend-stopped');
         return committed;

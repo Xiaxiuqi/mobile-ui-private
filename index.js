@@ -25286,12 +25286,25 @@ ${error.message}`);
 
   // src/today-trend-commit.js
   var clone15 = (value) => structuredClone(value);
+  var structurallyEqual5 = (left, right) => {
+    if (Object.is(left, right)) return true;
+    if (Array.isArray(left) || Array.isArray(right)) {
+      return Array.isArray(left) && Array.isArray(right) && left.length === right.length && left.every((value, index) => structurallyEqual5(value, right[index]));
+    }
+    if (!left || !right || typeof left !== "object" || typeof right !== "object") return false;
+    const leftKeys = Object.keys(left).sort();
+    const rightKeys = Object.keys(right).sort();
+    return leftKeys.length === rightKeys.length && leftKeys.every((key, index) => key === rightKeys[index] && structurallyEqual5(left[key], right[key]));
+  };
   var scopeEntries = (value) => value?.version === 2 ? value.globalEnvelope?.payload?.scopes || {} : value?.scopes || {};
   var scopeValue = (entry2) => entry2?.payload ?? entry2;
   var changedScopeIds = (previous, candidate) => [.../* @__PURE__ */ new Set([
     ...Object.keys(scopeEntries(previous)),
     ...Object.keys(scopeEntries(candidate))
-  ])].filter((id2) => JSON.stringify(scopeValue(scopeEntries(previous)[id2])) !== JSON.stringify(scopeValue(scopeEntries(candidate)[id2]))).sort();
+  ])].filter((id2) => !structurallyEqual5(
+    scopeValue(scopeEntries(previous)[id2]),
+    scopeValue(scopeEntries(candidate)[id2])
+  )).sort();
   var isV2Store = (value) => value?.version === 2 && Object.hasOwn(value, "globalEnvelope");
   var facadeStore = (value) => isV2Store(value) ? buildReadOnlyShadow(value) : normalizeTodayTrendStore(value);
   var canonicalStore = (value, current = null) => normalizeTodayTrendV2Candidate(value, current);
@@ -26230,6 +26243,16 @@ ${targetInstruction}`
     }
     return `fnv1a32:${(hash >>> 0).toString(16).padStart(8, "0")}`;
   };
+  var structurallyEqual6 = (left, right) => {
+    if (Object.is(left, right)) return true;
+    if (Array.isArray(left) || Array.isArray(right)) {
+      return Array.isArray(left) && Array.isArray(right) && left.length === right.length && left.every((value, index) => structurallyEqual6(value, right[index]));
+    }
+    if (!left || !right || typeof left !== "object" || typeof right !== "object") return false;
+    const leftKeys = Object.keys(left).sort();
+    const rightKeys = Object.keys(right).sort();
+    return leftKeys.length === rightKeys.length && leftKeys.every((key, index) => key === rightKeys[index] && structurallyEqual6(left[key], right[key]));
+  };
   var validateHistoryPlan = (plan, messages) => {
     if (!plan || typeof plan !== "object" || Array.isArray(plan) || !Array.isArray(plan.batches) || !Number.isSafeInteger(plan.assistantCount) || plan.assistantCount < 1 || !Number.isSafeInteger(plan.recentAssistantCount) || plan.recentAssistantCount < 1 || !Number.isSafeInteger(plan.mergeAssistantCount) || plan.mergeAssistantCount < 1 || !Number.isSafeInteger(plan.windowStart) || !Number.isSafeInteger(plan.windowEnd) || !Number.isSafeInteger(plan.batchCount) || plan.batchCount < 1 || plan.batches.length !== plan.batchCount || typeof plan.sourceDigest !== "string") {
       throw invalidHistoryInput("\u5386\u53F2\u6B63\u6587\u7A97\u53E3\u89C4\u5212\u7ED3\u6784\u65E0\u6548");
@@ -26558,7 +26581,10 @@ ${targetInstruction}`
             throw Object.assign(new Error("\u4ECA\u65E5\u98CE\u5411\u6279\u5904\u7406\u9700\u8981 canonical \u63D0\u4EA4\u5668"), { code: "TT_V2_REQUIRED" });
           }
           let batchScope = null;
+          let expectedBatchScope = null;
           let batchPreset = null;
+          let expectedStoreRevision = null;
+          let expectedScopeRevision = null;
           for (let batchIndex = 0; batchIndex < historyPlan.batchCount; batchIndex += 1) {
             if (!isActive(task)) throw cancelled();
             task.batchIndex = batchIndex;
@@ -26569,10 +26595,29 @@ ${targetInstruction}`
             const canonical3 = await committer.loadCanonical();
             if (!isActive(task)) throw cancelled();
             const facade = buildReadOnlyShadow(canonical3);
-            batchScope = facade.scopes[id2];
+            expectedBatchScope = facade.scopes[id2];
+            expectedStoreRevision = canonical3.globalEnvelope.revision;
+            expectedScopeRevision = canonical3.globalEnvelope.payload.scopes[id2]?.revision;
+            batchScope = expectedBatchScope;
             batchPreset = facade.presets?.[batchScope?.presetId];
             if (!batchScope || !batchPreset) throw new Error("\u5F53\u524D\u804A\u5929\u5C1A\u672A\u4ECA\u65E5\u98CE\u5411");
-            const batchPromptScope = getPromptScope ? await getPromptScope(id2, canonical3) : null;
+            let batchResetFloor = null;
+            let generationCanonical = canonical3;
+            if (batchIndex === 0) {
+              const snapshots = canonical3.globalEnvelope.payload.scopes[id2]?.payload?.generationSnapshots || [];
+              const resetSnapshot = snapshots.reduce((latest, item) => item.restoreCapability === "full" && item.assistantCount < historyPlan.windowStart && (!latest || item.assistantCount > latest.assistantCount) ? item : latest, null);
+              if (!resetSnapshot) {
+                throw Object.assign(new Error(`\u6279\u91CF\u66F4\u65B0\u7F3A\u5C11\u65E9\u4E8E\u697C\u5C42 ${historyPlan.windowStart} \u7684\u5B8C\u6574\u56DE\u9000 checkpoint`), {
+                  code: "TT_BATCH_RESET_CHECKPOINT_MISSING"
+                });
+              }
+              batchResetFloor = resetSnapshot.assistantCount;
+              generationCanonical = rollbackTodayTrendV2Scope(canonical3, id2, batchResetFloor);
+              batchScope = buildReadOnlyShadow(generationCanonical).scopes[id2];
+              batchPreset = buildReadOnlyShadow(generationCanonical).presets?.[batchScope?.presetId];
+              if (!batchScope || !batchPreset) throw new Error("\u6279\u91CF\u66F4\u65B0\u56DE\u9000\u57FA\u7EBF\u4E0D\u53EF\u7528");
+            }
+            const batchPromptScope = getPromptScope ? await getPromptScope(id2, generationCanonical) : null;
             if (getPromptScope && typeof batchPromptScope !== "string") throw new Error("\u4ECA\u65E5\u98CE\u5411 canonical prompt scope \u4E0D\u53EF\u7528");
             const generated2 = await controller.generate({
               signal: task.abortController.signal,
@@ -26602,7 +26647,7 @@ ${targetInstruction}`
               const current = buildReadOnlyShadow(store).scopes[id2];
               const currentPreset = buildReadOnlyShadow(store).presets?.[current?.presetId];
               if (!isActive(task)) return store;
-              if (!current || current.presetId !== batchPreset.id || currentPreset?.revision !== batchPreset.revision || JSON.stringify(current) !== JSON.stringify(batchScope)) {
+              if (!current || current.presetId !== batchPreset.id || currentPreset?.revision !== batchPreset.revision || !structurallyEqual6(current, expectedBatchScope)) {
                 throw new Error("\u4ECA\u65E5\u98CE\u5411\u8D44\u6599\u5728\u6279\u6B21\u751F\u6210\u671F\u95F4\u5DF2\u4FEE\u6539\uFF0C\u8FDF\u5230\u7ED3\u679C\u5DF2\u4E22\u5F03");
               }
               const trustedStoryDate2 = trustedStoryDateFor(id2);
@@ -26611,15 +26656,34 @@ ${targetInstruction}`
                 ...generated2.scope,
                 operation: { ...current.operation, lastSuccessfulAssistantCount: batchAssistantCount, lastSuccessfulRunAt: generatedAt },
                 injection: current.injection,
-                generationSnapshots: current.generationSnapshots
+                generationSnapshots: batchScope.generationSnapshots
               };
+              if (batchResetFloor !== null) {
+                return applyTodayTrendRerollToV2(
+                  store,
+                  id2,
+                  batchResetFloor,
+                  nextScope,
+                  generated2.history ?? { events: [] },
+                  {
+                    trustedStoryDate: trustedStoryDate2,
+                    assistantCount: batchAssistantCount,
+                    generatedAt
+                  }
+                );
+              }
               return applyTodayTrendGenerationToV2(store, id2, nextScope, generated2.history ?? { events: [] }, {
                 trustedStoryDate: trustedStoryDate2,
                 assistantCount: batchAssistantCount,
                 generatedAt,
                 snapshot: true
               });
-            }, { active: () => isActive(task) }, { canonical: true, scopeId: id2 });
+            }, { active: () => isActive(task) }, {
+              canonical: true,
+              scopeId: id2,
+              expectedStoreRevision,
+              expectedScopeRevision
+            });
             if (!committed2 || !isActive(task)) throw cancelled();
             const remainingFeedback2 = Math.max(0, commitFeedbackMs - Math.max(0, now2() - commitStartedAt2));
             if (remainingFeedback2 > 0) await wait(remainingFeedback2);

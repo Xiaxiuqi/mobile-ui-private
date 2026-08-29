@@ -59,7 +59,7 @@ function renderRuleEditorPage(preset, rule, draft) {
     return `<main class="pm-today-trend-content pm-today-trend-rule-page"><section class="pm-today-trend-view">${trendRuleEditor({ rule, value })}</section></main>`;
 }
 
-export function renderTodayTrendApp({ scope = null, presets = [], worldBooks = [], view = { name: 'world', mode: 'content' }, generation = {}, currentFloor, assistantCount = 0, batchEnabled = false,
+export function renderTodayTrendApp({ scope = null, presets = [], worldBooks = [], view = { name: 'world', mode: 'content' }, generation = {}, currentFloor, assistantCount = 0, batchDraft = {},
     error = null, initializing = false, initializationDraft, initializationOpen = false, reinitializing = false, initializationMode = 'reuse',
     detailById = {}, loadingDetailIds = new Set(), retentionRevisions = null, retentionSaving = false, retentionDraft = null,
     diagnosticCopyStatus = '' } = {}) {
@@ -68,6 +68,7 @@ export function renderTodayTrendApp({ scope = null, presets = [], worldBooks = [
         ? scope.operation.lastSuccessfulAssistantCount : 0;
     const taskIsCurrent = generation.task?.storageId === scope?.storageId;
     const targeted = taskIsCurrent && Boolean(generation.task?.target);
+    const batchProgress = taskIsCurrent && !targeted ? generation.task : null;
     const floorStatus = trendFloorStatus({
         currentFloor,
         syncedFloor,
@@ -75,10 +76,12 @@ export function renderTodayTrendApp({ scope = null, presets = [], worldBooks = [
         lastError: taskIsCurrent ? generation.lastError : null,
         busy: busy && taskIsCurrent,
         targetFloor: taskIsCurrent && !targeted ? generation.task?.floor : null,
+        batchIndex: batchProgress?.batchIndex,
+        batchCount: batchProgress?.batchCount,
         targeted,
     });
     const preset = presets.find(item => item.id === scope?.presetId) || null;
-    const content = view.name === 'settings' ? `<main class="pm-today-trend-content">${renderTodayTrendSettingsView({ scope, presets, generationBusy: busy, menuOpenId: view.menuOpenId, assistantCount, batchEnabled,
+    const content = view.name === 'settings' ? `<main class="pm-today-trend-content">${renderTodayTrendSettingsView({ scope, presets, generationBusy: busy, menuOpenId: view.menuOpenId, assistantCount, batchDraft,
         retentionRevisions, retentionSaving, retentionDraft, errorHtml: errorFeedback(error, diagnosticCopyStatus) })}</main>` : !scope || initializationOpen ? renderFirstUse({ presets, worldBooks, error, initializing, draft: initializationDraft, reinitializing, initializationMode }) : view.editingRule
         ? renderRuleEditorPage(preset, view.editingRule, view.ruleDraft)
         : `<main class="pm-today-trend-content${view.mode === 'content' ? ` is-${view.name}${scope.injection?.minimalUi ? ' is-minimal-ui' : ''}` : ''}">${moduleView(view, { scope, preset, mode: view.mode, dynamicsTab: view.dynamicsTab, editingWorldItemId: view.editingWorldItemId, editingCircleId: view.editingCircleId, editingFactionId: view.editingFactionId, editingEventId: view.editingEventId, editingRule: view.editingRule, ruleDraft: view.ruleDraft, menuOpenId: view.menuOpenId, generationAvailable: !busy, generationBusy: busy, floorStatus, detailById, loadingDetailIds })}</main>`;

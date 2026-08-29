@@ -10,14 +10,28 @@ import {
 
 const clone = value => structuredClone(value);
 
+const structurallyEqual = (left, right) => {
+    if (Object.is(left, right)) return true;
+    if (Array.isArray(left) || Array.isArray(right)) {
+        return Array.isArray(left) && Array.isArray(right) && left.length === right.length
+            && left.every((value, index) => structurallyEqual(value, right[index]));
+    }
+    if (!left || !right || typeof left !== 'object' || typeof right !== 'object') return false;
+    const leftKeys = Object.keys(left).sort();
+    const rightKeys = Object.keys(right).sort();
+    return leftKeys.length === rightKeys.length && leftKeys.every((key, index) => key === rightKeys[index]
+        && structurallyEqual(left[key], right[key]));
+};
+
 const scopeEntries = value => value?.version === 2
     ? value.globalEnvelope?.payload?.scopes || {}
     : value?.scopes || {};
 const scopeValue = entry => entry?.payload ?? entry;
 const changedScopeIds = (previous, candidate) => [...new Set([
     ...Object.keys(scopeEntries(previous)), ...Object.keys(scopeEntries(candidate)),
-])].filter(id => JSON.stringify(scopeValue(scopeEntries(previous)[id]))
-    !== JSON.stringify(scopeValue(scopeEntries(candidate)[id]))).sort();
+])].filter(id => !structurallyEqual(
+    scopeValue(scopeEntries(previous)[id]), scopeValue(scopeEntries(candidate)[id]),
+)).sort();
 
 const isV2Store = value => value?.version === 2 && Object.hasOwn(value, 'globalEnvelope');
 const facadeStore = value => isV2Store(value) ? buildReadOnlyShadow(value) : normalizeTodayTrendStore(value);

@@ -75,6 +75,18 @@ const historyMessageDigest = messages => {
     }
     return `fnv1a32:${(hash >>> 0).toString(16).padStart(8, '0')}`;
 };
+const structurallyEqual = (left, right) => {
+    if (Object.is(left, right)) return true;
+    if (Array.isArray(left) || Array.isArray(right)) {
+        return Array.isArray(left) && Array.isArray(right) && left.length === right.length
+            && left.every((value, index) => structurallyEqual(value, right[index]));
+    }
+    if (!left || !right || typeof left !== 'object' || typeof right !== 'object') return false;
+    const leftKeys = Object.keys(left).sort();
+    const rightKeys = Object.keys(right).sort();
+    return leftKeys.length === rightKeys.length && leftKeys.every((key, index) => key === rightKeys[index]
+        && structurallyEqual(left[key], right[key]));
+};
 
 const validateHistoryPlan = (plan, messages) => {
     if (!plan || typeof plan !== 'object' || Array.isArray(plan) || !Array.isArray(plan.batches)
@@ -239,6 +251,8 @@ export function createTodayTrendScheduler({
         storageId: task.storageId,
         floor: task.floor,
         target: task.target ? Object.freeze({ ...task.target }) : null,
+        ...(Number.isSafeInteger(task.batchIndex) && task.batchIndex >= 0 ? { batchIndex: task.batchIndex } : {}),
+        ...(Number.isSafeInteger(task.batchCount) && task.batchCount > 0 ? { batchCount: task.batchCount } : {}),
     }) : null;
     const state = () => Object.freeze({
         phase,
@@ -351,12 +365,13 @@ export function createTodayTrendScheduler({
         const observation = observations.get(id);
         if (observation) touch(observation);
         const pendingTurns = observation?.pendingTurns;
-        const task = Object.freeze({
+        const task = {
             id: ++sequence, kind, storageId: id, floor: currentFloor,
             pendingTurns: Number.isInteger(pendingTurns) && pendingTurns >= 0 ? pendingTurns : 0,
             incidentProbability, target, summaryOnly: summaryOnly === true,
             abortController: new AbortController(), batchEnabled: batchEnabled === true, recentAssistantCount, mergeAssistantCount,
-        });
+            batchIndex: null, batchCount: null,
+        };
         terminalTask = null;
         activeTask = task;
         setPhase('queued', null);
@@ -372,6 +387,8 @@ export function createTodayTrendScheduler({
             let historyPlan = null;
             if (task.batchEnabled) {
                 historyPlan = buildHistoryPlan({ messages: chat, recentAssistantCount: task.recentAssistantCount, mergeAssistantCount: task.mergeAssistantCount });
+                task.batchCount = historyPlan.batchCount;
+                publish();
             }
             if (!isActive(task)) throw cancelled();
             const source = await getStore();
@@ -382,19 +399,45 @@ export function createTodayTrendScheduler({
                     throw Object.assign(new Error('今日风向批处理需要 canonical 提交器'), { code: 'TT_V2_REQUIRED' });
                 }
                 let batchScope = null;
+                let expectedBatchScope = null;
                 let batchPreset = null;
+                let expectedStoreRevision = null;
+                let expectedScopeRevision = null;
                 for (let batchIndex = 0; batchIndex < historyPlan.batchCount; batchIndex += 1) {
                     if (!isActive(task)) throw cancelled();
+                    task.batchIndex = batchIndex;
+                    publish();
                     const batchChat = getChat();
                     const batch = historyPlan.batches[batchIndex];
                     const batchAssistantCount = batch.assistantEnd;
                     const canonical = await committer.loadCanonical();
                     if (!isActive(task)) throw cancelled();
                     const facade = buildReadOnlyShadow(canonical);
-                    batchScope = facade.scopes[id];
+                    expectedBatchScope = facade.scopes[id];
+                    expectedStoreRevision = canonical.globalEnvelope.revision;
+                    expectedScopeRevision = canonical.globalEnvelope.payload.scopes[id]?.revision;
+                    batchScope = expectedBatchScope;
                     batchPreset = facade.presets?.[batchScope?.presetId];
                     if (!batchScope || !batchPreset) throw new Error('当前聊天尚未今日风向');
-                    const batchPromptScope = getPromptScope ? await getPromptScope(id, canonical) : null;
+                    let batchResetFloor = null;
+                    let generationCanonical = canonical;
+                    if (batchIndex === 0) {
+                        const snapshots = canonical.globalEnvelope.payload.scopes[id]?.payload?.generationSnapshots || [];
+                        const resetSnapshot = snapshots.reduce((latest, item) => item.restoreCapability === 'full'
+                            && item.assistantCount < historyPlan.windowStart
+                            && (!latest || item.assistantCount > latest.assistantCount) ? item : latest, null);
+                        if (!resetSnapshot) {
+                            throw Object.assign(new Error(`批量更新缺少早于楼层 ${historyPlan.windowStart} 的完整回退 checkpoint`), {
+                                code: 'TT_BATCH_RESET_CHECKPOINT_MISSING',
+                            });
+                        }
+                        batchResetFloor = resetSnapshot.assistantCount;
+                        generationCanonical = rollbackTodayTrendV2Scope(canonical, id, batchResetFloor);
+                        batchScope = buildReadOnlyShadow(generationCanonical).scopes[id];
+                        batchPreset = buildReadOnlyShadow(generationCanonical).presets?.[batchScope?.presetId];
+                        if (!batchScope || !batchPreset) throw new Error('批量更新回退基线不可用');
+                    }
+                    const batchPromptScope = getPromptScope ? await getPromptScope(id, generationCanonical) : null;
                     if (getPromptScope && typeof batchPromptScope !== 'string') throw new Error('今日风向 canonical prompt scope 不可用');
                     const generated = await controller.generate({
                         signal: task.abortController.signal, scope: batchScope, preset: batchPreset, storageId: id,
@@ -416,18 +459,25 @@ export function createTodayTrendScheduler({
                         const currentPreset = buildReadOnlyShadow(store).presets?.[current?.presetId];
                         if (!isActive(task)) return store;
                         if (!current || current.presetId !== batchPreset.id || currentPreset?.revision !== batchPreset.revision
-                            || JSON.stringify(current) !== JSON.stringify(batchScope)) {
+                            || !structurallyEqual(current, expectedBatchScope)) {
                             throw new Error('今日风向资料在批次生成期间已修改，迟到结果已丢弃');
                         }
                         const trustedStoryDate = trustedStoryDateFor(id);
                         const generatedAt = now();
                         const nextScope = { ...generated.scope,
                             operation: { ...current.operation, lastSuccessfulAssistantCount: batchAssistantCount, lastSuccessfulRunAt: generatedAt },
-                            injection: current.injection, generationSnapshots: current.generationSnapshots };
+                            injection: current.injection, generationSnapshots: batchScope.generationSnapshots };
+                        if (batchResetFloor !== null) {
+                            return applyTodayTrendRerollToV2(store, id, batchResetFloor,
+                                nextScope, generated.history ?? { events: [] }, {
+                                    trustedStoryDate, assistantCount: batchAssistantCount, generatedAt,
+                                });
+                        }
                         return applyTodayTrendGenerationToV2(store, id, nextScope, generated.history ?? { events: [] }, {
                             trustedStoryDate, assistantCount: batchAssistantCount, generatedAt, snapshot: true,
                         });
-                    }, { active: () => isActive(task) }, { canonical: true, scopeId: id });
+                    }, { active: () => isActive(task) }, { canonical: true, scopeId: id,
+                        expectedStoreRevision, expectedScopeRevision });
                     if (!committed || !isActive(task)) throw cancelled();
                     const remainingFeedback = Math.max(0, commitFeedbackMs - Math.max(0, now() - commitStartedAt));
                     if (remainingFeedback > 0) await wait(remainingFeedback);

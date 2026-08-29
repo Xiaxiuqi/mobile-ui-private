@@ -171,12 +171,22 @@ function assertTargetedGeneration(parsed, scope, target) {
 function normalizeGeneration(parsed, { scope, preset, allowIncident }) {
     if (!scope || !preset) throw new TypeError('今日风向生成缺少当前资料');
     const generatedFactions = parsed.factions === null ? null : withoutDirectParentChildLinks(parsed.factions);
+    const normalizeEventLatestStage = event => {
+        if (!event || !Array.isArray(event.stages) || !event.stages.length) return event;
+        const latestStage = event.stages.at(-1);
+        return event.latestStage === latestStage ? event : { ...event, latestStage };
+    };
+    const normalizeDynamicsLatestStages = dynamics => dynamics === null ? null : {
+        ...dynamics,
+        active: dynamics.active.map(normalizeEventLatestStage),
+        archived: dynamics.archived.map(normalizeEventLatestStage),
+    };
     const candidate = {
         ...scope,
         world: parsed.world ?? scope.world,
         reputation: parsed.reputation ?? scope.reputation,
         factions: generatedFactions ?? scope.factions,
-        dynamics: parsed.dynamics ?? scope.dynamics,
+        dynamics: parsed.dynamics === null ? scope.dynamics : normalizeDynamicsLatestStages(parsed.dynamics),
     };
     for (const previous of scope.dynamics.active) {
         const nextEvents = [...candidate.dynamics.active, ...candidate.dynamics.archived];
