@@ -12108,6 +12108,26 @@ ${entry2.content}` : entry2.content;
     const rightKeys = Object.keys(right).sort();
     return leftKeys.length === rightKeys.length && leftKeys.every((key, index) => key === rightKeys[index] && structurallyEqual2(left[key], right[key]));
   };
+  var scopeDifferenceSummary = (previousPayload, nextPayload) => {
+    if (previousPayload === void 0) return { status: "created", changedFields: [] };
+    if (nextPayload === void 0) return { status: "deleted", changedFields: [] };
+    const keys = /* @__PURE__ */ new Set([...Object.keys(previousPayload), ...Object.keys(nextPayload)]);
+    return {
+      status: "modified",
+      changedFields: [...keys].filter((key) => !structurallyEqual2(previousPayload[key], nextPayload[key])).sort()
+    };
+  };
+  var scopeRevisionMismatch = (declaredScopeIds, actualScopeIds, currentScopes, candidateScopes) => {
+    const scopeDifferences = Object.fromEntries(actualScopeIds.map((storageId) => [
+      storageId,
+      scopeDifferenceSummary(currentScopes[storageId]?.payload, candidateScopes[storageId]?.payload)
+    ]));
+    const error = failure3("TT_SCOPE_REVISION_MISMATCH", "\u58F0\u660E\u7684 scope \u53D8\u66F4\u8303\u56F4\u4E0E\u5B9E\u9645 candidate \u4E0D\u4E00\u81F4");
+    error.declaredScopeIds = declaredScopeIds;
+    error.actualScopeIds = actualScopeIds;
+    error.details = { declaredScopeIds, actualScopeIds, scopeDifferences };
+    return error;
+  };
   function failure3(code, message, cause) {
     const error = new Error(message, cause === void 0 ? void 0 : { cause });
     error.code = code;
@@ -12507,7 +12527,7 @@ ${entry2.content}` : entry2.content;
         candidateScopes[storageId]?.payload
       )).sort();
       if (declared && !structurallyEqual2([...declared].sort(), actual)) {
-        throw failure3("TT_SCOPE_REVISION_MISMATCH", "\u58F0\u660E\u7684 scope \u53D8\u66F4\u8303\u56F4\u4E0E\u5B9E\u9645 candidate \u4E0D\u4E00\u81F4");
+        throw scopeRevisionMismatch([...declared].sort(), actual, currentScopes, candidateScopes);
       }
       return { candidate, affectedScopeIds: actual };
     };

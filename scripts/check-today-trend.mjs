@@ -1545,8 +1545,17 @@ assert.equal(authorityHarness.records.get(TODAY_TREND_V2_AUTHORITY_KEY).scopeRev
     'scope 数组顺序变化必须被识别为业务变更并递增 revision');
 assert.deepEqual((await authorityA.load()).store.scopes.chat.factions.map(item => item.id),
     reorderedArrayStore.scopes.chat.factions.map(item => item.id), 'v2 store 必须保留 scope 数组的新顺序');
-await assert.rejects(() => authorityA.save(valid, { scopeId: 'other' }), error => error?.code === 'TT_SCOPE_REVISION_MISMATCH',
-    '声明 scope 与 candidate 实际变化不一致时必须拒绝写入，不能漏记 scope revision');
+await assert.rejects(() => authorityA.save(valid, { scopeId: 'other' }), error => {
+    assert.equal(error?.code, 'TT_SCOPE_REVISION_MISMATCH',
+        '声明 scope 与 candidate 实际变化不一致时必须拒绝写入，不能漏记 scope revision');
+    assert.deepEqual(error.declaredScopeIds, ['other'], '范围不一致诊断必须保留已排序声明 scope 集合');
+    assert.deepEqual(error.actualScopeIds, ['chat'], '范围不一致诊断必须保留实际变更 scope 集合');
+    assert.deepEqual(error.details, {
+        declaredScopeIds: ['other'], actualScopeIds: ['chat'],
+        scopeDifferences: { chat: { status: 'modified', changedFields: ['factions', 'operation'] } },
+    }, '范围不一致诊断必须提供不含业务正文的顶层差异摘要');
+    return true;
+}, '声明 scope 与 candidate 实际变化不一致时必须提供可复现诊断');
 await assert.rejects(() => authorityB.acquire({ readV2: true, writeV2: true, serveV2: false }), error => error?.code === 'TT_AUTHORITY_BUSY',
     '其他标签不得接管尚未显式释放的 active writer');
 assert.equal((await authorityA.status()).owned, true, '被拒绝的 takeover 不得使当前 owner 失权');
@@ -1567,6 +1576,41 @@ assert.equal(authorityChannels.size, 0, '失权 owner 与释放 owner 都必须�
 authorityA.close();
 authorityB.close();
 assert.equal(authorityChannels.size, 0, 'authority close 必须释放全部 BroadcastChannel 资源');
+
+const scopeMismatchHarness = createAuthorityHarness();
+const scopeMismatchAuthority = createTodayTrendV2Authority({
+    ...scopeMismatchHarness, tabId: 'scope-mismatch-owner', BroadcastChannelImpl: undefined,
+});
+await scopeMismatchAuthority.acquire({ readV2: true, writeV2: true, initialStore: valid });
+const assertScopeMismatch = async (candidate, declaredScopeId, expectedActualScopeId, expectedDifference) => {
+    const recordsBefore = structuredClone([...scopeMismatchHarness.records]);
+    await assert.rejects(() => scopeMismatchAuthority.save(candidate, { scopeId: declaredScopeId }), error => {
+        assert.equal(error?.code, 'TT_SCOPE_REVISION_MISMATCH', '范围不一致必须保留稳定错误码');
+        assert.equal(error?.message, '声明的 scope 变更范围与实际 candidate 不一致', '范围不一致必须保留原中文错误文本');
+        assert.deepEqual(error.declaredScopeIds, [declaredScopeId], '范围不一致必须保留排序后的声明 scope 集合');
+        assert.deepEqual(error.actualScopeIds, [expectedActualScopeId], '范围不一致必须保留排序后的实际 scope 集合');
+        assert.deepEqual(error.details, {
+            declaredScopeIds: [declaredScopeId], actualScopeIds: [expectedActualScopeId],
+            scopeDifferences: { [expectedActualScopeId]: expectedDifference },
+        }, '范围不一致必须提供无正文的结构化差异摘要');
+        return true;
+    }, '声明范围与实际 scope 不一致时必须 fail-closed');
+    assert.deepEqual([...scopeMismatchHarness.records], recordsBefore, '范围不一致不得写入 store、authority 或递增 revision');
+};
+const scopeMismatchBase = (await scopeMismatchAuthority.load()).v2Store;
+const scopeCreatedCandidate = structuredClone(scopeMismatchBase);
+scopeCreatedCandidate.globalEnvelope.payload.scopes.sibling = copyTodayTrendV2ScopeForBranch(
+    scopeMismatchBase.globalEnvelope.payload.scopes.chat, 'sibling', 0,
+    scopeMismatchBase.globalEnvelope.payload.presets,
+);
+await assertScopeMismatch(scopeCreatedCandidate, 'other', 'sibling', { status: 'created', changedFields: [] });
+await scopeMismatchAuthority.save(scopeCreatedCandidate, { scopeId: 'sibling' });
+await assertScopeMismatch(scopeMismatchBase, 'other', 'sibling', { status: 'deleted', changedFields: [] });
+await scopeMismatchAuthority.save(scopeMismatchBase, { scopeId: 'sibling' });
+assert.equal((await scopeMismatchAuthority.status()).owned, true,
+    '范围不一致被拒绝后 authority 必须保持可用，正确范围提交必须可恢复');
+assert.equal(await scopeMismatchAuthority.release(), true, '范围不一致专项 authority 必须释放');
+scopeMismatchAuthority.close();
 
 const fifoHarness = createAuthorityHarness();
 let blockedSaveResolve;
