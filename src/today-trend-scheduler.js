@@ -1,7 +1,7 @@
 import { appendTodayTrendGenerationSnapshot, rollbackTodayTrendScope } from './today-trend-model.js';
 import { calendarReferenceDate, calendarScopeFor, formatCalendarDate } from './calendar-model.js';
 import {
-    applyTodayTrendGenerationToV2, applyTodayTrendRerollToV2, buildReadOnlyShadow, rollbackTodayTrendV2Scope,
+    applyTodayTrendGenerationToV2, applyTodayTrendRerollToV2, buildReadOnlyShadow, prepareTodayTrendLegacyBatchBaseline, rollbackTodayTrendV2Scope,
 } from './today-trend-v2-model.js';
 
 const cancelled = () => Object.assign(new Error('今日风向生成已取消'), { name: 'AbortError' });
@@ -421,18 +421,25 @@ export function createTodayTrendScheduler({
                     if (!batchScope || !batchPreset) throw new Error('当前聊天尚未今日风向');
                     let batchResetFloor = null;
                     let generationCanonical = canonical;
+                    let initializeBatchBaseline = false;
                     if (batchIndex === 0) {
                         const snapshots = canonical.globalEnvelope.payload.scopes[id]?.payload?.generationSnapshots || [];
                         const resetSnapshot = snapshots.reduce((latest, item) => item.restoreCapability === 'full'
                             && item.assistantCount < historyPlan.windowStart
                             && (!latest || item.assistantCount > latest.assistantCount) ? item : latest, null);
                         if (!resetSnapshot) {
-                            throw Object.assign(new Error(`批量更新缺少早于楼层 ${historyPlan.windowStart} 的完整回退 checkpoint`), {
-                                code: 'TT_BATCH_RESET_CHECKPOINT_MISSING',
-                            });
+                            generationCanonical = prepareTodayTrendLegacyBatchBaseline(canonical, id);
+                            if (!generationCanonical) {
+                                throw Object.assign(new Error(`批量更新缺少早于楼层 ${historyPlan.windowStart} 的完整回退 checkpoint`), {
+                                    code: 'TT_BATCH_RESET_CHECKPOINT_MISSING',
+                                });
+                            }
+                            batchResetFloor = 0;
+                            initializeBatchBaseline = true;
+                        } else {
+                            batchResetFloor = resetSnapshot.assistantCount;
+                            generationCanonical = rollbackTodayTrendV2Scope(canonical, id, batchResetFloor);
                         }
-                        batchResetFloor = resetSnapshot.assistantCount;
-                        generationCanonical = rollbackTodayTrendV2Scope(canonical, id, batchResetFloor);
                         batchScope = buildReadOnlyShadow(generationCanonical).scopes[id];
                         batchPreset = buildReadOnlyShadow(generationCanonical).presets?.[batchScope?.presetId];
                         if (!batchScope || !batchPreset) throw new Error('批量更新回退基线不可用');
@@ -468,6 +475,16 @@ export function createTodayTrendScheduler({
                             operation: { ...current.operation, lastSuccessfulAssistantCount: batchAssistantCount, lastSuccessfulRunAt: generatedAt },
                             injection: current.injection, generationSnapshots: batchScope.generationSnapshots };
                         if (batchResetFloor !== null) {
+                            if (initializeBatchBaseline) {
+                                const baseline = prepareTodayTrendLegacyBatchBaseline(store, id);
+                                if (!baseline) {
+                                    throw Object.assign(new Error('批量更新 legacy 回退 checkpoint 不可用'), {
+                                        code: 'TT_BATCH_RESET_CHECKPOINT_MISSING',
+                                    });
+                                }
+                                return applyTodayTrendRerollToV2(baseline, id, batchResetFloor,
+                                    nextScope, generated.history ?? { events: [] }, { trustedStoryDate, assistantCount: batchAssistantCount, generatedAt });
+                            }
                             return applyTodayTrendRerollToV2(store, id, batchResetFloor,
                                 nextScope, generated.history ?? { events: [] }, {
                                     trustedStoryDate, assistantCount: batchAssistantCount, generatedAt,

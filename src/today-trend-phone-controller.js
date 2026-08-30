@@ -206,9 +206,15 @@ export function createTodayTrendPhoneController({ state, deps, container }) {
             const currentCount = assistantCount();
             const recentAssistantCount = Number(data?.get('recentAssistantCount'));
             const mergeAssistantCount = Number(data?.get('mergeAssistantCount'));
-            if (!Number.isSafeInteger(currentCount) || currentCount < 1) return;
-            if (!Number.isSafeInteger(recentAssistantCount) || recentAssistantCount < 1 || recentAssistantCount > currentCount) return;
-            if (!Number.isSafeInteger(mergeAssistantCount) || mergeAssistantCount < 1 || mergeAssistantCount > recentAssistantCount) return;
+            if (!Number.isSafeInteger(currentCount) || currentCount < 1) {
+                return report(new Error('当前聊天没有可处理的 AI 回复楼层'));
+            }
+            if (!Number.isSafeInteger(recentAssistantCount) || recentAssistantCount < 1 || recentAssistantCount > currentCount) {
+                return report(new Error('最近处理层数必须在当前聊天 AI 回复累计层数范围内'));
+            }
+            if (!Number.isSafeInteger(mergeAssistantCount) || mergeAssistantCount < 1 || mergeAssistantCount > recentAssistantCount) {
+                return report(new Error('每批合并层数必须在最近处理层数范围内'));
+            }
             return saveBatchDraft({ enabled: true, recentAssistantCount, mergeAssistantCount })
                 .then(() => generate(null, null, { batchEnabled: true, recentAssistantCount, mergeAssistantCount })).catch(report);
         }

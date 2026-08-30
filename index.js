@@ -11142,9 +11142,12 @@ ${entry2.content}` : entry2.content;
         if (Object.values(previousPayload.removableEntityStateById).some((item) => item.state === "removed")) invalid("\u5305\u542B removed lifecycle \u7684 scope \u4E0D\u5F97\u76F4\u63A5\u5220\u9664");
         continue;
       }
+      const legacyBaseline = legacyProjectionBaselineForTransition(previousPayload, nextPayload);
       const restoredSnapshot = nextPayload.generationSnapshots.at(-1);
       const priorRestoreSnapshot = restoredSnapshot?.restoreCapability === "full" ? previousPayload.generationSnapshots.find((snapshot) => snapshot.restoreCapability === "full" && same2(snapshot.checkpointRef, restoredSnapshot.checkpointRef)) : null;
-      if (priorRestoreSnapshot) {
+      if (legacyBaseline) {
+        transitionPreviousPayload = legacyBaseline;
+      } else if (priorRestoreSnapshot) {
         const materialized = {
           ...materializeTodayTrendCheckpoint(restoredSnapshot.checkpointRef, nextPayload.checkpointEntityStore),
           generationSnapshots: clone5(nextPayload.generationSnapshots),
@@ -11203,6 +11206,19 @@ ${entry2.content}` : entry2.content;
       }
     }
     return candidate;
+  }
+  function isPureLegacyProjectionPayload(payload) {
+    return payload.generationSnapshots.length > 0 && payload.generationSnapshots.every((snapshot) => snapshot.restoreCapability === "projection-only" && snapshot.checkpointRef === null) && Object.keys(payload.checkpointEntityStore).length === 0 && Object.keys(payload.stageDetailsByEvent).length === 0 && Object.keys(payload.archivedRemovableDataByEvent).length === 0 && Object.keys(payload.removableEntityStateById).length === 0 && Object.keys(payload.removableEntityTombstonesById).length === 0 && payload.historyRetentionSettings.archivedDetailLatestEventCount === 2 && payload.historyRetentionSettings.archivedDetailRetentionFloors === 20 && payload.historyRetentionSettings.revision === 1 && payload.historyRetentionState.highWaterAssistantCount === null && payload.historyRetentionState.detailPoolRevision === 0 && payload.historyRetentionState.retentionPolicyRevision === 1 && payload.historyRetentionState.nextArchivedSequence === payload.dynamics.archived.length + 1;
+  }
+  function legacyProjectionBaselineForTransition(previousPayload, nextPayload) {
+    if (!isPureLegacyProjectionPayload(previousPayload)) return null;
+    const legacyBaseline = previousPayload.generationSnapshots.find((snapshot) => snapshot.assistantCount === 0);
+    const fullBaseline = nextPayload.generationSnapshots.find((snapshot) => snapshot.assistantCount === 0 && snapshot.restoreCapability === "full");
+    const latest = nextPayload.generationSnapshots.at(-1);
+    if (!legacyBaseline || !fullBaseline || latest?.rerollFromAssistantCount !== 0 || !same2(snapshotV1Comparable(legacyBaseline), snapshotV1Comparable(fullBaseline))) return null;
+    const materialized = materializeTodayTrendCheckpoint(fullBaseline.checkpointRef, nextPayload.checkpointEntityStore);
+    if (materialized.operation?.lastSuccessfulAssistantCount !== 0 || materialized.operation?.lastSuccessfulRunAt !== legacyBaseline.generatedAt || !same2(materialized.world, fullBaseline.world) || !same2(materialized.reputation, fullBaseline.reputation) || !same2(materialized.factions, fullBaseline.factions) || !same2(materialized.dynamicsSettings, fullBaseline.dynamicsSettings) || !same2(materialized.dynamics, fullBaseline.dynamics)) return null;
+    return materialized;
   }
   function normalizeScopeEnvelope(value, presets) {
     if (!plainRecord9(value)) invalid("scope envelope \u5FC5\u987B\u662F\u5BF9\u8C61");
@@ -11864,6 +11880,35 @@ ${entry2.content}` : entry2.content;
     );
     envelope.payload = payload;
     return normalizeTodayTrendV2Store(merged);
+  }
+  function prepareTodayTrendLegacyBatchBaseline(currentValue, storageId) {
+    const current = normalizeTodayTrendV2Store(currentValue);
+    const payload = current.globalEnvelope.payload.scopes[storageId]?.payload;
+    if (!payload || !isPureLegacyProjectionPayload(payload)) return null;
+    const snapshot = payload.generationSnapshots.find((item) => item.assistantCount === 0);
+    if (!snapshot) return null;
+    const facade = buildReadOnlyShadow(current);
+    const scope = facade.scopes[storageId];
+    if (!scope) return null;
+    const baselineScope = {
+      ...scope,
+      operation: {
+        ...scope.operation,
+        lastSuccessfulAssistantCount: 0,
+        lastSuccessfulRunAt: snapshot.generatedAt
+      },
+      world: clone5(snapshot.world),
+      reputation: clone5(snapshot.reputation),
+      factions: clone5(snapshot.factions),
+      dynamicsSettings: clone5(snapshot.dynamicsSettings),
+      dynamics: projectDynamicsToV1(snapshot.dynamics),
+      generationSnapshots: [snapshotV1Comparable(snapshot)]
+    };
+    return applyTodayTrendGenerationToV2(current, storageId, baselineScope, { events: [] }, {
+      assistantCount: 0,
+      generatedAt: snapshot.generatedAt,
+      snapshot: true
+    });
   }
   function applyTodayTrendRerollToV2(currentValue, storageId, baselineAssistantCount, generatedScope, history, options2 = {}) {
     const current = normalizeTodayTrendV2Store(currentValue);
@@ -26614,16 +26659,23 @@ ${targetInstruction}`
             if (!batchScope || !batchPreset) throw new Error("\u5F53\u524D\u804A\u5929\u5C1A\u672A\u4ECA\u65E5\u98CE\u5411");
             let batchResetFloor = null;
             let generationCanonical = canonical3;
+            let initializeBatchBaseline = false;
             if (batchIndex === 0) {
               const snapshots = canonical3.globalEnvelope.payload.scopes[id2]?.payload?.generationSnapshots || [];
               const resetSnapshot = snapshots.reduce((latest, item) => item.restoreCapability === "full" && item.assistantCount < historyPlan.windowStart && (!latest || item.assistantCount > latest.assistantCount) ? item : latest, null);
               if (!resetSnapshot) {
-                throw Object.assign(new Error(`\u6279\u91CF\u66F4\u65B0\u7F3A\u5C11\u65E9\u4E8E\u697C\u5C42 ${historyPlan.windowStart} \u7684\u5B8C\u6574\u56DE\u9000 checkpoint`), {
-                  code: "TT_BATCH_RESET_CHECKPOINT_MISSING"
-                });
+                generationCanonical = prepareTodayTrendLegacyBatchBaseline(canonical3, id2);
+                if (!generationCanonical) {
+                  throw Object.assign(new Error(`\u6279\u91CF\u66F4\u65B0\u7F3A\u5C11\u65E9\u4E8E\u697C\u5C42 ${historyPlan.windowStart} \u7684\u5B8C\u6574\u56DE\u9000 checkpoint`), {
+                    code: "TT_BATCH_RESET_CHECKPOINT_MISSING"
+                  });
+                }
+                batchResetFloor = 0;
+                initializeBatchBaseline = true;
+              } else {
+                batchResetFloor = resetSnapshot.assistantCount;
+                generationCanonical = rollbackTodayTrendV2Scope(canonical3, id2, batchResetFloor);
               }
-              batchResetFloor = resetSnapshot.assistantCount;
-              generationCanonical = rollbackTodayTrendV2Scope(canonical3, id2, batchResetFloor);
               batchScope = buildReadOnlyShadow(generationCanonical).scopes[id2];
               batchPreset = buildReadOnlyShadow(generationCanonical).presets?.[batchScope?.presetId];
               if (!batchScope || !batchPreset) throw new Error("\u6279\u91CF\u66F4\u65B0\u56DE\u9000\u57FA\u7EBF\u4E0D\u53EF\u7528");
@@ -26670,6 +26722,22 @@ ${targetInstruction}`
                 generationSnapshots: batchScope.generationSnapshots
               };
               if (batchResetFloor !== null) {
+                if (initializeBatchBaseline) {
+                  const baseline = prepareTodayTrendLegacyBatchBaseline(store, id2);
+                  if (!baseline) {
+                    throw Object.assign(new Error("\u6279\u91CF\u66F4\u65B0 legacy \u56DE\u9000 checkpoint \u4E0D\u53EF\u7528"), {
+                      code: "TT_BATCH_RESET_CHECKPOINT_MISSING"
+                    });
+                  }
+                  return applyTodayTrendRerollToV2(
+                    baseline,
+                    id2,
+                    batchResetFloor,
+                    nextScope,
+                    generated2.history ?? { events: [] },
+                    { trustedStoryDate: trustedStoryDate2, assistantCount: batchAssistantCount, generatedAt }
+                  );
+                }
                 return applyTodayTrendRerollToV2(
                   store,
                   id2,
@@ -28499,9 +28567,15 @@ ${targetInstruction}`
         const currentCount = assistantCount();
         const recentAssistantCount = Number(data?.get("recentAssistantCount"));
         const mergeAssistantCount = Number(data?.get("mergeAssistantCount"));
-        if (!Number.isSafeInteger(currentCount) || currentCount < 1) return;
-        if (!Number.isSafeInteger(recentAssistantCount) || recentAssistantCount < 1 || recentAssistantCount > currentCount) return;
-        if (!Number.isSafeInteger(mergeAssistantCount) || mergeAssistantCount < 1 || mergeAssistantCount > recentAssistantCount) return;
+        if (!Number.isSafeInteger(currentCount) || currentCount < 1) {
+          return report(new Error("\u5F53\u524D\u804A\u5929\u6CA1\u6709\u53EF\u5904\u7406\u7684 AI \u56DE\u590D\u697C\u5C42"));
+        }
+        if (!Number.isSafeInteger(recentAssistantCount) || recentAssistantCount < 1 || recentAssistantCount > currentCount) {
+          return report(new Error("\u6700\u8FD1\u5904\u7406\u5C42\u6570\u5FC5\u987B\u5728\u5F53\u524D\u804A\u5929 AI \u56DE\u590D\u7D2F\u8BA1\u5C42\u6570\u8303\u56F4\u5185"));
+        }
+        if (!Number.isSafeInteger(mergeAssistantCount) || mergeAssistantCount < 1 || mergeAssistantCount > recentAssistantCount) {
+          return report(new Error("\u6BCF\u6279\u5408\u5E76\u5C42\u6570\u5FC5\u987B\u5728\u6700\u8FD1\u5904\u7406\u5C42\u6570\u8303\u56F4\u5185"));
+        }
         return saveBatchDraft({ enabled: true, recentAssistantCount, mergeAssistantCount }).then(() => generate(null, null, { batchEnabled: true, recentAssistantCount, mergeAssistantCount })).catch(report);
       }
       if (button.dataset.action === "today-trend-open-settings") {

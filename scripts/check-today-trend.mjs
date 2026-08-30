@@ -4931,11 +4931,42 @@ assert.equal(phase3RaceCommits, 1, '阶段3聊天变化只允许尝试当前批�
 assert.equal(phase3RaceCanonical.globalEnvelope.payload.scopes.chat.payload.operation.lastSuccessfulAssistantCount, 7,
     '阶段3聊天变化后必须保留旧 canonical 成功边界');
 
+let phase3InitialBatchCanonical = structuredClone(migratedValidV2);
+let phase3InitialBatchAiCalls = 0;
+const phase3InitialBatchScheduler = createTodayTrendScheduler({
+    controller: { generate: async input => {
+        phase3InitialBatchAiCalls += 1;
+        const scope = structuredClone(input.scope);
+        scope.world.items[0].summary = `首次批量第 ${input.assistantCount} 层`;
+        return { scope, history: { events: [] } };
+    } },
+    committer: {
+        supportsCanonical: true, invalidateCommits: () => {},
+        loadCanonical: async () => structuredClone(phase3InitialBatchCanonical),
+        commitStore: async mutate => {
+            const candidate = await mutate(structuredClone(phase3InitialBatchCanonical));
+            phase3InitialBatchCanonical = validateTodayTrendV2Transition(phase3InitialBatchCanonical, candidate);
+            return buildReadOnlyShadow(phase3InitialBatchCanonical);
+        },
+    },
+    getStore: async () => buildReadOnlyShadow(phase3InitialBatchCanonical), getStorageId: () => 'chat',
+    getChat: () => Array.from({ length: 2 }, () => ({ role: 'assistant', content: '首次批量正文' })),
+});
+await phase3InitialBatchScheduler.manual({ batchEnabled: true, recentAssistantCount: 2, mergeAssistantCount: 2 });
+assert.equal(phase3InitialBatchAiCalls, 1, '迁移后的初始 scope 必须允许首次批量生成');
+assert.equal(phase3InitialBatchCanonical.globalEnvelope.payload.scopes.chat.payload.operation.lastSuccessfulAssistantCount, 2,
+    '首次批量生成必须推进成功边界');
+assert.deepEqual(phase3InitialBatchCanonical.globalEnvelope.payload.scopes.chat.payload.generationSnapshots
+    .map(snapshot => [snapshot.assistantCount, snapshot.restoreCapability]), [[0, 'full'], [2, 'full']],
+    '首次批量生成必须在同一提交中保留 floor 0 与首批的完整 checkpoint');
+
 let phase3MissingResetCanonical = structuredClone(migratedValidV2);
 phase3MissingResetCanonical.globalEnvelope.payload.scopes.chat.payload.generationSnapshots = phase3MissingResetCanonical
     .globalEnvelope.payload.scopes.chat.payload.generationSnapshots.map(snapshot => ({
         ...structuredClone(snapshot), restoreCapability: 'projection-only', checkpointRef: null,
     }));
+phase3MissingResetCanonical.globalEnvelope.payload.scopes.chat.payload.operation.lastSuccessfulAssistantCount = 2;
+phase3MissingResetCanonical.globalEnvelope.payload.scopes.chat.payload.historyRetentionState.highWaterAssistantCount = 2;
 normalizeTodayTrendV2Store(phase3MissingResetCanonical);
 let phase3MissingResetAiCalls = 0;
 let phase3MissingResetCommitCalls = 0;
@@ -4951,9 +4982,9 @@ const phase3MissingResetScheduler = createTodayTrendScheduler({
 });
 await assert.rejects(() => phase3MissingResetScheduler.manual({ batchEnabled: true, recentAssistantCount: 2, mergeAssistantCount: 2 }),
     error => error?.code === 'TT_BATCH_RESET_CHECKPOINT_MISSING',
-    '批量首批缺少严格早于窗口的 full checkpoint 必须 fail-closed');
-assert.equal(phase3MissingResetAiCalls, 0, '缺少完整回退基线时不得调用 AI');
-assert.equal(phase3MissingResetCommitCalls, 0, '缺少完整回退基线时不得提交 candidate');
+    '已有非零历史但缺少严格早于窗口的 full checkpoint 必须 fail-closed');
+assert.equal(phase3MissingResetAiCalls, 0, '已有非零历史但缺少完整回退基线时不得调用 AI');
+assert.equal(phase3MissingResetCommitCalls, 0, '已有非零历史但缺少完整回退基线时不得提交 candidate');
 
 let phase3ReorderedCanonical = structuredClone(batchReadyValidV2);
 let phase3ReorderedAiCalls = 0;
@@ -6451,6 +6482,12 @@ phase12GeneratedOptions = null;
 phase12BatchListeners.find(item => item.type === 'click' && item.capture)?.listener({ target: phase12BatchButton });
 await new Promise(resolve => setTimeout(resolve, 0));
 assert.equal(phase12GeneratedOptions, null, '非法批处理表单不得发起生成请求');
+phase12BatchForm.checkValidity = () => true;
+phase12BatchForm.values.set('recentAssistantCount', '4');
+phase12BatchListeners.find(item => item.type === 'click' && item.capture)?.listener({ target: phase12BatchButton });
+assert.equal(phase12GeneratedOptions, null, '超出当前聊天范围的批处理参数不得发起生成请求');
+assert.match(phase12BatchContainer.innerHTML, /最近处理层数必须在当前聊天 AI 回复累计层数范围内/,
+    '超出当前聊天范围的批处理参数必须显示错误，而非静默无响应');
 globalThis.FormData = phase12FormData;
 phase12BatchController.destroy();
 for (const [name, maximum] of [['archivedDetailLatestEventCount', 80], ['archivedDetailRetentionFloors', 1000]]) {

@@ -692,11 +692,14 @@ export function validateTodayTrendV2Transition(previousValue, candidateValue) {
             if (Object.values(previousPayload.removableEntityStateById).some(item => item.state === 'removed')) invalid('包含 removed lifecycle 的 scope 不得直接删除');
             continue;
         }
+        const legacyBaseline = legacyProjectionBaselineForTransition(previousPayload, nextPayload);
         const restoredSnapshot = nextPayload.generationSnapshots.at(-1);
         const priorRestoreSnapshot = restoredSnapshot?.restoreCapability === 'full'
             ? previousPayload.generationSnapshots.find(snapshot => snapshot.restoreCapability === 'full'
                 && same(snapshot.checkpointRef, restoredSnapshot.checkpointRef)) : null;
-        if (priorRestoreSnapshot) {
+        if (legacyBaseline) {
+            transitionPreviousPayload = legacyBaseline;
+        } else if (priorRestoreSnapshot) {
             const materialized = {
                 ...materializeTodayTrendCheckpoint(restoredSnapshot.checkpointRef, nextPayload.checkpointEntityStore),
                 generationSnapshots: clone(nextPayload.generationSnapshots),
@@ -761,6 +764,40 @@ export function validateTodayTrendV2Transition(previousValue, candidateValue) {
         }
     }
     return candidate;
+}
+
+function isPureLegacyProjectionPayload(payload) {
+    return payload.generationSnapshots.length > 0
+        && payload.generationSnapshots.every(snapshot => snapshot.restoreCapability === 'projection-only'
+            && snapshot.checkpointRef === null)
+        && Object.keys(payload.checkpointEntityStore).length === 0
+        && Object.keys(payload.stageDetailsByEvent).length === 0
+        && Object.keys(payload.archivedRemovableDataByEvent).length === 0
+        && Object.keys(payload.removableEntityStateById).length === 0
+        && Object.keys(payload.removableEntityTombstonesById).length === 0
+        && payload.historyRetentionSettings.archivedDetailLatestEventCount === 2
+        && payload.historyRetentionSettings.archivedDetailRetentionFloors === 20
+        && payload.historyRetentionSettings.revision === 1
+        && payload.historyRetentionState.highWaterAssistantCount === null
+        && payload.historyRetentionState.detailPoolRevision === 0
+        && payload.historyRetentionState.retentionPolicyRevision === 1
+        && payload.historyRetentionState.nextArchivedSequence === payload.dynamics.archived.length + 1;
+}
+
+function legacyProjectionBaselineForTransition(previousPayload, nextPayload) {
+    if (!isPureLegacyProjectionPayload(previousPayload)) return null;
+    const legacyBaseline = previousPayload.generationSnapshots.find(snapshot => snapshot.assistantCount === 0);
+    const fullBaseline = nextPayload.generationSnapshots.find(snapshot => snapshot.assistantCount === 0
+        && snapshot.restoreCapability === 'full');
+    const latest = nextPayload.generationSnapshots.at(-1);
+    if (!legacyBaseline || !fullBaseline || latest?.rerollFromAssistantCount !== 0
+        || !same(snapshotV1Comparable(legacyBaseline), snapshotV1Comparable(fullBaseline))) return null;
+    const materialized = materializeTodayTrendCheckpoint(fullBaseline.checkpointRef, nextPayload.checkpointEntityStore);
+    if (materialized.operation?.lastSuccessfulAssistantCount !== 0 || materialized.operation?.lastSuccessfulRunAt !== legacyBaseline.generatedAt
+        || !same(materialized.world, fullBaseline.world) || !same(materialized.reputation, fullBaseline.reputation)
+        || !same(materialized.factions, fullBaseline.factions) || !same(materialized.dynamicsSettings, fullBaseline.dynamicsSettings)
+        || !same(materialized.dynamics, fullBaseline.dynamics)) return null;
+    return materialized;
 }
 
 function normalizeScopeEnvelope(value, presets) {
@@ -1411,6 +1448,34 @@ export function applyTodayTrendGenerationToV2(currentValue, storageId, generated
         current.globalEnvelope.revision + 1, { rerollFromAssistantCount });
     envelope.payload = payload;
     return normalizeTodayTrendV2Store(merged);
+}
+
+export function prepareTodayTrendLegacyBatchBaseline(currentValue, storageId) {
+    const current = normalizeTodayTrendV2Store(currentValue);
+    const payload = current.globalEnvelope.payload.scopes[storageId]?.payload;
+    if (!payload || !isPureLegacyProjectionPayload(payload)) return null;
+    const snapshot = payload.generationSnapshots.find(item => item.assistantCount === 0);
+    if (!snapshot) return null;
+    const facade = buildReadOnlyShadow(current);
+    const scope = facade.scopes[storageId];
+    if (!scope) return null;
+    const baselineScope = {
+        ...scope,
+        operation: {
+            ...scope.operation,
+            lastSuccessfulAssistantCount: 0,
+            lastSuccessfulRunAt: snapshot.generatedAt,
+        },
+        world: clone(snapshot.world),
+        reputation: clone(snapshot.reputation),
+        factions: clone(snapshot.factions),
+        dynamicsSettings: clone(snapshot.dynamicsSettings),
+        dynamics: projectDynamicsToV1(snapshot.dynamics),
+        generationSnapshots: [snapshotV1Comparable(snapshot)],
+    };
+    return applyTodayTrendGenerationToV2(current, storageId, baselineScope, { events: [] }, {
+        assistantCount: 0, generatedAt: snapshot.generatedAt, snapshot: true,
+    });
 }
 
 export function applyTodayTrendRerollToV2(currentValue, storageId, baselineAssistantCount, generatedScope, history, options = {}) {
