@@ -1548,14 +1548,10 @@ assert.deepEqual((await authorityA.load()).store.scopes.chat.factions.map(item =
 await assert.rejects(() => authorityA.save(valid, { scopeId: 'other' }), error => {
     assert.equal(error?.code, 'TT_SCOPE_REVISION_MISMATCH',
         '声明 scope 与 candidate 实际变化不一致时必须拒绝写入，不能漏记 scope revision');
-    assert.deepEqual(error.declaredScopeIds, ['other'], '范围不一致诊断必须保留已排序声明 scope 集合');
-    assert.deepEqual(error.actualScopeIds, ['chat'], '范围不一致诊断必须保留实际变更 scope 集合');
-    assert.deepEqual(error.details, {
-        declaredScopeIds: ['other'], actualScopeIds: ['chat'],
-        scopeDifferences: { chat: { status: 'modified', changedFields: ['factions', 'operation'] } },
-    }, '范围不一致诊断必须提供不含业务正文的顶层差异摘要');
+    assert.equal(error?.message, '声明的 scope 变更范围与实际 candidate 不一致',
+        '声明 scope 与 candidate 实际变化不一致时必须保留稳定中文错误文本');
     return true;
-}, '声明 scope 与 candidate 实际变化不一致时必须提供可复现诊断');
+}, '声明 scope 与 candidate 实际变化不一致时必须 fail-closed');
 await assert.rejects(() => authorityB.acquire({ readV2: true, writeV2: true, serveV2: false }), error => error?.code === 'TT_AUTHORITY_BUSY',
     '其他标签不得接管尚未显式释放的 active writer');
 assert.equal((await authorityA.status()).owned, true, '被拒绝的 takeover 不得使当前 owner 失权');
@@ -1582,17 +1578,11 @@ const scopeMismatchAuthority = createTodayTrendV2Authority({
     ...scopeMismatchHarness, tabId: 'scope-mismatch-owner', BroadcastChannelImpl: undefined,
 });
 await scopeMismatchAuthority.acquire({ readV2: true, writeV2: true, initialStore: valid });
-const assertScopeMismatch = async (candidate, declaredScopeId, expectedActualScopeId, expectedDifference) => {
+const assertScopeMismatch = async (candidate, declaredScopeId) => {
     const recordsBefore = structuredClone([...scopeMismatchHarness.records]);
     await assert.rejects(() => scopeMismatchAuthority.save(candidate, { scopeId: declaredScopeId }), error => {
         assert.equal(error?.code, 'TT_SCOPE_REVISION_MISMATCH', '范围不一致必须保留稳定错误码');
         assert.equal(error?.message, '声明的 scope 变更范围与实际 candidate 不一致', '范围不一致必须保留原中文错误文本');
-        assert.deepEqual(error.declaredScopeIds, [declaredScopeId], '范围不一致必须保留排序后的声明 scope 集合');
-        assert.deepEqual(error.actualScopeIds, [expectedActualScopeId], '范围不一致必须保留排序后的实际 scope 集合');
-        assert.deepEqual(error.details, {
-            declaredScopeIds: [declaredScopeId], actualScopeIds: [expectedActualScopeId],
-            scopeDifferences: { [expectedActualScopeId]: expectedDifference },
-        }, '范围不一致必须提供无正文的结构化差异摘要');
         return true;
     }, '声明范围与实际 scope 不一致时必须 fail-closed');
     assert.deepEqual([...scopeMismatchHarness.records], recordsBefore, '范围不一致不得写入 store、authority 或递增 revision');
@@ -1603,9 +1593,9 @@ scopeCreatedCandidate.globalEnvelope.payload.scopes.sibling = copyTodayTrendV2Sc
     scopeMismatchBase.globalEnvelope.payload.scopes.chat, 'sibling', 0,
     scopeMismatchBase.globalEnvelope.payload.presets,
 );
-await assertScopeMismatch(scopeCreatedCandidate, 'other', 'sibling', { status: 'created', changedFields: [] });
+await assertScopeMismatch(scopeCreatedCandidate, 'other');
 await scopeMismatchAuthority.save(scopeCreatedCandidate, { scopeId: 'sibling' });
-await assertScopeMismatch(scopeMismatchBase, 'other', 'sibling', { status: 'deleted', changedFields: [] });
+await assertScopeMismatch(scopeMismatchBase, 'other');
 await scopeMismatchAuthority.save(scopeMismatchBase, { scopeId: 'sibling' });
 assert.equal((await scopeMismatchAuthority.status()).owned, true,
     '范围不一致被拒绝后 authority 必须保持可用，正确范围提交必须可恢复');
@@ -4629,6 +4619,201 @@ assert.equal([...phase5MultiHarness.records.keys()].some(key => key.startsWith(T
 assert.equal(phase5LateRuntime.pendingInjectionStore, undefined,
     '取消补偿完成后不得残留 pending injection store');
 await phase5MultiAuthorityWithTrace.release({ readV2: true, serveV2: false });
+
+let phase5LargeCanonical = rollbackTodayTrendV2Scope(batchReadyValidV2, 'chat', 0);
+for (const assistantCount of [3, 6, 9, 12, 15]) {
+    const scope = buildReadOnlyShadow(phase5LargeCanonical).scopes.chat;
+    scope.operation = {
+        ...scope.operation, lastSuccessfulAssistantCount: assistantCount, lastSuccessfulRunAt: assistantCount,
+    };
+    phase5LargeCanonical = applyTodayTrendGenerationToV2(
+        phase5LargeCanonical, 'chat', scope, { events: [] }, { assistantCount, generatedAt: assistantCount },
+    );
+}
+assert.deepEqual(
+    phase5LargeCanonical.globalEnvelope.payload.scopes.chat.payload.generationSnapshots.map(item => item.assistantCount),
+    [0, 3, 6, 9, 12, 15],
+    '107/5 现场回归必须精确建立已采集的 generationSnapshots 楼层序列',
+);
+const phase5LargeHarness = createAuthorityHarness();
+const phase5LargeCasWrites = [];
+const phase5LargeAuthority = createTodayTrendV2Authority({
+    readEntry: phase5LargeHarness.readEntry,
+    compareAndSwap: async request => {
+        phase5LargeCasWrites.push(request.writes.map(entry => entry.key));
+        return phase5LargeHarness.compareAndSwap(request);
+    },
+    tabId: 'phase-5-large-owner', BroadcastChannelImpl: undefined,
+});
+await phase5LargeAuthority.acquire({ readV2: true, writeV2: true, initialStore: phase5LargeCanonical });
+let phase5LargeNow = 15000;
+const phase5LargePhases = [];
+const phase5LargeJournal = createTodayTrendJournal({
+    listKeys: async () => [...phase5LargeHarness.records.keys()], readEntry: phase5LargeHarness.readEntry,
+    writeEntry: async (key, value) => {
+        phase5LargeHarness.records.set(key, structuredClone(value));
+        phase5LargePhases.push(value.phase);
+        return true;
+    },
+    deleteEntry: async key => phase5LargeHarness.records.delete(key), now: () => ++phase5LargeNow,
+    transactionId: () => `phase-5-large-${phase5LargeNow}`,
+});
+const phase5LargeStorage = createTodayTrendStorage({
+    v2Authority: phase5LargeAuthority, journal: phase5LargeJournal, storage: memoryStorage(),
+});
+let phase5LargeBatch = 0;
+const phase5LargeCommitter = createTodayTrendCommitter({
+    runtime: {}, load: phase5LargeStorage.load, loadCanonical: phase5LargeStorage.loadCanonical,
+    save: phase5LargeStorage.save, storageStatus: phase5LargeStorage.status, journal: phase5LargeJournal,
+    refreshInjection: async () => ({ failedWrites: 0, failedKeys: [] }),
+});
+const phase5LargeChat = Array.from({ length: 107 }, (_, index) => ({
+    role: 'assistant', content: `107/5 现场正文${index + 1}`,
+}));
+const phase5LargeScheduler = createTodayTrendScheduler({
+    controller: { generate: async ({ scope, assistantCount }) => {
+        phase5LargeBatch += 1;
+        const generatedScope = structuredClone(scope);
+        generatedScope.world.items[0].summary = `107/5 第${phase5LargeBatch}批-${assistantCount}`;
+        return { scope: generatedScope, history: { events: [] } };
+    } },
+    committer: phase5LargeCommitter, getStore: phase5LargeStorage.load, getStorageId: () => 'chat',
+    getChat: () => phase5LargeChat,
+    getCalendarStore: () => ({ version: 1, scopes: { chat: { baseDate: '2025-04-15' } } }),
+    getFloor: () => 107, commitFeedbackMs: 0,
+});
+await phase5LargeScheduler.manual({ batchEnabled: true, recentAssistantCount: 107, mergeAssistantCount: 5 });
+const phase5LargePersisted = (await phase5LargeAuthority.load()).v2Store.globalEnvelope.payload.scopes.chat.payload;
+assert.equal(phase5LargeBatch, 22, '107/5 现场必须串行完成 22 个真实 committer 批次');
+assert.equal(phase5LargePersisted.operation.lastSuccessfulAssistantCount, 107,
+    '107/5 现场最终成功边界必须推进到第 107 个 assistant');
+assert.equal(phase5LargePersisted.generationSnapshots.length, TODAY_TREND_LIMITS.generationSnapshots,
+    '107/5 现场长期批量生成必须保持固定 12 层 snapshot 上限');
+assert.equal(phase5LargeCasWrites.filter(keys => keys.includes(TODAY_TREND_V2_STORAGE_KEY)
+    && keys.includes(TODAY_TREND_V2_AUTHORITY_KEY)
+    && keys.some(key => key.startsWith(TODAY_TREND_V2_JOURNAL_PREFIX))).length, 22,
+    '107/5 现场每批必须原子提交 store、authority 与 journal');
+assert.equal(phase5LargePhases.filter(phase => phase === 'accepted').length, 22,
+    '107/5 现场每批 journal 必须进入 accepted 终态');
+assert.equal([...phase5LargeHarness.records.keys()].some(key => key.startsWith(TODAY_TREND_V2_JOURNAL_PREFIX)), false,
+    '107/5 现场完成后不得残留开放 journal');
+await phase5LargeAuthority.release({ readV2: true, serveV2: false });
+
+const phase5NoopHarness = createAuthorityHarness();
+const phase5NoopAuthority = createTodayTrendV2Authority({
+    ...phase5NoopHarness, tabId: 'phase-5-noop-owner', BroadcastChannelImpl: undefined,
+});
+await phase5NoopAuthority.acquire({ readV2: true, writeV2: true, initialStore: phase5LargeCanonical });
+const phase5NoopBefore = await phase5NoopAuthority.load();
+await phase5NoopAuthority.release({ readV2: true, serveV2: false });
+const phase5NoopStorage = createTodayTrendStorage({
+    v2Authority: phase5NoopAuthority, storage: memoryStorage(),
+});
+const phase5NoopCommitter = createTodayTrendCommitter({
+    runtime: {}, load: phase5NoopStorage.load, loadCanonical: phase5NoopStorage.loadCanonical,
+    save: phase5NoopStorage.save, storageStatus: phase5NoopStorage.status, journal: null,
+    refreshInjection: async () => ({ failedWrites: 0, failedKeys: [] }),
+});
+const phase5NoopCommitted = await phase5NoopCommitter.commitScope(
+    'chat', scope => scope, null, {
+        canonical: true,
+        refreshInjection: false,
+        expectedScopeRevision: phase5NoopBefore.v2Store.globalEnvelope.payload.scopes.chat.revision,
+    },
+);
+const phase5NoopAfter = await phase5NoopAuthority.load();
+assert.deepEqual(phase5NoopCommitted.scopes.chat, phase5NoopBefore.store.scopes.chat,
+    '无常驻 owner 时重复保存相同 batchDraft 必须作为合法 no-op 提交完成');
+assert.equal(phase5NoopAfter.authority.storeRevision, phase5NoopBefore.authority.storeRevision + 1,
+    '临时 authority 完成 no-op 提交后仍必须原子推进 store revision');
+assert.equal(phase5NoopAfter.authority.scopeRevisionByStorageId.chat,
+    phase5NoopBefore.authority.scopeRevisionByStorageId.chat,
+    'no-op 提交不得错误递增 chat scope revision');
+assert.equal(phase5NoopAfter.authority.ownerTabId, null,
+    '无常驻 owner 的 no-op 提交完成后必须释放临时 authority');
+
+const phase5PhoneCanonical = structuredClone(phase5LargeCanonical);
+const phase5PhoneScopeEnvelope = phase5PhoneCanonical.globalEnvelope.payload.scopes.chat;
+phase5PhoneScopeEnvelope.payload.operation = {
+    ...phase5PhoneScopeEnvelope.payload.operation,
+    batchDraft: { enabled: true, recentAssistantCount: 107, mergeAssistantCount: 5 },
+};
+const phase5PhoneHarness = createAuthorityHarness();
+const phase5PhoneAuthority = createTodayTrendV2Authority({
+    ...phase5PhoneHarness, tabId: 'phase-5-phone-owner', BroadcastChannelImpl: undefined,
+});
+await phase5PhoneAuthority.acquire({ readV2: true, writeV2: true, initialStore: phase5PhoneCanonical });
+const phase5PhoneBefore = await phase5PhoneAuthority.load();
+await phase5PhoneAuthority.release({ readV2: true, serveV2: false });
+const phase5PhoneStorage = createTodayTrendStorage({
+    v2Authority: phase5PhoneAuthority, storage: memoryStorage(),
+});
+let phase5PhoneBatch = 0;
+const phase5PhoneChat = Array.from({ length: 107 }, (_, index) => ({
+    role: 'assistant', content: `手机端 107/5 正文${index + 1}`,
+}));
+const phase5PhoneDeps = {
+    runtime: {}, getStorageId: () => 'chat', getLastMessageId: () => 107,
+    getCtx: () => ({
+        characterId: 'character', characters: { character: { avatar: 'character', name: '小明' } },
+        chat: phase5PhoneChat,
+    }),
+    getCalendarStore: () => ({ version: 1, scopes: { chat: { baseDate: '2025-04-15' } } }),
+    callAI: async () => { throw new Error('手机端 107/5 回归不应调用真实 AI'); },
+    loadTodayTrendStore: phase5PhoneStorage.load,
+    saveTodayTrendStore: phase5PhoneStorage.save,
+    applyBidirectionalInjection: async () => ({ failedWrites: 0, failedKeys: [] }),
+    createTodayTrendCommitter: options => createTodayTrendCommitter({
+        ...options, loadCanonical: phase5PhoneStorage.loadCanonical,
+        storageStatus: phase5PhoneStorage.status, journal: null,
+    }),
+    createTodayTrendGenerationController: () => ({
+        generate: async ({ scope, assistantCount }) => {
+            phase5PhoneBatch += 1;
+            const generatedScope = structuredClone(scope);
+            generatedScope.world.items[0].summary = `手机端第${phase5PhoneBatch}批-${assistantCount}`;
+            return { scope: generatedScope, history: { events: [] } };
+        },
+        initialize: async () => { throw new Error('手机端 107/5 回归不应初始化'); },
+        regenerateRule: async () => { throw new Error('手机端 107/5 回归不应重生成规则'); },
+    }),
+};
+installTodayTrend({}, phase5PhoneDeps);
+const phase5PhoneListeners = [];
+const phase5PhoneContainer = {
+    innerHTML: '', contains: () => true, querySelector: () => null,
+    addEventListener: (type, listener, capture = false) => phase5PhoneListeners.push({ type, listener, capture }),
+    removeEventListener: () => {},
+};
+const phase5PhoneController = createTodayTrendPhoneController({
+    state: { phoneWindow: { querySelector: selector => selector === '.pm-today-trend-page' ? phase5PhoneContainer : null } },
+    container: phase5PhoneContainer, deps: phase5PhoneDeps,
+});
+await phase5PhoneController.render();
+const phase5PhoneForm = {
+    values: new Map([['recentAssistantCount', '107'], ['mergeAssistantCount', '5']]),
+    checkValidity: () => true, reportValidity: () => {},
+};
+const phase5PhoneButton = {
+    disabled: false, dataset: { action: 'today-trend-batch-generate' },
+    closest: selector => selector === 'button[data-action]' ? phase5PhoneButton
+        : selector === 'form[data-today-trend-form="batch-settings"]' ? phase5PhoneForm : null,
+};
+const phase5PhoneFormData = globalThis.FormData;
+globalThis.FormData = class { constructor(form) { this.values = form.values; } get(name) { return this.values.get(name) ?? null; } };
+await phase5PhoneListeners.find(item => item.type === 'click' && item.capture)?.listener({ target: phase5PhoneButton });
+globalThis.FormData = phase5PhoneFormData;
+const phase5PhoneAfter = await phase5PhoneAuthority.load();
+assert.equal(phase5PhoneBatch, 22, '手机端手动批量入口必须在重复保存相同 107/5 草稿后完成 22 批');
+assert.equal(phase5PhoneAfter.v2Store.globalEnvelope.payload.scopes.chat.payload.operation.lastSuccessfulAssistantCount, 107,
+    '手机端手动批量入口必须将成功边界推进到第 107 个 assistant');
+assert.equal(phase5PhoneAfter.authority.scopeRevisionByStorageId.chat,
+    (phase5PhoneBefore.authority.scopeRevisionByStorageId.chat || 0) + 22,
+    '重复草稿 no-op 不得递增 scope revision，后续 22 批必须各递增一次');
+assert.equal(phase5PhoneAfter.authority.storeRevision, phase5PhoneBefore.authority.storeRevision + 23,
+    '手机端真实路径必须包含一次 no-op 草稿保存和 22 次批量 store revision');
+assert.equal(phase5PhoneAfter.authority.ownerTabId, null, '手机端真实路径完成后不得遗留临时 authority owner');
+phase5PhoneController.destroy();
 
 const phase3BatchChat = Array.from({ length: 8 }, (_, index) => ({ role: 'assistant', content: `阶段3批次正文${index + 1}` }));
 let phase3BatchCanonical = structuredClone(batchReadyValidV2);

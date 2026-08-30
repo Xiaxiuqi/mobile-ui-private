@@ -29,27 +29,6 @@ const structurallyEqual = (left, right) => {
         && structurallyEqual(left[key], right[key]));
 };
 
-const scopeDifferenceSummary = (previousPayload, nextPayload) => {
-    if (previousPayload === undefined) return { status: 'created', changedFields: [] };
-    if (nextPayload === undefined) return { status: 'deleted', changedFields: [] };
-    const keys = new Set([...Object.keys(previousPayload), ...Object.keys(nextPayload)]);
-    return {
-        status: 'modified',
-        changedFields: [...keys].filter(key => !structurallyEqual(previousPayload[key], nextPayload[key])).sort(),
-    };
-};
-
-const scopeRevisionMismatch = (declaredScopeIds, actualScopeIds, currentScopes, candidateScopes) => {
-    const scopeDifferences = Object.fromEntries(actualScopeIds.map(storageId => [storageId,
-        scopeDifferenceSummary(currentScopes[storageId]?.payload, candidateScopes[storageId]?.payload),
-    ]));
-    const error = failure('TT_SCOPE_REVISION_MISMATCH', '声明的 scope 变更范围与实际 candidate 不一致');
-    error.declaredScopeIds = declaredScopeIds;
-    error.actualScopeIds = actualScopeIds;
-    error.details = { declaredScopeIds, actualScopeIds, scopeDifferences };
-    return error;
-};
-
 function failure(code, message, cause) {
     const error = new Error(message, cause === undefined ? undefined : { cause });
     error.code = code;
@@ -409,7 +388,7 @@ export function createTodayTrendV2Authority({
             currentScopes[storageId]?.payload, candidateScopes[storageId]?.payload,
         )).sort();
         if (declared && !structurallyEqual([...declared].sort(), actual)) {
-            throw scopeRevisionMismatch([...declared].sort(), actual, currentScopes, candidateScopes);
+            throw failure('TT_SCOPE_REVISION_MISMATCH', '声明的 scope 变更范围与实际 candidate 不一致');
         }
         return { candidate, affectedScopeIds: actual };
     };
