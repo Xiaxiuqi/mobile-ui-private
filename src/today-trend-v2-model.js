@@ -766,26 +766,38 @@ export function validateTodayTrendV2Transition(previousValue, candidateValue) {
     return candidate;
 }
 
-function isPureLegacyProjectionPayload(payload) {
-    return payload.generationSnapshots.length > 0
-        && payload.generationSnapshots.every(snapshot => snapshot.restoreCapability === 'projection-only'
-            && snapshot.checkpointRef === null)
-        && Object.keys(payload.checkpointEntityStore).length === 0
-        && Object.keys(payload.stageDetailsByEvent).length === 0
-        && Object.keys(payload.archivedRemovableDataByEvent).length === 0
-        && Object.keys(payload.removableEntityStateById).length === 0
-        && Object.keys(payload.removableEntityTombstonesById).length === 0
-        && payload.historyRetentionSettings.archivedDetailLatestEventCount === 2
-        && payload.historyRetentionSettings.archivedDetailRetentionFloors === 20
-        && payload.historyRetentionSettings.revision === 1
-        && payload.historyRetentionState.highWaterAssistantCount === null
-        && payload.historyRetentionState.detailPoolRevision === 0
-        && payload.historyRetentionState.retentionPolicyRevision === 1
-        && payload.historyRetentionState.nextArchivedSequence === payload.dynamics.archived.length + 1;
+function describeLegacyProjectionPayloadEligibility(payload) {
+    if (!payload.generationSnapshots.length) return { eligible: false, reason: 'snapshot-missing' };
+    if (!payload.generationSnapshots.every(snapshot => snapshot.restoreCapability === 'projection-only'
+        && snapshot.checkpointRef === null)) return { eligible: false, reason: 'snapshot-not-projection-only' };
+    if (!payload.generationSnapshots.some(snapshot => snapshot.assistantCount === 0)) {
+        return { eligible: false, reason: 'floor-zero-snapshot-missing' };
+    }
+    if (Object.keys(payload.checkpointEntityStore).length) return { eligible: false, reason: 'checkpoint-store-not-empty' };
+    if (Object.keys(payload.stageDetailsByEvent).length) return { eligible: false, reason: 'stage-details-not-empty' };
+    if (Object.keys(payload.archivedRemovableDataByEvent).length) return { eligible: false, reason: 'archived-removable-data-not-empty' };
+    if (Object.keys(payload.removableEntityStateById).length) return { eligible: false, reason: 'removable-entity-state-not-empty' };
+    if (Object.keys(payload.removableEntityTombstonesById).length) return { eligible: false, reason: 'removable-entity-tombstones-not-empty' };
+    if (payload.historyRetentionSettings.archivedDetailLatestEventCount !== 2
+        || payload.historyRetentionSettings.archivedDetailRetentionFloors !== 20
+        || payload.historyRetentionSettings.revision !== 1) return { eligible: false, reason: 'retention-settings-not-default' };
+    if (payload.historyRetentionState.highWaterAssistantCount !== null) return { eligible: false, reason: 'history-high-water-present' };
+    if (payload.historyRetentionState.detailPoolRevision !== 0) return { eligible: false, reason: 'detail-pool-revised' };
+    if (payload.historyRetentionState.retentionPolicyRevision !== 1) return { eligible: false, reason: 'retention-policy-revised' };
+    if (payload.historyRetentionState.nextArchivedSequence !== payload.dynamics.archived.length + 1) {
+        return { eligible: false, reason: 'archived-sequence-inconsistent' };
+    }
+    return { eligible: true, reason: null };
+}
+
+export function describeTodayTrendLegacyBatchBaselineEligibility(currentValue, storageId) {
+    const current = normalizeTodayTrendV2Store(currentValue);
+    const payload = current.globalEnvelope.payload.scopes[storageId]?.payload;
+    return payload ? describeLegacyProjectionPayloadEligibility(payload) : { eligible: false, reason: 'scope-missing' };
 }
 
 function legacyProjectionBaselineForTransition(previousPayload, nextPayload) {
-    if (!isPureLegacyProjectionPayload(previousPayload)) return null;
+    if (!describeLegacyProjectionPayloadEligibility(previousPayload).eligible) return null;
     const legacyBaseline = previousPayload.generationSnapshots.find(snapshot => snapshot.assistantCount === 0);
     const fullBaseline = nextPayload.generationSnapshots.find(snapshot => snapshot.assistantCount === 0
         && snapshot.restoreCapability === 'full');
@@ -1453,7 +1465,8 @@ export function applyTodayTrendGenerationToV2(currentValue, storageId, generated
 export function prepareTodayTrendLegacyBatchBaseline(currentValue, storageId) {
     const current = normalizeTodayTrendV2Store(currentValue);
     const payload = current.globalEnvelope.payload.scopes[storageId]?.payload;
-    if (!payload || !isPureLegacyProjectionPayload(payload)) return null;
+    const eligibility = describeTodayTrendLegacyBatchBaselineEligibility(current, storageId);
+    if (!eligibility.eligible || !payload) return null;
     const snapshot = payload.generationSnapshots.find(item => item.assistantCount === 0);
     if (!snapshot) return null;
     const facade = buildReadOnlyShadow(current);

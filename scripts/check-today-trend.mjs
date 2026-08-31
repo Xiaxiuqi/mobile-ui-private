@@ -21,7 +21,7 @@ import {
 } from '../src/today-trend-v2-authority.js';
 import {
     applyTodayTrendGenerationToV2, applyTodayTrendRerollToV2, buildReadOnlyShadow, diffReadOnlyShadow, evaluateTodayTrendArchivedRetention,
-    copyTodayTrendV2ScopeForBranch, extractArchivedFixedCore, migrateTodayTrendStoreToV2,
+    copyTodayTrendV2ScopeForBranch, describeTodayTrendLegacyBatchBaselineEligibility, extractArchivedFixedCore, migrateTodayTrendStoreToV2,
     normalizeTodayTrendStageProjection, normalizeTodayTrendV2Candidate, normalizeTodayTrendV2Store,
     resolveTodayTrendV2DetailForTarget, resolveTodayTrendV2LatestStage, resolveTodayTrendV2RetentionSettingsState,
     resolveTodayTrendV2UiScope, rollbackTodayTrendV2Scope, saveTodayTrendRetentionSettingsToV2, serializeTodayTrendV2ScopeForGeneration,
@@ -4620,200 +4620,6 @@ assert.equal(phase5LateRuntime.pendingInjectionStore, undefined,
     '取消补偿完成后不得残留 pending injection store');
 await phase5MultiAuthorityWithTrace.release({ readV2: true, serveV2: false });
 
-let phase5LargeCanonical = rollbackTodayTrendV2Scope(batchReadyValidV2, 'chat', 0);
-for (const assistantCount of [3, 6, 9, 12, 15]) {
-    const scope = buildReadOnlyShadow(phase5LargeCanonical).scopes.chat;
-    scope.operation = {
-        ...scope.operation, lastSuccessfulAssistantCount: assistantCount, lastSuccessfulRunAt: assistantCount,
-    };
-    phase5LargeCanonical = applyTodayTrendGenerationToV2(
-        phase5LargeCanonical, 'chat', scope, { events: [] }, { assistantCount, generatedAt: assistantCount },
-    );
-}
-assert.deepEqual(
-    phase5LargeCanonical.globalEnvelope.payload.scopes.chat.payload.generationSnapshots.map(item => item.assistantCount),
-    [0, 3, 6, 9, 12, 15],
-    '107/5 现场回归必须精确建立已采集的 generationSnapshots 楼层序列',
-);
-const phase5LargeHarness = createAuthorityHarness();
-const phase5LargeCasWrites = [];
-const phase5LargeAuthority = createTodayTrendV2Authority({
-    readEntry: phase5LargeHarness.readEntry,
-    compareAndSwap: async request => {
-        phase5LargeCasWrites.push(request.writes.map(entry => entry.key));
-        return phase5LargeHarness.compareAndSwap(request);
-    },
-    tabId: 'phase-5-large-owner', BroadcastChannelImpl: undefined,
-});
-await phase5LargeAuthority.acquire({ readV2: true, writeV2: true, initialStore: phase5LargeCanonical });
-let phase5LargeNow = 15000;
-const phase5LargePhases = [];
-const phase5LargeJournal = createTodayTrendJournal({
-    listKeys: async () => [...phase5LargeHarness.records.keys()], readEntry: phase5LargeHarness.readEntry,
-    writeEntry: async (key, value) => {
-        phase5LargeHarness.records.set(key, structuredClone(value));
-        phase5LargePhases.push(value.phase);
-        return true;
-    },
-    deleteEntry: async key => phase5LargeHarness.records.delete(key), now: () => ++phase5LargeNow,
-    transactionId: () => `phase-5-large-${phase5LargeNow}`,
-});
-const phase5LargeStorage = createTodayTrendStorage({
-    v2Authority: phase5LargeAuthority, journal: phase5LargeJournal, storage: memoryStorage(),
-});
-let phase5LargeBatch = 0;
-const phase5LargeCommitter = createTodayTrendCommitter({
-    runtime: {}, load: phase5LargeStorage.load, loadCanonical: phase5LargeStorage.loadCanonical,
-    save: phase5LargeStorage.save, storageStatus: phase5LargeStorage.status, journal: phase5LargeJournal,
-    refreshInjection: async () => ({ failedWrites: 0, failedKeys: [] }),
-});
-const phase5LargeChat = Array.from({ length: 107 }, (_, index) => ({
-    role: 'assistant', content: `107/5 现场正文${index + 1}`,
-}));
-const phase5LargeScheduler = createTodayTrendScheduler({
-    controller: { generate: async ({ scope, assistantCount }) => {
-        phase5LargeBatch += 1;
-        const generatedScope = structuredClone(scope);
-        generatedScope.world.items[0].summary = `107/5 第${phase5LargeBatch}批-${assistantCount}`;
-        return { scope: generatedScope, history: { events: [] } };
-    } },
-    committer: phase5LargeCommitter, getStore: phase5LargeStorage.load, getStorageId: () => 'chat',
-    getChat: () => phase5LargeChat,
-    getCalendarStore: () => ({ version: 1, scopes: { chat: { baseDate: '2025-04-15' } } }),
-    getFloor: () => 107, commitFeedbackMs: 0,
-});
-await phase5LargeScheduler.manual({ batchEnabled: true, recentAssistantCount: 107, mergeAssistantCount: 5 });
-const phase5LargePersisted = (await phase5LargeAuthority.load()).v2Store.globalEnvelope.payload.scopes.chat.payload;
-assert.equal(phase5LargeBatch, 22, '107/5 现场必须串行完成 22 个真实 committer 批次');
-assert.equal(phase5LargePersisted.operation.lastSuccessfulAssistantCount, 107,
-    '107/5 现场最终成功边界必须推进到第 107 个 assistant');
-assert.equal(phase5LargePersisted.generationSnapshots.length, TODAY_TREND_LIMITS.generationSnapshots,
-    '107/5 现场长期批量生成必须保持固定 12 层 snapshot 上限');
-assert.equal(phase5LargeCasWrites.filter(keys => keys.includes(TODAY_TREND_V2_STORAGE_KEY)
-    && keys.includes(TODAY_TREND_V2_AUTHORITY_KEY)
-    && keys.some(key => key.startsWith(TODAY_TREND_V2_JOURNAL_PREFIX))).length, 22,
-    '107/5 现场每批必须原子提交 store、authority 与 journal');
-assert.equal(phase5LargePhases.filter(phase => phase === 'accepted').length, 22,
-    '107/5 现场每批 journal 必须进入 accepted 终态');
-assert.equal([...phase5LargeHarness.records.keys()].some(key => key.startsWith(TODAY_TREND_V2_JOURNAL_PREFIX)), false,
-    '107/5 现场完成后不得残留开放 journal');
-await phase5LargeAuthority.release({ readV2: true, serveV2: false });
-
-const phase5NoopHarness = createAuthorityHarness();
-const phase5NoopAuthority = createTodayTrendV2Authority({
-    ...phase5NoopHarness, tabId: 'phase-5-noop-owner', BroadcastChannelImpl: undefined,
-});
-await phase5NoopAuthority.acquire({ readV2: true, writeV2: true, initialStore: phase5LargeCanonical });
-const phase5NoopBefore = await phase5NoopAuthority.load();
-await phase5NoopAuthority.release({ readV2: true, serveV2: false });
-const phase5NoopStorage = createTodayTrendStorage({
-    v2Authority: phase5NoopAuthority, storage: memoryStorage(),
-});
-const phase5NoopCommitter = createTodayTrendCommitter({
-    runtime: {}, load: phase5NoopStorage.load, loadCanonical: phase5NoopStorage.loadCanonical,
-    save: phase5NoopStorage.save, storageStatus: phase5NoopStorage.status, journal: null,
-    refreshInjection: async () => ({ failedWrites: 0, failedKeys: [] }),
-});
-const phase5NoopCommitted = await phase5NoopCommitter.commitScope(
-    'chat', scope => scope, null, {
-        canonical: true,
-        refreshInjection: false,
-        expectedScopeRevision: phase5NoopBefore.v2Store.globalEnvelope.payload.scopes.chat.revision,
-    },
-);
-const phase5NoopAfter = await phase5NoopAuthority.load();
-assert.deepEqual(phase5NoopCommitted.scopes.chat, phase5NoopBefore.store.scopes.chat,
-    '无常驻 owner 时重复保存相同 batchDraft 必须作为合法 no-op 提交完成');
-assert.equal(phase5NoopAfter.authority.storeRevision, phase5NoopBefore.authority.storeRevision + 1,
-    '临时 authority 完成 no-op 提交后仍必须原子推进 store revision');
-assert.equal(phase5NoopAfter.authority.scopeRevisionByStorageId.chat,
-    phase5NoopBefore.authority.scopeRevisionByStorageId.chat,
-    'no-op 提交不得错误递增 chat scope revision');
-assert.equal(phase5NoopAfter.authority.ownerTabId, null,
-    '无常驻 owner 的 no-op 提交完成后必须释放临时 authority');
-
-const phase5PhoneCanonical = structuredClone(phase5LargeCanonical);
-const phase5PhoneScopeEnvelope = phase5PhoneCanonical.globalEnvelope.payload.scopes.chat;
-phase5PhoneScopeEnvelope.payload.operation = {
-    ...phase5PhoneScopeEnvelope.payload.operation,
-    batchDraft: { enabled: true, recentAssistantCount: 107, mergeAssistantCount: 5 },
-};
-const phase5PhoneHarness = createAuthorityHarness();
-const phase5PhoneAuthority = createTodayTrendV2Authority({
-    ...phase5PhoneHarness, tabId: 'phase-5-phone-owner', BroadcastChannelImpl: undefined,
-});
-await phase5PhoneAuthority.acquire({ readV2: true, writeV2: true, initialStore: phase5PhoneCanonical });
-const phase5PhoneBefore = await phase5PhoneAuthority.load();
-await phase5PhoneAuthority.release({ readV2: true, serveV2: false });
-const phase5PhoneStorage = createTodayTrendStorage({
-    v2Authority: phase5PhoneAuthority, storage: memoryStorage(),
-});
-let phase5PhoneBatch = 0;
-const phase5PhoneChat = Array.from({ length: 107 }, (_, index) => ({
-    role: 'assistant', content: `手机端 107/5 正文${index + 1}`,
-}));
-const phase5PhoneDeps = {
-    runtime: {}, getStorageId: () => 'chat', getLastMessageId: () => 107,
-    getCtx: () => ({
-        characterId: 'character', characters: { character: { avatar: 'character', name: '小明' } },
-        chat: phase5PhoneChat,
-    }),
-    getCalendarStore: () => ({ version: 1, scopes: { chat: { baseDate: '2025-04-15' } } }),
-    callAI: async () => { throw new Error('手机端 107/5 回归不应调用真实 AI'); },
-    loadTodayTrendStore: phase5PhoneStorage.load,
-    saveTodayTrendStore: phase5PhoneStorage.save,
-    applyBidirectionalInjection: async () => ({ failedWrites: 0, failedKeys: [] }),
-    createTodayTrendCommitter: options => createTodayTrendCommitter({
-        ...options, loadCanonical: phase5PhoneStorage.loadCanonical,
-        storageStatus: phase5PhoneStorage.status, journal: null,
-    }),
-    createTodayTrendGenerationController: () => ({
-        generate: async ({ scope, assistantCount }) => {
-            phase5PhoneBatch += 1;
-            const generatedScope = structuredClone(scope);
-            generatedScope.world.items[0].summary = `手机端第${phase5PhoneBatch}批-${assistantCount}`;
-            return { scope: generatedScope, history: { events: [] } };
-        },
-        initialize: async () => { throw new Error('手机端 107/5 回归不应初始化'); },
-        regenerateRule: async () => { throw new Error('手机端 107/5 回归不应重生成规则'); },
-    }),
-};
-installTodayTrend({}, phase5PhoneDeps);
-const phase5PhoneListeners = [];
-const phase5PhoneContainer = {
-    innerHTML: '', contains: () => true, querySelector: () => null,
-    addEventListener: (type, listener, capture = false) => phase5PhoneListeners.push({ type, listener, capture }),
-    removeEventListener: () => {},
-};
-const phase5PhoneController = createTodayTrendPhoneController({
-    state: { phoneWindow: { querySelector: selector => selector === '.pm-today-trend-page' ? phase5PhoneContainer : null } },
-    container: phase5PhoneContainer, deps: phase5PhoneDeps,
-});
-await phase5PhoneController.render();
-const phase5PhoneForm = {
-    values: new Map([['recentAssistantCount', '107'], ['mergeAssistantCount', '5']]),
-    checkValidity: () => true, reportValidity: () => {},
-};
-const phase5PhoneButton = {
-    disabled: false, dataset: { action: 'today-trend-batch-generate' },
-    closest: selector => selector === 'button[data-action]' ? phase5PhoneButton
-        : selector === 'form[data-today-trend-form="batch-settings"]' ? phase5PhoneForm : null,
-};
-const phase5PhoneFormData = globalThis.FormData;
-globalThis.FormData = class { constructor(form) { this.values = form.values; } get(name) { return this.values.get(name) ?? null; } };
-await phase5PhoneListeners.find(item => item.type === 'click' && item.capture)?.listener({ target: phase5PhoneButton });
-globalThis.FormData = phase5PhoneFormData;
-const phase5PhoneAfter = await phase5PhoneAuthority.load();
-assert.equal(phase5PhoneBatch, 22, '手机端手动批量入口必须在重复保存相同 107/5 草稿后完成 22 批');
-assert.equal(phase5PhoneAfter.v2Store.globalEnvelope.payload.scopes.chat.payload.operation.lastSuccessfulAssistantCount, 107,
-    '手机端手动批量入口必须将成功边界推进到第 107 个 assistant');
-assert.equal(phase5PhoneAfter.authority.scopeRevisionByStorageId.chat,
-    (phase5PhoneBefore.authority.scopeRevisionByStorageId.chat || 0) + 22,
-    '重复草稿 no-op 不得递增 scope revision，后续 22 批必须各递增一次');
-assert.equal(phase5PhoneAfter.authority.storeRevision, phase5PhoneBefore.authority.storeRevision + 23,
-    '手机端真实路径必须包含一次 no-op 草稿保存和 22 次批量 store revision');
-assert.equal(phase5PhoneAfter.authority.ownerTabId, null, '手机端真实路径完成后不得遗留临时 authority owner');
-phase5PhoneController.destroy();
 
 const phase3BatchChat = Array.from({ length: 8 }, (_, index) => ({ role: 'assistant', content: `阶段3批次正文${index + 1}` }));
 let phase3BatchCanonical = structuredClone(batchReadyValidV2);
@@ -4960,6 +4766,38 @@ assert.deepEqual(phase3InitialBatchCanonical.globalEnvelope.payload.scopes.chat.
     .map(snapshot => [snapshot.assistantCount, snapshot.restoreCapability]), [[0, 'full'], [2, 'full']],
     '首次批量生成必须在同一提交中保留 floor 0 与首批的完整 checkpoint');
 
+const phase3RuntimeBatchFixture = Object.freeze({ assistantCount: 107, recentAssistantCount: 107, mergeAssistantCount: 4 });
+let phase3RuntimeBatchCanonical = structuredClone(migratedValidV2);
+let phase3RuntimeBatchAiCalls = 0;
+const phase3RuntimeBatchScheduler = createTodayTrendScheduler({
+    controller: { generate: async ({ scope }) => {
+        phase3RuntimeBatchAiCalls += 1;
+        return { scope, history: { events: [] } };
+    } },
+    committer: {
+        supportsCanonical: true, invalidateCommits: () => {},
+        loadCanonical: async () => structuredClone(phase3RuntimeBatchCanonical),
+        commitStore: async mutate => {
+            const candidate = await mutate(structuredClone(phase3RuntimeBatchCanonical));
+            phase3RuntimeBatchCanonical = validateTodayTrendV2Transition(phase3RuntimeBatchCanonical, candidate);
+            return buildReadOnlyShadow(phase3RuntimeBatchCanonical);
+        },
+    },
+    getStore: async () => buildReadOnlyShadow(phase3RuntimeBatchCanonical), getStorageId: () => 'chat',
+    getChat: () => Array.from({ length: phase3RuntimeBatchFixture.assistantCount }, () => ({ role: 'assistant', content: '运行时批处理正文' })),
+});
+await phase3RuntimeBatchScheduler.manual({ batchEnabled: true,
+    recentAssistantCount: phase3RuntimeBatchFixture.recentAssistantCount,
+    mergeAssistantCount: phase3RuntimeBatchFixture.mergeAssistantCount,
+});
+assert.equal(phase3RuntimeBatchAiCalls,
+    Math.ceil(phase3RuntimeBatchFixture.recentAssistantCount / phase3RuntimeBatchFixture.mergeAssistantCount),
+    '批处理次数必须由运行时 R/M 计算，不得使用固定夹具批数');
+assert.equal(phase3RuntimeBatchCanonical.globalEnvelope.payload.scopes.chat.payload.operation.lastSuccessfulAssistantCount,
+    phase3RuntimeBatchFixture.assistantCount, '运行时 C/R/M 批处理必须推进到真实聊天末楼层');
+
+assert.deepEqual(describeTodayTrendLegacyBatchBaselineEligibility(migratedValidV2, 'chat'), { eligible: true, reason: null },
+    '纯迁移 projection scope 必须被识别为可安全补建 floor 0 checkpoint');
 let phase3MissingResetCanonical = structuredClone(migratedValidV2);
 phase3MissingResetCanonical.globalEnvelope.payload.scopes.chat.payload.generationSnapshots = phase3MissingResetCanonical
     .globalEnvelope.payload.scopes.chat.payload.generationSnapshots.map(snapshot => ({
@@ -4981,10 +4819,83 @@ const phase3MissingResetScheduler = createTodayTrendScheduler({
     getChat: () => Array.from({ length: 2 }, () => ({ role: 'assistant', content: '缺 checkpoint 批次正文' })),
 });
 await assert.rejects(() => phase3MissingResetScheduler.manual({ batchEnabled: true, recentAssistantCount: 2, mergeAssistantCount: 2 }),
-    error => error?.code === 'TT_BATCH_RESET_CHECKPOINT_MISSING',
+    error => error?.code === 'TT_BATCH_RESET_CHECKPOINT_MISSING' && error?.stage === '首批预检'
+        && error?.reason === 'history-high-water-present' && /历史已记录生成高水位/.test(error.message),
     '已有非零历史但缺少严格早于窗口的 full checkpoint 必须 fail-closed');
 assert.equal(phase3MissingResetAiCalls, 0, '已有非零历史但缺少完整回退基线时不得调用 AI');
 assert.equal(phase3MissingResetCommitCalls, 0, '已有非零历史但缺少完整回退基线时不得提交 candidate');
+
+const phase3RemovedLegacyCanonical = structuredClone(migratedValidV2);
+const phase3RemovedLegacyPayload = phase3RemovedLegacyCanonical.globalEnvelope.payload.scopes.chat.payload;
+phase3RemovedLegacyPayload.removableEntityTombstonesById = {
+    'day:service:2025-04-15': {
+        entityType: 'day-summary', entityId: 'day:service:2025-04-15', eventId: 'service', state: 'removed',
+        removalReason: 'archived-retention', removedAtAssistantCount: 2, policyRevision: 1,
+    },
+};
+phase3RemovedLegacyPayload.removableEntityStateById = structuredClone(phase3RemovedLegacyPayload.removableEntityTombstonesById);
+assert.deepEqual(describeTodayTrendLegacyBatchBaselineEligibility(phase3RemovedLegacyCanonical, 'chat'), {
+    eligible: false, reason: 'removable-entity-state-not-empty',
+}, '含 removed lifecycle 的迁移 scope 不得被自动补建为 floor 0 checkpoint');
+
+const assertLegacyBatchBaselineReason = (store, reason, message) => assert.deepEqual(
+    describeTodayTrendLegacyBatchBaselineEligibility(store, 'chat'), { eligible: false, reason }, message,
+);
+const phase3NoSnapshotLegacyCanonical = structuredClone(migratedValidV2);
+phase3NoSnapshotLegacyCanonical.globalEnvelope.payload.scopes.chat.payload.generationSnapshots = [];
+assertLegacyBatchBaselineReason(phase3NoSnapshotLegacyCanonical, 'snapshot-missing',
+    '空迁移快照不得自动补建 floor 0 checkpoint');
+const phase3NoFloorZeroLegacyCanonical = structuredClone(migratedValidV2);
+phase3NoFloorZeroLegacyCanonical.globalEnvelope.payload.scopes.chat.payload.generationSnapshots[0].assistantCount = 1;
+assertLegacyBatchBaselineReason(phase3NoFloorZeroLegacyCanonical, 'floor-zero-snapshot-missing',
+    '没有既有 floor 0 快照不得从当前 scope 伪造 checkpoint');
+assertLegacyBatchBaselineReason(batchBaselineValidV2, 'snapshot-not-projection-only',
+    '已有 full snapshot 的 canonical scope 不得被误认作 legacy projection baseline');
+assertLegacyBatchBaselineReason(normalizedPhase4Available, 'stage-details-not-empty',
+    '已保留 stage detail 的 scope 不得自动补建 floor 0 checkpoint');
+assertLegacyBatchBaselineReason(normalizedPhase4Manifest, 'archived-removable-data-not-empty',
+    '已保留 archived removable data 的 scope 不得自动补建 floor 0 checkpoint');
+const phase3RetentionLegacyCanonical = structuredClone(migratedValidV2);
+phase3RetentionLegacyCanonical.globalEnvelope.payload.scopes.chat.payload.historyRetentionSettings.archivedDetailRetentionFloors = 21;
+assertLegacyBatchBaselineReason(phase3RetentionLegacyCanonical, 'retention-settings-not-default',
+    '非默认 retention 设置的 scope 不得自动补建 floor 0 checkpoint');
+const phase3DetailPoolLegacyCanonical = structuredClone(migratedValidV2);
+phase3DetailPoolLegacyCanonical.globalEnvelope.payload.scopes.chat.payload.historyRetentionState.detailPoolRevision = 1;
+assertLegacyBatchBaselineReason(phase3DetailPoolLegacyCanonical, 'detail-pool-revised',
+    '已变更 detail pool 的 scope 不得自动补建 floor 0 checkpoint');
+const phase3RetentionPolicyLegacyCanonical = structuredClone(migratedValidV2);
+phase3RetentionPolicyLegacyCanonical.globalEnvelope.payload.scopes.chat.payload.historyRetentionState.retentionPolicyRevision = 2;
+assertLegacyBatchBaselineReason(phase3RetentionPolicyLegacyCanonical, 'retention-policy-revised',
+    '已变更 retention policy 的 scope 不得自动补建 floor 0 checkpoint');
+const phase3SequenceLegacyCanonical = structuredClone(migratedValidV2);
+phase3SequenceLegacyCanonical.globalEnvelope.payload.scopes.chat.payload.historyRetentionState.nextArchivedSequence += 1;
+assertLegacyBatchBaselineReason(phase3SequenceLegacyCanonical, 'archived-sequence-inconsistent',
+    '归档序号不连续的 scope 不得自动补建 floor 0 checkpoint');
+
+let phase3CommitRevalidationCanonical = structuredClone(migratedValidV2);
+let phase3CommitRevalidationAiCalls = 0;
+const phase3CommitRevalidationScheduler = createTodayTrendScheduler({
+    controller: { generate: async ({ scope }) => {
+        phase3CommitRevalidationAiCalls += 1;
+        return { scope, history: { events: [] } };
+    } },
+    committer: {
+        supportsCanonical: true, invalidateCommits: () => {},
+        loadCanonical: async () => structuredClone(phase3CommitRevalidationCanonical),
+        commitStore: async mutate => {
+            const drifted = structuredClone(phase3CommitRevalidationCanonical);
+            drifted.globalEnvelope.payload.scopes.chat.payload.historyRetentionState.highWaterAssistantCount = 1;
+            return mutate(drifted);
+        },
+    },
+    getStore: async () => buildReadOnlyShadow(phase3CommitRevalidationCanonical), getStorageId: () => 'chat',
+    getChat: () => Array.from({ length: 2 }, () => ({ role: 'assistant', content: '提交期竞态正文' })),
+});
+await assert.rejects(() => phase3CommitRevalidationScheduler.manual({ batchEnabled: true, recentAssistantCount: 2, mergeAssistantCount: 2 }),
+    error => error?.code === 'TT_BATCH_RESET_CHECKPOINT_MISSING' && error?.stage === '提交期并发重验证'
+        && error?.reason === 'history-high-water-present',
+    '首批生成后 canonical 历史变化必须以提交期重验证失败明确拒绝');
+assert.equal(phase3CommitRevalidationAiCalls, 1, '提交期重验证发生在首批 AI 生成之后');
 
 let phase3ReorderedCanonical = structuredClone(batchReadyValidV2);
 let phase3ReorderedAiCalls = 0;

@@ -11207,11 +11207,33 @@ ${entry2.content}` : entry2.content;
     }
     return candidate;
   }
-  function isPureLegacyProjectionPayload(payload) {
-    return payload.generationSnapshots.length > 0 && payload.generationSnapshots.every((snapshot) => snapshot.restoreCapability === "projection-only" && snapshot.checkpointRef === null) && Object.keys(payload.checkpointEntityStore).length === 0 && Object.keys(payload.stageDetailsByEvent).length === 0 && Object.keys(payload.archivedRemovableDataByEvent).length === 0 && Object.keys(payload.removableEntityStateById).length === 0 && Object.keys(payload.removableEntityTombstonesById).length === 0 && payload.historyRetentionSettings.archivedDetailLatestEventCount === 2 && payload.historyRetentionSettings.archivedDetailRetentionFloors === 20 && payload.historyRetentionSettings.revision === 1 && payload.historyRetentionState.highWaterAssistantCount === null && payload.historyRetentionState.detailPoolRevision === 0 && payload.historyRetentionState.retentionPolicyRevision === 1 && payload.historyRetentionState.nextArchivedSequence === payload.dynamics.archived.length + 1;
+  function describeLegacyProjectionPayloadEligibility(payload) {
+    if (!payload.generationSnapshots.length) return { eligible: false, reason: "snapshot-missing" };
+    if (!payload.generationSnapshots.every((snapshot) => snapshot.restoreCapability === "projection-only" && snapshot.checkpointRef === null)) return { eligible: false, reason: "snapshot-not-projection-only" };
+    if (!payload.generationSnapshots.some((snapshot) => snapshot.assistantCount === 0)) {
+      return { eligible: false, reason: "floor-zero-snapshot-missing" };
+    }
+    if (Object.keys(payload.checkpointEntityStore).length) return { eligible: false, reason: "checkpoint-store-not-empty" };
+    if (Object.keys(payload.stageDetailsByEvent).length) return { eligible: false, reason: "stage-details-not-empty" };
+    if (Object.keys(payload.archivedRemovableDataByEvent).length) return { eligible: false, reason: "archived-removable-data-not-empty" };
+    if (Object.keys(payload.removableEntityStateById).length) return { eligible: false, reason: "removable-entity-state-not-empty" };
+    if (Object.keys(payload.removableEntityTombstonesById).length) return { eligible: false, reason: "removable-entity-tombstones-not-empty" };
+    if (payload.historyRetentionSettings.archivedDetailLatestEventCount !== 2 || payload.historyRetentionSettings.archivedDetailRetentionFloors !== 20 || payload.historyRetentionSettings.revision !== 1) return { eligible: false, reason: "retention-settings-not-default" };
+    if (payload.historyRetentionState.highWaterAssistantCount !== null) return { eligible: false, reason: "history-high-water-present" };
+    if (payload.historyRetentionState.detailPoolRevision !== 0) return { eligible: false, reason: "detail-pool-revised" };
+    if (payload.historyRetentionState.retentionPolicyRevision !== 1) return { eligible: false, reason: "retention-policy-revised" };
+    if (payload.historyRetentionState.nextArchivedSequence !== payload.dynamics.archived.length + 1) {
+      return { eligible: false, reason: "archived-sequence-inconsistent" };
+    }
+    return { eligible: true, reason: null };
+  }
+  function describeTodayTrendLegacyBatchBaselineEligibility(currentValue, storageId) {
+    const current = normalizeTodayTrendV2Store(currentValue);
+    const payload = current.globalEnvelope.payload.scopes[storageId]?.payload;
+    return payload ? describeLegacyProjectionPayloadEligibility(payload) : { eligible: false, reason: "scope-missing" };
   }
   function legacyProjectionBaselineForTransition(previousPayload, nextPayload) {
-    if (!isPureLegacyProjectionPayload(previousPayload)) return null;
+    if (!describeLegacyProjectionPayloadEligibility(previousPayload).eligible) return null;
     const legacyBaseline = previousPayload.generationSnapshots.find((snapshot) => snapshot.assistantCount === 0);
     const fullBaseline = nextPayload.generationSnapshots.find((snapshot) => snapshot.assistantCount === 0 && snapshot.restoreCapability === "full");
     const latest = nextPayload.generationSnapshots.at(-1);
@@ -11884,7 +11906,8 @@ ${entry2.content}` : entry2.content;
   function prepareTodayTrendLegacyBatchBaseline(currentValue, storageId) {
     const current = normalizeTodayTrendV2Store(currentValue);
     const payload = current.globalEnvelope.payload.scopes[storageId]?.payload;
-    if (!payload || !isPureLegacyProjectionPayload(payload)) return null;
+    const eligibility = describeTodayTrendLegacyBatchBaselineEligibility(current, storageId);
+    if (!eligibility.eligible || !payload) return null;
     const snapshot = payload.generationSnapshots.find((item) => item.assistantCount === 0);
     if (!snapshot) return null;
     const facade = buildReadOnlyShadow(current);
@@ -26232,6 +26255,25 @@ ${targetInstruction}`
 
   // src/today-trend-scheduler.js
   var cancelled = () => Object.assign(new Error("\u4ECA\u65E5\u98CE\u5411\u751F\u6210\u5DF2\u53D6\u6D88"), { name: "AbortError" });
+  var legacyBaselineReasonLabel = Object.freeze({
+    "scope-missing": "\u5F53\u524D\u804A\u5929\u7684 canonical scope \u4E0D\u5B58\u5728",
+    "snapshot-missing": "\u5386\u53F2\u5FEB\u7167\u4E3A\u7A7A",
+    "snapshot-not-projection-only": "\u5386\u53F2\u5FEB\u7167\u4E0D\u5168\u662F\u65E0 checkpoint \u7684\u8FC1\u79FB\u6295\u5F71",
+    "floor-zero-snapshot-missing": "\u7F3A\u5C11\u697C\u5C42 0 \u7684\u8FC1\u79FB\u5FEB\u7167",
+    "checkpoint-store-not-empty": "\u5DF2\u5B58\u5728 checkpoint \u5B9E\u4F53",
+    "stage-details-not-empty": "\u5DF2\u4FDD\u7559\u4E8B\u4EF6\u8BE6\u60C5",
+    "archived-removable-data-not-empty": "\u5DF2\u4FDD\u7559\u53EF\u79FB\u9664\u5F52\u6863\u6570\u636E",
+    "removable-entity-state-not-empty": "\u5DF2\u8BB0\u5F55\u53EF\u79FB\u9664\u5B9E\u4F53\u72B6\u6001",
+    "removable-entity-tombstones-not-empty": "\u5DF2\u8BB0\u5F55\u4E0D\u53EF\u9006\u5B9E\u4F53 tombstone",
+    "retention-settings-not-default": "\u5386\u53F2\u7559\u5B58\u8BBE\u7F6E\u4E0D\u662F\u8FC1\u79FB\u9ED8\u8BA4\u503C",
+    "history-high-water-present": "\u5386\u53F2\u5DF2\u8BB0\u5F55\u751F\u6210\u9AD8\u6C34\u4F4D",
+    "detail-pool-revised": "\u8BE6\u60C5\u6C60\u5DF2\u53D1\u751F\u53D8\u66F4",
+    "retention-policy-revised": "\u5386\u53F2\u7559\u5B58\u7B56\u7565\u5DF2\u53D1\u751F\u53D8\u66F4",
+    "archived-sequence-inconsistent": "\u5F52\u6863\u5E8F\u53F7\u4E0E\u5386\u53F2\u4E0D\u8FDE\u7EED"
+  });
+  var missingLegacyBatchBaseline = (stage, reason, windowStart) => Object.assign(new Error(
+    `\u6279\u91CF\u66F4\u65B0${stage}\u7F3A\u5C11\u65E9\u4E8E\u697C\u5C42 ${windowStart} \u7684\u5B8C\u6574\u56DE\u9000 checkpoint\uFF1A${legacyBaselineReasonLabel[reason] || "\u8FC1\u79FB\u5386\u53F2\u65E0\u6CD5\u5B89\u5168\u91CD\u5EFA"}\u3002\u8BF7\u5728 APP \u603B\u8BBE\u7F6E\u4E2D\u91CD\u5EFA\u4ECA\u65E5\u98CE\u5411\u540E\u91CD\u8BD5\u3002`
+  ), { code: "TT_BATCH_RESET_CHECKPOINT_MISSING", stage, reason });
   var staleCalendar = () => Object.assign(new Error("\u65E5\u5386\u65E5\u671F\u5728\u751F\u6210\u671F\u95F4\u5DF2\u53D8\u5316\uFF0C\u8FDF\u5230\u7ED3\u679C\u5DF2\u4E22\u5F03"), {
     name: "AbortError",
     code: "TT_DATE_DRIFT"
@@ -26666,9 +26708,11 @@ ${targetInstruction}`
               if (!resetSnapshot) {
                 generationCanonical = prepareTodayTrendLegacyBatchBaseline(canonical3, id2);
                 if (!generationCanonical) {
-                  throw Object.assign(new Error(`\u6279\u91CF\u66F4\u65B0\u7F3A\u5C11\u65E9\u4E8E\u697C\u5C42 ${historyPlan.windowStart} \u7684\u5B8C\u6574\u56DE\u9000 checkpoint`), {
-                    code: "TT_BATCH_RESET_CHECKPOINT_MISSING"
-                  });
+                  throw missingLegacyBatchBaseline(
+                    "\u9996\u6279\u9884\u68C0",
+                    describeTodayTrendLegacyBatchBaselineEligibility(canonical3, id2).reason,
+                    historyPlan.windowStart
+                  );
                 }
                 batchResetFloor = 0;
                 initializeBatchBaseline = true;
@@ -26725,9 +26769,11 @@ ${targetInstruction}`
                 if (initializeBatchBaseline) {
                   const baseline = prepareTodayTrendLegacyBatchBaseline(store, id2);
                   if (!baseline) {
-                    throw Object.assign(new Error("\u6279\u91CF\u66F4\u65B0 legacy \u56DE\u9000 checkpoint \u4E0D\u53EF\u7528"), {
-                      code: "TT_BATCH_RESET_CHECKPOINT_MISSING"
-                    });
+                    throw missingLegacyBatchBaseline(
+                      "\u63D0\u4EA4\u671F\u5E76\u53D1\u91CD\u9A8C\u8BC1",
+                      describeTodayTrendLegacyBatchBaselineEligibility(store, id2).reason,
+                      historyPlan.windowStart
+                    );
                   }
                   return applyTodayTrendRerollToV2(
                     baseline,
