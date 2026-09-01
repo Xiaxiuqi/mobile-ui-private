@@ -1,30 +1,11 @@
 import { appendTodayTrendGenerationSnapshot, rollbackTodayTrendScope } from './today-trend-model.js';
 import { calendarReferenceDate, calendarScopeFor, formatCalendarDate } from './calendar-model.js';
 import {
-    applyTodayTrendGenerationToV2, applyTodayTrendRerollToV2, buildReadOnlyShadow, describeTodayTrendLegacyBatchBaselineEligibility,
-    prepareTodayTrendLegacyBatchBaseline, rollbackTodayTrendV2Scope,
+    applyTodayTrendGenerationToV2, applyTodayTrendRerollToV2, buildReadOnlyShadow,
+    replaceTodayTrendV2ScopeWithBatchReset, rollbackTodayTrendV2Scope,
 } from './today-trend-v2-model.js';
 
 const cancelled = () => Object.assign(new Error('今日风向生成已取消'), { name: 'AbortError' });
-const legacyBaselineReasonLabel = Object.freeze({
-    'scope-missing': '当前聊天的 canonical scope 不存在',
-    'snapshot-missing': '历史快照为空',
-    'snapshot-not-projection-only': '历史快照不全是无 checkpoint 的迁移投影',
-    'floor-zero-snapshot-missing': '缺少楼层 0 的迁移快照',
-    'checkpoint-store-not-empty': '已存在 checkpoint 实体',
-    'stage-details-not-empty': '已保留事件详情',
-    'archived-removable-data-not-empty': '已保留可移除归档数据',
-    'removable-entity-state-not-empty': '已记录可移除实体状态',
-    'removable-entity-tombstones-not-empty': '已记录不可逆实体 tombstone',
-    'retention-settings-not-default': '历史留存设置不是迁移默认值',
-    'history-high-water-present': '历史已记录生成高水位',
-    'detail-pool-revised': '详情池已发生变更',
-    'retention-policy-revised': '历史留存策略已发生变更',
-    'archived-sequence-inconsistent': '归档序号与历史不连续',
-});
-const missingLegacyBatchBaseline = (stage, reason, windowStart) => Object.assign(new Error(
-    `批量更新${stage}缺少早于楼层 ${windowStart} 的完整回退 checkpoint：${legacyBaselineReasonLabel[reason] || '迁移历史无法安全重建'}。请在 APP 总设置中重建今日风向后重试。`,
-), { code: 'TT_BATCH_RESET_CHECKPOINT_MISSING', stage, reason });
 const staleCalendar = () => Object.assign(new Error('日历日期在生成期间已变化，迟到结果已丢弃'), {
     name: 'AbortError', code: 'TT_DATE_DRIFT',
 });
@@ -419,6 +400,30 @@ export function createTodayTrendScheduler({
                 if (!useCanonical || typeof committer.loadCanonical !== 'function') {
                     throw Object.assign(new Error('今日风向批处理需要 canonical 提交器'), { code: 'TT_V2_REQUIRED' });
                 }
+                const initialCanonical = await committer.loadCanonical();
+                if (!isActive(task)) throw cancelled();
+                const initialFacade = buildReadOnlyShadow(initialCanonical);
+                const initialScope = initialFacade.scopes[id];
+                const initialPreset = initialFacade.presets?.[initialScope?.presetId];
+                const initialStoreRevision = initialCanonical.globalEnvelope.revision;
+                const initialScopeRevision = initialCanonical.globalEnvelope.payload.scopes[id]?.revision;
+                if (!initialScope || !initialPreset) throw new Error('当前聊天尚未今日风向');
+                const resetCommitted = await committer.commitStore(store => {
+                    if (historyMessageDigest(getChat()) !== historyPlan.sourceDigest) {
+                        throw invalidHistoryInput('历史正文窗口消息源在批量更新启动期间已变化');
+                    }
+                    const current = buildReadOnlyShadow(store).scopes[id];
+                    const currentPreset = buildReadOnlyShadow(store).presets?.[current?.presetId];
+                    if (!isActive(task)) return store;
+                    if (!current || current.presetId !== initialPreset.id || currentPreset?.revision !== initialPreset.revision
+                        || !structurallyEqual(current, initialScope)) {
+                        throw new Error('今日风向资料在批量更新启动期间已修改，拒绝清空旧内容');
+                    }
+                    return replaceTodayTrendV2ScopeWithBatchReset(store, id, now());
+                }, { active: () => isActive(task) }, { canonical: true, scopeId: id,
+                    expectedStoreRevision: initialStoreRevision, expectedScopeRevision: initialScopeRevision });
+                if (!resetCommitted || !isActive(task)) throw cancelled();
+                publish();
                 let batchScope = null;
                 let expectedBatchScope = null;
                 let batchPreset = null;
@@ -440,32 +445,7 @@ export function createTodayTrendScheduler({
                     batchScope = expectedBatchScope;
                     batchPreset = facade.presets?.[batchScope?.presetId];
                     if (!batchScope || !batchPreset) throw new Error('当前聊天尚未今日风向');
-                    let batchResetFloor = null;
-                    let generationCanonical = canonical;
-                    let initializeBatchBaseline = false;
-                    if (batchIndex === 0) {
-                        const snapshots = canonical.globalEnvelope.payload.scopes[id]?.payload?.generationSnapshots || [];
-                        const resetSnapshot = snapshots.reduce((latest, item) => item.restoreCapability === 'full'
-                            && item.assistantCount < historyPlan.windowStart
-                            && (!latest || item.assistantCount > latest.assistantCount) ? item : latest, null);
-                        if (!resetSnapshot) {
-                            generationCanonical = prepareTodayTrendLegacyBatchBaseline(canonical, id);
-                            if (!generationCanonical) {
-                                throw missingLegacyBatchBaseline('首批预检',
-                                    describeTodayTrendLegacyBatchBaselineEligibility(canonical, id).reason,
-                                    historyPlan.windowStart);
-                            }
-                            batchResetFloor = 0;
-                            initializeBatchBaseline = true;
-                        } else {
-                            batchResetFloor = resetSnapshot.assistantCount;
-                            generationCanonical = rollbackTodayTrendV2Scope(canonical, id, batchResetFloor);
-                        }
-                        batchScope = buildReadOnlyShadow(generationCanonical).scopes[id];
-                        batchPreset = buildReadOnlyShadow(generationCanonical).presets?.[batchScope?.presetId];
-                        if (!batchScope || !batchPreset) throw new Error('批量更新回退基线不可用');
-                    }
-                    const batchPromptScope = getPromptScope ? await getPromptScope(id, generationCanonical) : null;
+                    const batchPromptScope = getPromptScope ? await getPromptScope(id, canonical) : null;
                     if (getPromptScope && typeof batchPromptScope !== 'string') throw new Error('今日风向 canonical prompt scope 不可用');
                     const generated = await controller.generate({
                         signal: task.abortController.signal, scope: batchScope, preset: batchPreset, storageId: id,
@@ -495,22 +475,6 @@ export function createTodayTrendScheduler({
                         const nextScope = { ...generated.scope,
                             operation: { ...current.operation, lastSuccessfulAssistantCount: batchAssistantCount, lastSuccessfulRunAt: generatedAt },
                             injection: current.injection, generationSnapshots: batchScope.generationSnapshots };
-                        if (batchResetFloor !== null) {
-                            if (initializeBatchBaseline) {
-                                const baseline = prepareTodayTrendLegacyBatchBaseline(store, id);
-                                if (!baseline) {
-                                    throw missingLegacyBatchBaseline('提交期并发重验证',
-                                        describeTodayTrendLegacyBatchBaselineEligibility(store, id).reason,
-                                        historyPlan.windowStart);
-                                }
-                                return applyTodayTrendRerollToV2(baseline, id, batchResetFloor,
-                                    nextScope, generated.history ?? { events: [] }, { trustedStoryDate, assistantCount: batchAssistantCount, generatedAt });
-                            }
-                            return applyTodayTrendRerollToV2(store, id, batchResetFloor,
-                                nextScope, generated.history ?? { events: [] }, {
-                                    trustedStoryDate, assistantCount: batchAssistantCount, generatedAt,
-                                });
-                        }
                         return applyTodayTrendGenerationToV2(store, id, nextScope, generated.history ?? { events: [] }, {
                             trustedStoryDate, assistantCount: batchAssistantCount, generatedAt, snapshot: true,
                         });

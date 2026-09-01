@@ -1509,6 +1509,33 @@ export function replaceTodayTrendV2ScopeWithInitialization(currentValue, initial
     return normalizeTodayTrendV2Store(candidate);
 }
 
+export function replaceTodayTrendV2ScopeWithBatchReset(currentValue, storageId, generatedAt = 0) {
+    const current = normalizeTodayTrendV2Store(currentValue);
+    const previousEnvelope = current.globalEnvelope.payload.scopes[storageId];
+    if (!previousEnvelope) failure('TT_V2_SCHEMA_INVALID', 'canonical scope 不存在');
+    if (Object.values(previousEnvelope.payload.removableEntityStateById).some(item => item.state === 'removed')
+        || Object.keys(previousEnvelope.payload.removableEntityTombstonesById).length) {
+        failure('TT_INITIALIZATION_REBUILD_BLOCKED', '当前今日风向包含不可逆归档清理记录，不能清空重建；请保留现有资料或恢复到清理前的聊天分支');
+    }
+    const previousScope = projectScopePayloadToV1(previousEnvelope.payload);
+    const emptyScope = {
+        ...previousScope,
+        operation: { ...previousScope.operation, lastSuccessfulAssistantCount: 0, lastSuccessfulRunAt: 0 },
+        world: { items: [] }, reputation: { circles: [] }, factions: [],
+        dynamics: { active: [], archived: [] }, generationSnapshots: [],
+    };
+    const candidate = clone(current);
+    let payload = createScopePayload(emptyScope);
+    payload.generationSnapshots = [];
+    payload.checkpointEntityStore = {};
+    payload = appendTodayTrendCanonicalSnapshot(payload, 0, generatedAt, current.globalEnvelope.revision + 1);
+    candidate.globalEnvelope.payload.scopes[storageId] = {
+        ...previousEnvelope,
+        payload,
+    };
+    return normalizeTodayTrendV2Store(candidate);
+}
+
 export function prepareTodayTrendLegacyBatchBaseline(currentValue, storageId) {
     const current = normalizeTodayTrendV2Store(currentValue);
     const payload = current.globalEnvelope.payload.scopes[storageId]?.payload;

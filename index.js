@@ -11235,11 +11235,6 @@ ${entry2.content}` : entry2.content;
     }
     return { eligible: true, reason: null };
   }
-  function describeTodayTrendLegacyBatchBaselineEligibility(currentValue, storageId) {
-    const current = normalizeTodayTrendV2Store(currentValue);
-    const payload = current.globalEnvelope.payload.scopes[storageId]?.payload;
-    return payload ? describeLegacyProjectionPayloadEligibility(payload) : { eligible: false, reason: "scope-missing" };
-  }
   function legacyProjectionBaselineForTransition(previousPayload, nextPayload) {
     if (!describeLegacyProjectionPayloadEligibility(previousPayload).eligible) return null;
     const legacyBaseline = previousPayload.generationSnapshots.find((snapshot) => snapshot.assistantCount === 0);
@@ -11936,35 +11931,33 @@ ${entry2.content}` : entry2.content;
     };
     return normalizeTodayTrendV2Store(candidate);
   }
-  function prepareTodayTrendLegacyBatchBaseline(currentValue, storageId) {
+  function replaceTodayTrendV2ScopeWithBatchReset(currentValue, storageId, generatedAt = 0) {
     const current = normalizeTodayTrendV2Store(currentValue);
-    const payload = current.globalEnvelope.payload.scopes[storageId]?.payload;
-    const eligibility = describeTodayTrendLegacyBatchBaselineEligibility(current, storageId);
-    if (!eligibility.eligible || !payload) return null;
-    const snapshot = payload.generationSnapshots.find((item) => item.assistantCount === 0);
-    if (!snapshot) return null;
-    const facade = buildReadOnlyShadow(current);
-    const scope = facade.scopes[storageId];
-    if (!scope) return null;
-    const baselineScope = {
-      ...scope,
-      operation: {
-        ...scope.operation,
-        lastSuccessfulAssistantCount: 0,
-        lastSuccessfulRunAt: snapshot.generatedAt
-      },
-      world: clone5(snapshot.world),
-      reputation: clone5(snapshot.reputation),
-      factions: clone5(snapshot.factions),
-      dynamicsSettings: clone5(snapshot.dynamicsSettings),
-      dynamics: projectDynamicsToV1(snapshot.dynamics),
-      generationSnapshots: [snapshotV1Comparable(snapshot)]
+    const previousEnvelope = current.globalEnvelope.payload.scopes[storageId];
+    if (!previousEnvelope) failure2("TT_V2_SCHEMA_INVALID", "canonical scope \u4E0D\u5B58\u5728");
+    if (Object.values(previousEnvelope.payload.removableEntityStateById).some((item) => item.state === "removed") || Object.keys(previousEnvelope.payload.removableEntityTombstonesById).length) {
+      failure2("TT_INITIALIZATION_REBUILD_BLOCKED", "\u5F53\u524D\u4ECA\u65E5\u98CE\u5411\u5305\u542B\u4E0D\u53EF\u9006\u5F52\u6863\u6E05\u7406\u8BB0\u5F55\uFF0C\u4E0D\u80FD\u6E05\u7A7A\u91CD\u5EFA\uFF1B\u8BF7\u4FDD\u7559\u73B0\u6709\u8D44\u6599\u6216\u6062\u590D\u5230\u6E05\u7406\u524D\u7684\u804A\u5929\u5206\u652F");
+    }
+    const previousScope = projectScopePayloadToV1(previousEnvelope.payload);
+    const emptyScope = {
+      ...previousScope,
+      operation: { ...previousScope.operation, lastSuccessfulAssistantCount: 0, lastSuccessfulRunAt: 0 },
+      world: { items: [] },
+      reputation: { circles: [] },
+      factions: [],
+      dynamics: { active: [], archived: [] },
+      generationSnapshots: []
     };
-    return applyTodayTrendGenerationToV2(current, storageId, baselineScope, { events: [] }, {
-      assistantCount: 0,
-      generatedAt: snapshot.generatedAt,
-      snapshot: true
-    });
+    const candidate = clone5(current);
+    let payload = createScopePayload(emptyScope);
+    payload.generationSnapshots = [];
+    payload.checkpointEntityStore = {};
+    payload = appendTodayTrendCanonicalSnapshot(payload, 0, generatedAt, current.globalEnvelope.revision + 1);
+    candidate.globalEnvelope.payload.scopes[storageId] = {
+      ...previousEnvelope,
+      payload
+    };
+    return normalizeTodayTrendV2Store(candidate);
   }
   function applyTodayTrendRerollToV2(currentValue, storageId, baselineAssistantCount, generatedScope, history, options2 = {}) {
     const current = normalizeTodayTrendV2Store(currentValue);
@@ -26288,25 +26281,6 @@ ${targetInstruction}`
 
   // src/today-trend-scheduler.js
   var cancelled = () => Object.assign(new Error("\u4ECA\u65E5\u98CE\u5411\u751F\u6210\u5DF2\u53D6\u6D88"), { name: "AbortError" });
-  var legacyBaselineReasonLabel = Object.freeze({
-    "scope-missing": "\u5F53\u524D\u804A\u5929\u7684 canonical scope \u4E0D\u5B58\u5728",
-    "snapshot-missing": "\u5386\u53F2\u5FEB\u7167\u4E3A\u7A7A",
-    "snapshot-not-projection-only": "\u5386\u53F2\u5FEB\u7167\u4E0D\u5168\u662F\u65E0 checkpoint \u7684\u8FC1\u79FB\u6295\u5F71",
-    "floor-zero-snapshot-missing": "\u7F3A\u5C11\u697C\u5C42 0 \u7684\u8FC1\u79FB\u5FEB\u7167",
-    "checkpoint-store-not-empty": "\u5DF2\u5B58\u5728 checkpoint \u5B9E\u4F53",
-    "stage-details-not-empty": "\u5DF2\u4FDD\u7559\u4E8B\u4EF6\u8BE6\u60C5",
-    "archived-removable-data-not-empty": "\u5DF2\u4FDD\u7559\u53EF\u79FB\u9664\u5F52\u6863\u6570\u636E",
-    "removable-entity-state-not-empty": "\u5DF2\u8BB0\u5F55\u53EF\u79FB\u9664\u5B9E\u4F53\u72B6\u6001",
-    "removable-entity-tombstones-not-empty": "\u5DF2\u8BB0\u5F55\u4E0D\u53EF\u9006\u5B9E\u4F53 tombstone",
-    "retention-settings-not-default": "\u5386\u53F2\u7559\u5B58\u8BBE\u7F6E\u4E0D\u662F\u8FC1\u79FB\u9ED8\u8BA4\u503C",
-    "history-high-water-present": "\u5386\u53F2\u5DF2\u8BB0\u5F55\u751F\u6210\u9AD8\u6C34\u4F4D",
-    "detail-pool-revised": "\u8BE6\u60C5\u6C60\u5DF2\u53D1\u751F\u53D8\u66F4",
-    "retention-policy-revised": "\u5386\u53F2\u7559\u5B58\u7B56\u7565\u5DF2\u53D1\u751F\u53D8\u66F4",
-    "archived-sequence-inconsistent": "\u5F52\u6863\u5E8F\u53F7\u4E0E\u5386\u53F2\u4E0D\u8FDE\u7EED"
-  });
-  var missingLegacyBatchBaseline = (stage, reason, windowStart) => Object.assign(new Error(
-    `\u6279\u91CF\u66F4\u65B0${stage}\u7F3A\u5C11\u65E9\u4E8E\u697C\u5C42 ${windowStart} \u7684\u5B8C\u6574\u56DE\u9000 checkpoint\uFF1A${legacyBaselineReasonLabel[reason] || "\u8FC1\u79FB\u5386\u53F2\u65E0\u6CD5\u5B89\u5168\u91CD\u5EFA"}\u3002\u8BF7\u5728 APP \u603B\u8BBE\u7F6E\u4E2D\u91CD\u5EFA\u4ECA\u65E5\u98CE\u5411\u540E\u91CD\u8BD5\u3002`
-  ), { code: "TT_BATCH_RESET_CHECKPOINT_MISSING", stage, reason });
   var staleCalendar = () => Object.assign(new Error("\u65E5\u5386\u65E5\u671F\u5728\u751F\u6210\u671F\u95F4\u5DF2\u53D8\u5316\uFF0C\u8FDF\u5230\u7ED3\u679C\u5DF2\u4E22\u5F03"), {
     name: "AbortError",
     code: "TT_DATE_DRIFT"
@@ -26713,6 +26687,33 @@ ${targetInstruction}`
           if (!useCanonical || typeof committer.loadCanonical !== "function") {
             throw Object.assign(new Error("\u4ECA\u65E5\u98CE\u5411\u6279\u5904\u7406\u9700\u8981 canonical \u63D0\u4EA4\u5668"), { code: "TT_V2_REQUIRED" });
           }
+          const initialCanonical = await committer.loadCanonical();
+          if (!isActive(task)) throw cancelled();
+          const initialFacade = buildReadOnlyShadow(initialCanonical);
+          const initialScope = initialFacade.scopes[id2];
+          const initialPreset = initialFacade.presets?.[initialScope?.presetId];
+          const initialStoreRevision = initialCanonical.globalEnvelope.revision;
+          const initialScopeRevision = initialCanonical.globalEnvelope.payload.scopes[id2]?.revision;
+          if (!initialScope || !initialPreset) throw new Error("\u5F53\u524D\u804A\u5929\u5C1A\u672A\u4ECA\u65E5\u98CE\u5411");
+          const resetCommitted = await committer.commitStore((store) => {
+            if (historyMessageDigest(getChat()) !== historyPlan.sourceDigest) {
+              throw invalidHistoryInput("\u5386\u53F2\u6B63\u6587\u7A97\u53E3\u6D88\u606F\u6E90\u5728\u6279\u91CF\u66F4\u65B0\u542F\u52A8\u671F\u95F4\u5DF2\u53D8\u5316");
+            }
+            const current = buildReadOnlyShadow(store).scopes[id2];
+            const currentPreset = buildReadOnlyShadow(store).presets?.[current?.presetId];
+            if (!isActive(task)) return store;
+            if (!current || current.presetId !== initialPreset.id || currentPreset?.revision !== initialPreset.revision || !structurallyEqual6(current, initialScope)) {
+              throw new Error("\u4ECA\u65E5\u98CE\u5411\u8D44\u6599\u5728\u6279\u91CF\u66F4\u65B0\u542F\u52A8\u671F\u95F4\u5DF2\u4FEE\u6539\uFF0C\u62D2\u7EDD\u6E05\u7A7A\u65E7\u5185\u5BB9");
+            }
+            return replaceTodayTrendV2ScopeWithBatchReset(store, id2, now2());
+          }, { active: () => isActive(task) }, {
+            canonical: true,
+            scopeId: id2,
+            expectedStoreRevision: initialStoreRevision,
+            expectedScopeRevision: initialScopeRevision
+          });
+          if (!resetCommitted || !isActive(task)) throw cancelled();
+          publish();
           let batchScope = null;
           let expectedBatchScope = null;
           let batchPreset = null;
@@ -26734,32 +26735,7 @@ ${targetInstruction}`
             batchScope = expectedBatchScope;
             batchPreset = facade.presets?.[batchScope?.presetId];
             if (!batchScope || !batchPreset) throw new Error("\u5F53\u524D\u804A\u5929\u5C1A\u672A\u4ECA\u65E5\u98CE\u5411");
-            let batchResetFloor = null;
-            let generationCanonical = canonical3;
-            let initializeBatchBaseline = false;
-            if (batchIndex === 0) {
-              const snapshots = canonical3.globalEnvelope.payload.scopes[id2]?.payload?.generationSnapshots || [];
-              const resetSnapshot = snapshots.reduce((latest, item) => item.restoreCapability === "full" && item.assistantCount < historyPlan.windowStart && (!latest || item.assistantCount > latest.assistantCount) ? item : latest, null);
-              if (!resetSnapshot) {
-                generationCanonical = prepareTodayTrendLegacyBatchBaseline(canonical3, id2);
-                if (!generationCanonical) {
-                  throw missingLegacyBatchBaseline(
-                    "\u9996\u6279\u9884\u68C0",
-                    describeTodayTrendLegacyBatchBaselineEligibility(canonical3, id2).reason,
-                    historyPlan.windowStart
-                  );
-                }
-                batchResetFloor = 0;
-                initializeBatchBaseline = true;
-              } else {
-                batchResetFloor = resetSnapshot.assistantCount;
-                generationCanonical = rollbackTodayTrendV2Scope(canonical3, id2, batchResetFloor);
-              }
-              batchScope = buildReadOnlyShadow(generationCanonical).scopes[id2];
-              batchPreset = buildReadOnlyShadow(generationCanonical).presets?.[batchScope?.presetId];
-              if (!batchScope || !batchPreset) throw new Error("\u6279\u91CF\u66F4\u65B0\u56DE\u9000\u57FA\u7EBF\u4E0D\u53EF\u7528");
-            }
-            const batchPromptScope = getPromptScope ? await getPromptScope(id2, generationCanonical) : null;
+            const batchPromptScope = getPromptScope ? await getPromptScope(id2, canonical3) : null;
             if (getPromptScope && typeof batchPromptScope !== "string") throw new Error("\u4ECA\u65E5\u98CE\u5411 canonical prompt scope \u4E0D\u53EF\u7528");
             const generated2 = await controller.generate({
               signal: task.abortController.signal,
@@ -26800,38 +26776,6 @@ ${targetInstruction}`
                 injection: current.injection,
                 generationSnapshots: batchScope.generationSnapshots
               };
-              if (batchResetFloor !== null) {
-                if (initializeBatchBaseline) {
-                  const baseline = prepareTodayTrendLegacyBatchBaseline(store, id2);
-                  if (!baseline) {
-                    throw missingLegacyBatchBaseline(
-                      "\u63D0\u4EA4\u671F\u5E76\u53D1\u91CD\u9A8C\u8BC1",
-                      describeTodayTrendLegacyBatchBaselineEligibility(store, id2).reason,
-                      historyPlan.windowStart
-                    );
-                  }
-                  return applyTodayTrendRerollToV2(
-                    baseline,
-                    id2,
-                    batchResetFloor,
-                    nextScope,
-                    generated2.history ?? { events: [] },
-                    { trustedStoryDate: trustedStoryDate2, assistantCount: batchAssistantCount, generatedAt }
-                  );
-                }
-                return applyTodayTrendRerollToV2(
-                  store,
-                  id2,
-                  batchResetFloor,
-                  nextScope,
-                  generated2.history ?? { events: [] },
-                  {
-                    trustedStoryDate: trustedStoryDate2,
-                    assistantCount: batchAssistantCount,
-                    generatedAt
-                  }
-                );
-              }
               return applyTodayTrendGenerationToV2(store, id2, nextScope, generated2.history ?? { events: [] }, {
                 trustedStoryDate: trustedStoryDate2,
                 assistantCount: batchAssistantCount,
