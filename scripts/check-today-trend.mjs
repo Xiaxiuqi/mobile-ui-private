@@ -4877,11 +4877,16 @@ assert.equal(phase3InvalidAiCalls, 0, '阶段3非法窗口不得调用 AI');
 let phase3FailureCanonical = structuredClone(batchReadyValidV2);
 let phase3FailureCalls = 0;
 let phase3FailureCommits = 0;
+const phase3FailureScopes = [];
 const phase3FailureScheduler = createTodayTrendScheduler({
     controller: { generate: async input => {
         phase3FailureCalls += 1;
         if (phase3FailureCalls === 2) throw new Error('阶段3第二批失败');
-        return { scope: input.scope };
+        phase3FailureScopes.push(structuredClone(input.scope));
+        const scope = structuredClone(input.scope);
+        scope.world = { items: [{ id: `phase3-failure-world-${input.assistantCount}`, name: '当前批世界态势',
+            summary: `已完成至第 ${input.assistantCount} 层` }] };
+        return { scope, history: { events: [] } };
     } },
     committer: {
         supportsCanonical: true, invalidateCommits: () => {},
@@ -4896,6 +4901,25 @@ assert.equal(phase3FailureCalls, 2, '阶段3第二批失败后不得请求第三
 assert.equal(phase3FailureCommits, 2, '阶段3第二批失败后必须保留先行清空与第一批成功提交');
 assert.equal(phase3FailureCanonical.globalEnvelope.payload.scopes.chat.payload.operation.lastSuccessfulAssistantCount, 3,
     '阶段3批次失败后 canonical 必须停留在最后成功边界');
+assert.equal(resolveTodayTrendV2UiScope(phase3FailureCanonical, 'chat').world.items[0]?.summary, '已完成至第 3 层',
+    '阶段3第二批失败后 UI scope 必须保留第一批成功提交的数据');
+await phase3FailureScheduler.manual({ batchEnabled: true, recentAssistantCount: 5, mergeAssistantCount: 3 });
+assert.equal(phase3FailureCommits, 4, '从第 4 层连续接续时不得再次提交清空事务，只能提交两个剩余批次');
+assert.deepEqual(phase3FailureScopes.slice(1).map(scope => scope.world.items[0]?.summary), [
+    '已完成至第 3 层', '已完成至第 6 层',
+], '接续批处理必须以已成功 canonical 内容为首批基线，并逐批保留接续结果');
+assert.equal(phase3FailureCanonical.globalEnvelope.payload.scopes.chat.payload.operation.lastSuccessfulAssistantCount, 8,
+    '接续批处理必须推进到最后未更新的 assistant 边界');
+assert.equal(resolveTodayTrendV2UiScope(phase3FailureCanonical, 'chat').world.items[0]?.summary, '已完成至第 8 层',
+    '接续批处理完成后 UI scope 必须展示接续后的最终数据');
+const phase3ContinuityCalls = phase3FailureCalls;
+const phase3ContinuityCommits = phase3FailureCommits;
+const phase3ContinuityBefore = structuredClone(phase3FailureCanonical);
+await assert.rejects(() => phase3FailureScheduler.manual({ batchEnabled: true, recentAssistantCount: 3, mergeAssistantCount: 1 }),
+    error => error?.code === 'TT_BATCH_CONTINUITY_INVALID', '非全量且未从已成功边界后一层开始的批处理必须 fail-closed');
+assert.equal(phase3FailureCalls, phase3ContinuityCalls, '非连续批处理不得请求 AI');
+assert.equal(phase3FailureCommits, phase3ContinuityCommits, '非连续批处理不得清空或提交 canonical 数据');
+assert.deepEqual(phase3FailureCanonical, phase3ContinuityBefore, '非连续批处理失败后必须完整保留已有 canonical 数据');
 
 
 let phase3RaceChat = Array.from({ length: 8 }, (_, index) => ({ role: 'assistant', content: `竞态批次正文${index + 1}` }));
@@ -6637,22 +6661,27 @@ const phase12RefreshUnsubscribe = phase12RefreshScheduler.subscribe(snapshot => 
     phase12RefreshGenerationListener?.(snapshot);
 });
 const phase12RefreshRun = phase12RefreshScheduler.manual({ batchEnabled: true, recentAssistantCount: 2, mergeAssistantCount: 1 });
-for (let index = 0; index < 100 && typeof phase12RefreshReleaseFirstBatch !== 'function'; index += 1) await Promise.resolve();
+for (let index = 0; index < 100 && (typeof phase12RefreshReleaseFirstBatch !== 'function'
+    || !phase12RefreshContainer.innerHTML.includes('pm-today-trend-floor-value">#0</')); index += 1) await Promise.resolve();
 assert.equal(typeof phase12RefreshReleaseFirstBatch, 'function', '首批 AI 请求必须在清空提交后进入挂起态');
 assert.equal(phase12RefreshGenerateCalls, 1, '清空提交完成后才允许开始首批 AI 请求');
 assert.deepEqual(resolveTodayTrendV2UiScope(phase12RefreshCanonical, 'chat').world.items, [],
     '首批 AI 尚未返回时 canonical UI scope 必须已经删除旧世界内容');
 assert.doesNotMatch(phase12RefreshContainer.innerHTML, /世界态势一|世界态势二|世界态势三/,
     '首批 AI 尚未返回时手机页面不得继续显示旧批次内容');
+assert.match(phase12RefreshContainer.innerHTML, /pm-today-trend-floor-value">#0</,
+    '全量重填首批尚未提交时，楼层必须显示已完成批次边界 #0，而不是宿主末楼层');
 phase12RefreshReleaseFirstBatch();
-for (let index = 0; index < 100 && (phase12RefreshGenerateCalls < 2
-    || !phase12RefreshContainer.innerHTML.includes('首批提交后立即显示的 canonical 内容')); index += 1) await Promise.resolve();
+for (let index = 0; index < 100 && (phase12RefreshGenerateCalls < 2 || !phase12RefreshContainer.innerHTML.includes('首批提交后立即显示的 canonical 内容')
+    || !phase12RefreshContainer.innerHTML.includes('pm-today-trend-floor-value">#1</')); index += 1) await Promise.resolve();
 const phase12FirstCommitSnapshot = phase12RefreshStates.find(snapshot => snapshot.phase === 'committing'
     && snapshot.task?.batchIndex === 0 && snapshot.task?.lastCommittedBatchIndex === 0);
 assert.ok(phase12FirstCommitSnapshot, '首批 canonical 提交后必须立即发布可观察的提交边界 snapshot');
 assert.equal(phase12RefreshGenerateCalls, 2, '首批提交完成后必须已进入第二批生成而不等待任务结束');
 assert.match(phase12RefreshContainer.innerHTML, /首批提交后立即显示的 canonical 内容/,
     '第二批尚未完成时手机控制器必须由首批提交边界通知重绘最新 canonical 内容');
+assert.match(phase12RefreshContainer.innerHTML, /pm-today-trend-floor-value">#1</,
+    '第二批进行中楼层必须显示首批已提交的完成边界，而不是固定宿主末楼层');
 await phase12RefreshRun;
 phase12RefreshUnsubscribe();
 phase12RefreshController.destroy();

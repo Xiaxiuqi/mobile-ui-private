@@ -78,6 +78,7 @@ export function renderTodayTrendApp({ scope = null, presets = [], worldBooks = [
         syncedFloor,
         phase: taskIsCurrent ? generation.phase : 'idle',
         lastError: taskIsCurrent ? generation.lastError : null,
+        completedBatchFloor: batchProgress?.batchCount ? syncedFloor : null,
         busy: busy && taskIsCurrent,
         targetFloor: taskIsCurrent && !targeted ? generation.task?.floor : null,
         batchIndex: batchProgress?.batchIndex,

@@ -252,6 +252,7 @@ export function createTodayTrendScheduler({
         storageId: task.storageId,
         floor: task.floor,
         target: task.target ? Object.freeze({ ...task.target }) : null,
+        ...(Number.isSafeInteger(task.commitSequence) && task.commitSequence > 0 ? { commitSequence: task.commitSequence } : {}),
         ...(Number.isSafeInteger(task.batchIndex) && task.batchIndex >= 0 ? { batchIndex: task.batchIndex } : {}),
         ...(Number.isSafeInteger(task.lastCommittedBatchIndex) && task.lastCommittedBatchIndex >= 0 ? { lastCommittedBatchIndex: task.lastCommittedBatchIndex } : {}),
         ...(Number.isSafeInteger(task.batchCount) && task.batchCount > 0 ? { batchCount: task.batchCount } : {}),
@@ -372,7 +373,7 @@ export function createTodayTrendScheduler({
             pendingTurns: Number.isInteger(pendingTurns) && pendingTurns >= 0 ? pendingTurns : 0,
             incidentProbability, target, summaryOnly: summaryOnly === true,
             abortController: new AbortController(), batchEnabled: batchEnabled === true, recentAssistantCount, mergeAssistantCount,
-            batchIndex: null, lastCommittedBatchIndex: null, batchCount: null,
+            commitSequence: 0, batchIndex: null, lastCommittedBatchIndex: null, batchCount: null,
         };
         terminalTask = null;
         activeTask = task;
@@ -408,22 +409,32 @@ export function createTodayTrendScheduler({
                 const initialStoreRevision = initialCanonical.globalEnvelope.revision;
                 const initialScopeRevision = initialCanonical.globalEnvelope.payload.scopes[id]?.revision;
                 if (!initialScope || !initialPreset) throw new Error('当前聊天尚未今日风向');
-                const resetCommitted = await committer.commitStore(store => {
-                    if (historyMessageDigest(getChat()) !== historyPlan.sourceDigest) {
-                        throw invalidHistoryInput('历史正文窗口消息源在批量更新启动期间已变化');
-                    }
-                    const current = buildReadOnlyShadow(store).scopes[id];
-                    const currentPreset = buildReadOnlyShadow(store).presets?.[current?.presetId];
-                    if (!isActive(task)) return store;
-                    if (!current || current.presetId !== initialPreset.id || currentPreset?.revision !== initialPreset.revision
-                        || !structurallyEqual(current, initialScope)) {
-                        throw new Error('今日风向资料在批量更新启动期间已修改，拒绝清空旧内容');
-                    }
-                    return replaceTodayTrendV2ScopeWithBatchReset(store, id, now());
-                }, { active: () => isActive(task) }, { canonical: true, scopeId: id,
-                    expectedStoreRevision: initialStoreRevision, expectedScopeRevision: initialScopeRevision });
-                if (!resetCommitted || !isActive(task)) throw cancelled();
-                publish();
+                const initialSyncedAssistantCount = validCount(initialScope.operation?.lastSuccessfulAssistantCount);
+                const fullRebuild = initialSyncedAssistantCount === 0 || historyPlan.windowStart === 1;
+                if (!fullRebuild && historyPlan.windowStart !== initialSyncedAssistantCount + 1) {
+                    const error = new Error(`批量窗口必须从已成功的第 ${initialSyncedAssistantCount + 1} 层开始；当前从第 ${historyPlan.windowStart} 层开始会破坏历史连续性`);
+                    error.code = 'TT_BATCH_CONTINUITY_INVALID';
+                    throw error;
+                }
+                if (fullRebuild) {
+                    const resetCommitted = await committer.commitStore(store => {
+                        if (historyMessageDigest(getChat()) !== historyPlan.sourceDigest) {
+                            throw invalidHistoryInput('历史正文窗口消息源在批量更新启动期间已变化');
+                        }
+                        const current = buildReadOnlyShadow(store).scopes[id];
+                        const currentPreset = buildReadOnlyShadow(store).presets?.[current?.presetId];
+                        if (!isActive(task)) return store;
+                        if (!current || current.presetId !== initialPreset.id || currentPreset?.revision !== initialPreset.revision
+                            || !structurallyEqual(current, initialScope)) {
+                            throw new Error('今日风向资料在批量更新启动期间已修改，拒绝清空旧内容');
+                        }
+                        return replaceTodayTrendV2ScopeWithBatchReset(store, id, now());
+                    }, { active: () => isActive(task) }, { canonical: true, scopeId: id,
+                        expectedStoreRevision: initialStoreRevision, expectedScopeRevision: initialScopeRevision });
+                    if (!resetCommitted || !isActive(task)) throw cancelled();
+                    task.commitSequence += 1;
+                    publish();
+                }
                 let batchScope = null;
                 let expectedBatchScope = null;
                 let batchPreset = null;
@@ -431,10 +442,10 @@ export function createTodayTrendScheduler({
                 let expectedScopeRevision = null;
                 for (let batchIndex = 0; batchIndex < historyPlan.batchCount; batchIndex += 1) {
                     if (!isActive(task)) throw cancelled();
+                    const batch = historyPlan.batches[batchIndex];
                     task.batchIndex = batchIndex;
                     publish();
                     const batchChat = getChat();
-                    const batch = historyPlan.batches[batchIndex];
                     const batchAssistantCount = batch.assistantEnd;
                     const canonical = await committer.loadCanonical();
                     if (!isActive(task)) throw cancelled();
@@ -482,6 +493,7 @@ export function createTodayTrendScheduler({
                         expectedStoreRevision, expectedScopeRevision });
                     if (!committed || !isActive(task)) throw cancelled();
                     task.lastCommittedBatchIndex = batchIndex;
+                    task.commitSequence += 1;
                     publish();
                     const remainingFeedback = Math.max(0, commitFeedbackMs - Math.max(0, now() - commitStartedAt));
                     if (remainingFeedback > 0) await wait(remainingFeedback);

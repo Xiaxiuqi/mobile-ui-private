@@ -26517,6 +26517,7 @@ ${targetInstruction}`
       storageId: task.storageId,
       floor: task.floor,
       target: task.target ? Object.freeze({ ...task.target }) : null,
+      ...Number.isSafeInteger(task.commitSequence) && task.commitSequence > 0 ? { commitSequence: task.commitSequence } : {},
       ...Number.isSafeInteger(task.batchIndex) && task.batchIndex >= 0 ? { batchIndex: task.batchIndex } : {},
       ...Number.isSafeInteger(task.lastCommittedBatchIndex) && task.lastCommittedBatchIndex >= 0 ? { lastCommittedBatchIndex: task.lastCommittedBatchIndex } : {},
       ...Number.isSafeInteger(task.batchCount) && task.batchCount > 0 ? { batchCount: task.batchCount } : {}
@@ -26657,6 +26658,7 @@ ${targetInstruction}`
         batchEnabled: batchEnabled === true,
         recentAssistantCount,
         mergeAssistantCount,
+        commitSequence: 0,
         batchIndex: null,
         lastCommittedBatchIndex: null,
         batchCount: null
@@ -26695,25 +26697,35 @@ ${targetInstruction}`
           const initialStoreRevision = initialCanonical.globalEnvelope.revision;
           const initialScopeRevision = initialCanonical.globalEnvelope.payload.scopes[id2]?.revision;
           if (!initialScope || !initialPreset) throw new Error("\u5F53\u524D\u804A\u5929\u5C1A\u672A\u4ECA\u65E5\u98CE\u5411");
-          const resetCommitted = await committer.commitStore((store) => {
-            if (historyMessageDigest(getChat()) !== historyPlan.sourceDigest) {
-              throw invalidHistoryInput("\u5386\u53F2\u6B63\u6587\u7A97\u53E3\u6D88\u606F\u6E90\u5728\u6279\u91CF\u66F4\u65B0\u542F\u52A8\u671F\u95F4\u5DF2\u53D8\u5316");
-            }
-            const current = buildReadOnlyShadow(store).scopes[id2];
-            const currentPreset = buildReadOnlyShadow(store).presets?.[current?.presetId];
-            if (!isActive(task)) return store;
-            if (!current || current.presetId !== initialPreset.id || currentPreset?.revision !== initialPreset.revision || !structurallyEqual6(current, initialScope)) {
-              throw new Error("\u4ECA\u65E5\u98CE\u5411\u8D44\u6599\u5728\u6279\u91CF\u66F4\u65B0\u542F\u52A8\u671F\u95F4\u5DF2\u4FEE\u6539\uFF0C\u62D2\u7EDD\u6E05\u7A7A\u65E7\u5185\u5BB9");
-            }
-            return replaceTodayTrendV2ScopeWithBatchReset(store, id2, now2());
-          }, { active: () => isActive(task) }, {
-            canonical: true,
-            scopeId: id2,
-            expectedStoreRevision: initialStoreRevision,
-            expectedScopeRevision: initialScopeRevision
-          });
-          if (!resetCommitted || !isActive(task)) throw cancelled();
-          publish();
+          const initialSyncedAssistantCount = validCount(initialScope.operation?.lastSuccessfulAssistantCount);
+          const fullRebuild = initialSyncedAssistantCount === 0 || historyPlan.windowStart === 1;
+          if (!fullRebuild && historyPlan.windowStart !== initialSyncedAssistantCount + 1) {
+            const error = new Error(`\u6279\u91CF\u7A97\u53E3\u5FC5\u987B\u4ECE\u5DF2\u6210\u529F\u7684\u7B2C ${initialSyncedAssistantCount + 1} \u5C42\u5F00\u59CB\uFF1B\u5F53\u524D\u4ECE\u7B2C ${historyPlan.windowStart} \u5C42\u5F00\u59CB\u4F1A\u7834\u574F\u5386\u53F2\u8FDE\u7EED\u6027`);
+            error.code = "TT_BATCH_CONTINUITY_INVALID";
+            throw error;
+          }
+          if (fullRebuild) {
+            const resetCommitted = await committer.commitStore((store) => {
+              if (historyMessageDigest(getChat()) !== historyPlan.sourceDigest) {
+                throw invalidHistoryInput("\u5386\u53F2\u6B63\u6587\u7A97\u53E3\u6D88\u606F\u6E90\u5728\u6279\u91CF\u66F4\u65B0\u542F\u52A8\u671F\u95F4\u5DF2\u53D8\u5316");
+              }
+              const current = buildReadOnlyShadow(store).scopes[id2];
+              const currentPreset = buildReadOnlyShadow(store).presets?.[current?.presetId];
+              if (!isActive(task)) return store;
+              if (!current || current.presetId !== initialPreset.id || currentPreset?.revision !== initialPreset.revision || !structurallyEqual6(current, initialScope)) {
+                throw new Error("\u4ECA\u65E5\u98CE\u5411\u8D44\u6599\u5728\u6279\u91CF\u66F4\u65B0\u542F\u52A8\u671F\u95F4\u5DF2\u4FEE\u6539\uFF0C\u62D2\u7EDD\u6E05\u7A7A\u65E7\u5185\u5BB9");
+              }
+              return replaceTodayTrendV2ScopeWithBatchReset(store, id2, now2());
+            }, { active: () => isActive(task) }, {
+              canonical: true,
+              scopeId: id2,
+              expectedStoreRevision: initialStoreRevision,
+              expectedScopeRevision: initialScopeRevision
+            });
+            if (!resetCommitted || !isActive(task)) throw cancelled();
+            task.commitSequence += 1;
+            publish();
+          }
           let batchScope = null;
           let expectedBatchScope = null;
           let batchPreset = null;
@@ -26721,10 +26733,10 @@ ${targetInstruction}`
           let expectedScopeRevision = null;
           for (let batchIndex = 0; batchIndex < historyPlan.batchCount; batchIndex += 1) {
             if (!isActive(task)) throw cancelled();
+            const batch = historyPlan.batches[batchIndex];
             task.batchIndex = batchIndex;
             publish();
             const batchChat = getChat();
-            const batch = historyPlan.batches[batchIndex];
             const batchAssistantCount = batch.assistantEnd;
             const canonical3 = await committer.loadCanonical();
             if (!isActive(task)) throw cancelled();
@@ -26790,6 +26802,7 @@ ${targetInstruction}`
             });
             if (!committed2 || !isActive(task)) throw cancelled();
             task.lastCommittedBatchIndex = batchIndex;
+            task.commitSequence += 1;
             publish();
             const remainingFeedback2 = Math.max(0, commitFeedbackMs - Math.max(0, now2() - commitStartedAt2));
             if (remainingFeedback2 > 0) await wait(remainingFeedback2);
@@ -27971,10 +27984,11 @@ ${targetInstruction}`
     if (!visible) return "";
     return `<span class="pm-today-trend-inline-actions">${actions.map((action) => trendIconButton({ ...action, className: `pm-today-trend-inline-action${action.className ? ` ${action.className}` : ""}` })).join("")}</span>`;
   }
-  function trendFloorStatus({ currentFloor, syncedFloor = 0, phase = "idle", lastError = null, busy = false, targetFloor = null, batchIndex = null, batchCount = null, targeted = false } = {}) {
+  function trendFloorStatus({ currentFloor, syncedFloor = 0, completedBatchFloor = null, phase = "idle", lastError = null, busy = false, targetFloor = null, batchIndex = null, batchCount = null, targeted = false } = {}) {
     const synced = Number.isInteger(syncedFloor) && syncedFloor >= 0 ? syncedFloor : 0;
     const currentFloorProvided = currentFloor !== void 0;
-    const floor = Number.isInteger(currentFloor) && currentFloor >= 0 ? currentFloor : currentFloorProvided ? null : synced;
+    const completedBatch = Number.isInteger(completedBatchFloor) && completedBatchFloor >= 0 ? completedBatchFloor : null;
+    const floor = completedBatch ?? (Number.isInteger(currentFloor) && currentFloor >= 0 ? currentFloor : currentFloorProvided ? null : synced);
     const target = Number.isInteger(targetFloor) && targetFloor >= 0 ? targetFloor : null;
     const terminalState = phase === "failed" ? "failed" : phase === "canceled" ? "canceled" : null;
     const state = busy ? "updating" : terminalState || (floor === null ? "unavailable" : floor > 0 && synced === floor ? "synced" : "unsynced");
@@ -28378,6 +28392,7 @@ ${targetInstruction}`
       syncedFloor,
       phase: taskIsCurrent ? generation.phase : "idle",
       lastError: taskIsCurrent ? generation.lastError : null,
+      completedBatchFloor: batchProgress?.batchCount ? syncedFloor : null,
       busy: busy && taskIsCurrent,
       targetFloor: taskIsCurrent && !targeted ? generation.task?.floor : null,
       batchIndex: batchProgress?.batchIndex,
