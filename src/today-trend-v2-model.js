@@ -692,6 +692,26 @@ export function validateTodayTrendV2Transition(previousValue, candidateValue) {
             if (Object.values(previousPayload.removableEntityStateById).some(item => item.state === 'removed')) invalid('包含 removed lifecycle 的 scope 不得直接删除');
             continue;
         }
+        const initializationSnapshot = nextPayload.generationSnapshots.length === 1
+            ? nextPayload.generationSnapshots[0] : null;
+        const initializationReplacement = initializationSnapshot?.assistantCount === 0
+            && initializationSnapshot.restoreCapability === 'full'
+            && initializationSnapshot.rerollFromAssistantCount === null
+            && nextPayload.operation.lastSuccessfulAssistantCount === 0
+            && nextPayload.historyRetentionState.highWaterAssistantCount === null
+            && nextPayload.historyRetentionState.detailPoolRevision === 0
+            && nextPayload.historyRetentionState.retentionPolicyRevision === 1
+            && Object.keys(nextPayload.stageDetailsByEvent).length === 0
+            && Object.keys(nextPayload.archivedRemovableDataByEvent).length === 0
+            && Object.keys(nextPayload.removableEntityStateById).length === 0
+            && Object.keys(nextPayload.removableEntityTombstonesById).length === 0;
+        if (initializationReplacement) {
+            if (Object.values(previousPayload.removableEntityStateById).some(item => item.state === 'removed')
+                || Object.keys(previousPayload.removableEntityTombstonesById).length) {
+                failure('TT_INITIALIZATION_REBUILD_BLOCKED', '当前今日风向包含不可逆归档清理记录，不能重建覆盖；请保留现有资料或恢复到清理前的聊天分支');
+            }
+            continue;
+        }
         const legacyBaseline = legacyProjectionBaselineForTransition(previousPayload, nextPayload);
         const restoredSnapshot = nextPayload.generationSnapshots.at(-1);
         const priorRestoreSnapshot = restoredSnapshot?.restoreCapability === 'full'
@@ -1460,6 +1480,33 @@ export function applyTodayTrendGenerationToV2(currentValue, storageId, generated
         current.globalEnvelope.revision + 1, { rerollFromAssistantCount });
     envelope.payload = payload;
     return normalizeTodayTrendV2Store(merged);
+}
+
+export function replaceTodayTrendV2ScopeWithInitialization(currentValue, initializedStoreValue, storageId, generatedAt = 0) {
+    const current = normalizeTodayTrendV2Store(currentValue);
+    const initializedStore = normalizeTodayTrendStore(initializedStoreValue);
+    const scope = initializedStore.scopes[storageId];
+    const preset = initializedStore.presets[scope?.presetId];
+    if (!scope || !preset) failure('TT_INITIALIZATION_INVALID', '初始化结果缺少当前聊天 scope 或世界预设');
+    const previousEnvelope = current.globalEnvelope.payload.scopes[storageId];
+    if (previousEnvelope && (Object.values(previousEnvelope.payload.removableEntityStateById).some(item => item.state === 'removed')
+        || Object.keys(previousEnvelope.payload.removableEntityTombstonesById).length)) {
+        failure('TT_INITIALIZATION_REBUILD_BLOCKED', '当前今日风向包含不可逆归档清理记录，不能重建覆盖；请保留现有资料或恢复到清理前的聊天分支');
+    }
+    const candidate = clone(current);
+    let payload = createScopePayload(scope);
+    payload.generationSnapshots = [];
+    payload.checkpointEntityStore = {};
+    payload.operation = { ...payload.operation, lastSuccessfulAssistantCount: 0, lastSuccessfulRunAt: 0 };
+    payload.historyRetentionState.highWaterAssistantCount = null;
+    payload = appendTodayTrendCanonicalSnapshot(payload, 0, generatedAt, current.globalEnvelope.revision + 1);
+    candidate.globalEnvelope.payload.presets[scope.presetId] = clone(preset);
+    candidate.globalEnvelope.payload.scopes[storageId] = {
+        schemaVersion: SCOPE_ENVELOPE_VERSION,
+        revision: previousEnvelope?.revision ?? 1,
+        payload,
+    };
+    return normalizeTodayTrendV2Store(candidate);
 }
 
 export function prepareTodayTrendLegacyBatchBaseline(currentValue, storageId) {

@@ -5,7 +5,12 @@ import { countTodayTrendAssistantMessages } from './today-trend-scheduler.js';
 import { renderTodayTrendApp } from './today-trend-view.js';
 
 const formValues = form => new FormData(form);
-const draftFrom = data => ({ presetName: String(data.get('presetName') || ''), worldBookNames: data.getAll('worldBookNames'), includeExistingChat: data.get('includeExistingChat') === 'on', userRequirements: String(data.get('userRequirements') || '') });
+const optionalPositiveInteger = value => value === null || value === '' ? undefined : Number(value);
+const draftFrom = data => ({ presetName: String(data.get('presetName') || ''), worldBookNames: data.getAll('worldBookNames'),
+    includeExistingChat: data.get('includeExistingChat') === 'on', backfillExistingChat: data.get('backfillExistingChat') === 'on',
+    recentAssistantCount: optionalPositiveInteger(data.get('recentAssistantCount')),
+    mergeAssistantCount: optionalPositiveInteger(data.get('mergeAssistantCount')),
+    userRequirements: String(data.get('userRequirements') || '') });
 
 export function createTodayTrendPhoneController({ state, deps, container }) {
     if (!container?.addEventListener || typeof deps.getStorageId !== 'function') throw new TypeError('今日风向手机控制器依赖无效');
@@ -268,7 +273,20 @@ export function createTodayTrendPhoneController({ state, deps, container }) {
         if (form.dataset.todayTrendForm === 'initialize') {
             event.preventDefault();
             if (initializing || typeof deps.initializeTodayTrend !== 'function') return;
-            initializationDraft = draftFrom(data); const taskAbort = new AbortController(); initAbort = taskAbort; initializing = true; error = null; rerender();
+            if (!form.checkValidity?.()) { form.reportValidity?.(); return; }
+            initializationDraft = draftFrom(data);
+            if (initializationDraft.backfillExistingChat === true) {
+                const currentCount = assistantCount();
+                if (currentCount > 0 && (!Number.isSafeInteger(initializationDraft.recentAssistantCount)
+                    || initializationDraft.recentAssistantCount < 1 || initializationDraft.recentAssistantCount > currentCount)) {
+                    return report(new Error('最近处理层数必须在当前聊天 AI 回复累计层数范围内'));
+                }
+                if (currentCount > 0 && (!Number.isSafeInteger(initializationDraft.mergeAssistantCount)
+                    || initializationDraft.mergeAssistantCount < 1 || initializationDraft.mergeAssistantCount > initializationDraft.recentAssistantCount)) {
+                    return report(new Error('每批合并层数必须在最近处理层数范围内'));
+                }
+            }
+            const taskAbort = new AbortController(); initAbort = taskAbort; initializing = true; error = null; rerender();
             deps.initializeTodayTrend({ ...initializationDraft, presetId: reinitializing ? lastScope?.presetId : '', signal: taskAbort.signal }).then(() => {
                 if (taskAbort.signal.aborted || initAbort !== taskAbort) return;
                 initializing = false; initAbort = null; initializationOpen = false; reinitializing = false; initializationMode = 'reuse'; initializationDraft = { includeExistingChat: true }; rerender();
@@ -344,6 +362,14 @@ export function createTodayTrendPhoneController({ state, deps, container }) {
         }
     };
     const change = event => {
+        const initializationInput = event.target.closest?.('form[data-today-trend-form="initialize"] input[name="backfillExistingChat"]');
+        if (initializationInput?.name === 'backfillExistingChat' && container.contains(initializationInput) && !initializationInput.disabled) {
+            const form = initializationInput.closest('form[data-today-trend-form="initialize"]');
+            if (!form) return;
+            initializationDraft = draftFrom(formValues(form));
+            rerender();
+            return;
+        }
         const input = event.target.closest?.('input[name="batchEnabled"], input[name="recentAssistantCount"], input[name="mergeAssistantCount"]');
         if (!input || !container.contains(input) || input.disabled) return;
         if (input.name === 'batchEnabled') return saveBatchDraft({ enabled: input.checked === true }).catch(report);

@@ -25,7 +25,7 @@ import {
     normalizeTodayTrendStageProjection, normalizeTodayTrendV2Candidate, normalizeTodayTrendV2Store,
     resolveTodayTrendV2DetailForTarget, resolveTodayTrendV2LatestStage, resolveTodayTrendV2RetentionSettingsState,
     resolveTodayTrendV2UiScope, rollbackTodayTrendV2Scope, saveTodayTrendRetentionSettingsToV2, serializeTodayTrendV2ScopeForGeneration,
-    validateTodayTrendV2Transition,
+    replaceTodayTrendV2ScopeWithInitialization, validateTodayTrendV2Transition,
 } from '../src/today-trend-v2-model.js';
 import {
     appendTodayTrendCanonicalSnapshot, applyTodayTrendHistoryProducer, normalizeTodayTrendHistoryProducer,
@@ -446,6 +446,22 @@ const batchBaselineValidV2 = applyTodayTrendGenerationToV2(migratedValidV2, 'cha
 const batchReadyValidV2 = applyTodayTrendGenerationToV2(batchBaselineValidV2, 'chat',
     buildReadOnlyShadow(batchBaselineValidV2).scopes.chat, { events: [] },
     { assistantCount: 7, generatedAt: 7 });
+const initializationReplacement = replaceTodayTrendV2ScopeWithInitialization(migratedValidV2, valid, 'chat', 123);
+const initializationReplacementPayload = initializationReplacement.globalEnvelope.payload.scopes.chat.payload;
+assert.doesNotThrow(() => validateTodayTrendV2Transition(migratedValidV2, initializationReplacement),
+    '含 archived 但不含 removed lifecycle 的 canonical scope 必须允许受控初始化替换');
+assert.deepEqual(initializationReplacementPayload.generationSnapshots.map(snapshot => snapshot.assistantCount), [0],
+    '受控初始化替换必须只留下 full@0 checkpoint');
+assert.equal(initializationReplacementPayload.generationSnapshots[0].restoreCapability, 'full',
+    '受控初始化替换的唯一 checkpoint 必须可完整回退');
+assert.equal(initializationReplacementPayload.generationSnapshots[0].rerollFromAssistantCount, null,
+    '受控初始化替换的 floor 0 checkpoint 不得伪造 reroll 来源');
+assert.deepEqual(initializationReplacementPayload.dynamics.archived.map(event => event.archivedSequence), [1],
+    '受控初始化替换必须从新基线保留连续 archivedSequence');
+assert.equal(initializationReplacementPayload.historyRetentionState.nextArchivedSequence, 2,
+    '受控初始化替换必须令 nextArchivedSequence 紧随新基线归档事件');
+assert.deepEqual(initializationReplacementPayload.removableEntityTombstonesById, {},
+    '受控初始化替换不得携带旧 scope 的 tombstone');
 const archivedFixedCore = extractArchivedFixedCore(migratedValidV2.globalEnvelope.payload.scopes.chat.payload.dynamics.archived[0]);
 assert.equal(archivedFixedCore.id, 'rumor', 'fixed core 必须保留归档事件身份');
 assert.equal(archivedFixedCore.archivedSequence, 1, 'fixed core 必须保留确定性 archivedSequence');
@@ -535,8 +551,10 @@ let controllerCurrentFloor = 3402;
 let generationCancelReason = '';
 let rejectControllerGeneration = null;
 let savedControllerSettings = null;
+let initializedControllerOptions = null;
 const phoneController = createTodayTrendPhoneController({ state: controllerState, container: controllerContainer, deps: {
     getStorageId: () => controllerStorageId, getTodayTrendStore: async () => controllerStore,
+    getCtx: () => ({ chat: [{ mes: 'AI 一' }, { mes: 'AI 二' }] }),
     reloadTodayTrendStore: () => reloadTodayTrendStore(),
     getTodayTrendCurrentFloor: () => controllerCurrentFloor,
     getTodayTrendGenerationState: () => controllerGeneration,
@@ -562,6 +580,7 @@ const phoneController = createTodayTrendPhoneController({ state: controllerState
         controllerStore = { ...controllerStore, scopes: { ...controllerStore.scopes, chat: { ...controllerStore.scopes.chat, injection: settings.injection } } };
         return controllerStore;
     },
+    initializeTodayTrend: async options => { initializedControllerOptions = options; },
     commitTodayTrendScope: async () => valid, cancelTodayTrendInitialization: reason => { controllerCancelReason = reason; },
 } });
 assert.equal(await phoneController.render(), true, '控制器必须渲染当前聊天的今日风向页面');
@@ -583,6 +602,18 @@ for (const item of controllerListeners.filter(item => item.type === 'submit')) i
 await new Promise(resolve => setTimeout(resolve, 0));
 assert.deepEqual(savedControllerSettings?.injection, { enabled: false, minimalUi: true }, 'APP 总设置提交必须独立保存正文注入与极简 UI 开关');
 assert.equal(controllerStore.scopes.chat.injection.minimalUi, true, '极简 UI 设置保存后必须写回当前 scope');
+const initializeForm = {
+    dataset: { todayTrendForm: 'initialize' },
+    values: new Map([['presetName', '初始预设'], ['worldBookNames', ['厨房']], ['includeExistingChat', 'on'], ['backfillExistingChat', 'on'],
+        ['recentAssistantCount', '2'], ['mergeAssistantCount', '1'], ['userRequirements', '保留尾部窗口']]),
+    matches: selector => selector === 'form[data-today-trend-form]', checkValidity: () => true, reportValidity: () => {},
+};
+for (const item of controllerListeners.filter(item => item.type === 'submit')) item.listener({ target: initializeForm, preventDefault: () => {} });
+await new Promise(resolve => setTimeout(resolve, 0));
+assert.deepEqual({ backfillExistingChat: initializedControllerOptions?.backfillExistingChat,
+    recentAssistantCount: initializedControllerOptions?.recentAssistantCount, mergeAssistantCount: initializedControllerOptions?.mergeAssistantCount },
+{ backfillExistingChat: true, recentAssistantCount: 2, mergeAssistantCount: 1 },
+    '初始化控制器必须保留草稿并将回填开关与两个批处理参数透传至安装层');
 globalThis.FormData = controllerFormData;
 const controllerGenerateAllButton = { disabled: false, dataset: { action: 'today-trend-generate-all' }, closest: () => controllerGenerateAllButton };
 controllerListeners.filter(item => item.type === 'click').forEach(item => item.listener({ target: controllerGenerateAllButton }));
@@ -635,6 +666,7 @@ assert.match(firstUseHtml, /class="pm-today-trend-init-intro"[^>]*>[\s\S]*?<h3 i
 assert.match(firstUseHtml, /aria-labelledby="pm-today-trend-init-title"/, '初始化页面必须关联可访问标题');
 assert.match(firstUseHtml, /复用已有预设，或根据当前世界书创建一套新的今日风向配置。/, '首次使用说明必须同时覆盖复用与创建路径');
 assert.match(firstUseHtml, /class="pm-today-trend-mode-switch" aria-label="预设使用方式"/, '存在已有预设时必须提供互斥模式切换控件');
+
 assert.match(firstUseHtml, /data-action="today-trend-use-preset" aria-pressed="true">复用预设<\/button>/, '存在已有预设时必须默认选择复用模式');
 assert.match(firstUseHtml, /data-action="today-trend-create-preset" aria-pressed="false">创建预设<\/button>/, '模式切换控件必须提供创建入口');
 assert.match(firstUseHtml, /class="pm-today-trend-init-section pm-today-trend-bind-section"/, '已有预设必须形成独立快捷绑定分区');
@@ -651,6 +683,21 @@ assert.doesNotMatch(createPresetHtml, /data-today-trend-form="bind-preset"/, '�
 for (const name of ['presetName', 'worldBookNames', 'includeExistingChat', 'userRequirements']) {
     assert.match(createPresetHtml, new RegExp(`name="${name}"`), `创建模式必须保留 ${name} 字段`);
 }
+assert.match(createPresetHtml, /<span>预设名称<\/span>/, '初始化表单必须保留既有预设名称文案');
+assert.match(createPresetHtml, /name="backfillExistingChat"[^>]*role="switch"[^>]*aria-checked="false"/, '创建模式必须提供默认关闭的显式历史回填开关');
+assert.match(createPresetHtml, /初始化后溯及既往更新<small>按既有 AI 回复逐批生成历史状态，可能发起多次 AI 请求。<\/small>/,
+    '初始化历史回填开关必须明确告知多次 AI 请求副作用');
+assert.doesNotMatch(createPresetHtml, /name="recentAssistantCount"|name="mergeAssistantCount"/,
+    '初始化历史回填开关关闭时不得渲染批处理参数菜单');
+const backfillCreatePresetHtml = renderTodayTrendApp({ worldBooks: ['厨房设定'], assistantCount: 12,
+    initializationDraft: { includeExistingChat: true, backfillExistingChat: true, recentAssistantCount: 9, mergeAssistantCount: 3 } });
+assert.match(backfillCreatePresetHtml, /name="recentAssistantCount"[^>]*min="1" max="12"[^>]*value="9"/,
+    '初始化历史回填开关开启时必须按实时 assistantCount 渲染并保留最近处理层数');
+assert.match(backfillCreatePresetHtml, /name="mergeAssistantCount"[^>]*min="1" max="12"[^>]*value="3"/,
+    '初始化历史回填开关开启时必须渲染并保留每批合并层数');
+assert.match(backfillCreatePresetHtml, /当前聊天 AI 回复累计层数：12。将处理尾部最近 N 层。/,
+    '初始化历史回填参数必须明确尾部窗口语义');
+
 const emptyWorldBooksHtml = renderTodayTrendApp({ worldBooks: [] });
 assert.doesNotMatch(emptyWorldBooksHtml, /pm-today-trend-mode-switch/, '无已有预设时不得展示无效的复用切换入口');
 assert.match(emptyWorldBooksHtml, /data-today-trend-form="initialize"/, '无已有预设时必须直接展示创建表单');
@@ -695,7 +742,7 @@ const failedFloorHtml = renderTodayTrendApp({ scope: valid.scopes.chat, presets:
     generation: { phase: 'failed', task: { kind: 'auto', storageId: 'chat', floor: 12, target: null }, lastError: 'AI 请求失败' }, currentFloor: 12 });
 assert.match(failedFloorHtml, /data-state="failed"[\s\S]*pm-today-trend-floor-status" title="AI 请求失败">同步失败<\/span>/, '生成失败后必须显示同步失败并保留错误说明');
 const escapedFailureHtml = renderTodayTrendApp({ scope: valid.scopes.chat, presets: Object.values(valid.presets), view: { name: 'reputation', mode: 'content' },
-    generation: { phase: 'failed', task: { kind: 'auto', storageId: 'chat', floor: 12, target: null }, lastError: '\"失败\" <script> & more' }, currentFloor: 12 });
+    generation: { phase: 'failed', task: { kind: 'auto', storageId: 'chat', floor: 12, target: null }, lastError: '"失败" <script> & more' }, currentFloor: 12 });
 assert.match(escapedFailureHtml, /title="&quot;失败&quot; &lt;script&gt; &amp; more"/, '同步失败说明必须按 HTML 属性语境转义');
 assert.doesNotMatch(escapedFailureHtml, /<script>/, '同步失败说明不得注入标签');
 const canceledFloorHtml = renderTodayTrendApp({ scope: valid.scopes.chat, presets: Object.values(valid.presets), view: { name: 'reputation', mode: 'content' },
@@ -2456,6 +2503,102 @@ await assert.rejects(() => installedDeps.saveTodayTrendRule('world', '迟到旧�
 assert.equal(installedStore.presets.preset.moduleRules.world, '手工保存的规则', '被拒绝的旧规则保存不得改写已提交规则');
 const pendingReinitialize = installedDeps.initializeTodayTrend({ presetId: 'preset', worldBookNames: ['厨房'], includeExistingChat: true });
 await Promise.resolve();
+let initializationCanonical = structuredClone(migratedValidV2);
+let initializationGenerateCalls = 0;
+const initializationCanonicalDeps = {
+    runtime: {}, getStorageId: () => 'chat', getLastMessageId: () => 2,
+    getCtx: () => ({ characterId: 'character', characters: { character: { avatar: 'character', name: '小明' } }, chat: [] }),
+    callAI: async () => { throw new Error('canonical 初始化测试不应调用 transport'); },
+    loadTodayTrendStore: async () => buildReadOnlyShadow(initializationCanonical), saveTodayTrendStore: async value => value,
+    createTodayTrendGenerationController: () => ({
+        initialize: async () => ({ store: structuredClone(valid) }),
+        generate: async () => { initializationGenerateCalls += 1; throw new Error('零历史不应进入批处理'); },
+        regenerateRule: async () => '不应调用',
+    }),
+    createTodayTrendCommitter: () => ({
+        ready: async () => [], isBlocked: () => false, supportsCanonical: true, invalidateCommits() {},
+        loadCanonical: async () => structuredClone(initializationCanonical),
+        commitStore: async (mutate, _task, options) => {
+            assert.equal(options.canonical, true, '初始化 replacement 必须走 canonical commit');
+            const previous = structuredClone(initializationCanonical);
+            const candidate = await mutate(structuredClone(previous));
+            initializationCanonical = validateTodayTrendV2Transition(previous, candidate);
+            initializationCanonical.globalEnvelope.revision += 1;
+            initializationCanonical.globalEnvelope.payload.scopes.chat.revision += 1;
+            return buildReadOnlyShadow(initializationCanonical);
+        },
+    }),
+};
+installTodayTrend({}, initializationCanonicalDeps);
+await initializationCanonicalDeps.initializeTodayTrend({ presetId: 'preset', worldBookNames: ['厨房'], backfillExistingChat: true });
+const initializationCanonicalPayload = initializationCanonical.globalEnvelope.payload.scopes.chat.payload;
+assert.deepEqual(initializationCanonicalPayload.generationSnapshots.map(snapshot => snapshot.assistantCount), [0],
+    '零 assistant 历史的 canonical 初始化必须只提交 full@0 基线');
+assert.equal(initializationCanonicalPayload.generationSnapshots[0].restoreCapability, 'full',
+    '零 assistant 历史的 canonical 初始化基线必须可完整回退');
+assert.equal(initializationGenerateCalls, 0, '零 assistant 历史即使开启回填也不得调用 scheduler.manual');
+let backfillCanonical = structuredClone(migratedValidV2);
+let backfillGenerateCalls = 0;
+let backfillGenerateOptions = null;
+const backfillFailureDeps = {
+    runtime: {}, getStorageId: () => 'chat', getLastMessageId: () => 2,
+    getCtx: () => ({ characterId: 'character', characters: { character: { avatar: 'character', name: '小明' } }, chat: [{ mes: 'AI 一' }, { mes: 'AI 二' }] }),
+    callAI: async () => { throw new Error('回填失败测试不应调用 transport'); },
+    loadTodayTrendStore: async () => buildReadOnlyShadow(backfillCanonical), saveTodayTrendStore: async value => value,
+    createTodayTrendGenerationController: () => ({
+        initialize: async () => ({ store: structuredClone(valid) }),
+        generate: async options => {
+            backfillGenerateCalls += 1;
+            backfillGenerateOptions = options;
+            throw Object.assign(new Error('模拟历史生成失败'), { code: 'TT_HISTORY_TEST_FAILED' });
+        },
+        regenerateRule: async () => '不应调用',
+    }),
+    createTodayTrendCommitter: () => ({
+        ready: async () => [], isBlocked: () => false, supportsCanonical: true, invalidateCommits() {},
+        loadCanonical: async () => structuredClone(backfillCanonical),
+        commitStore: async (mutate, _task, options) => {
+            const previous = structuredClone(backfillCanonical);
+            const candidate = await mutate(structuredClone(previous));
+            backfillCanonical = validateTodayTrendV2Transition(previous, candidate);
+            backfillCanonical.globalEnvelope.revision += 1;
+            backfillCanonical.globalEnvelope.payload.scopes.chat.revision += 1;
+            assert.equal(options.canonical, true, '回填前初始化与后续批处理必须保持 canonical 写链');
+            return buildReadOnlyShadow(backfillCanonical);
+        },
+    }),
+};
+installTodayTrend({}, backfillFailureDeps);
+await assert.rejects(() => backfillFailureDeps.initializeTodayTrend({ presetId: 'preset', worldBookNames: ['厨房'], backfillExistingChat: true,
+    recentAssistantCount: 1, mergeAssistantCount: 1 }),
+    error => error?.code === 'TT_INITIALIZATION_BACKFILL_FAILED' && error?.causeCode === 'TT_HISTORY_TEST_FAILED',
+    '初始化后的普通历史回填失败必须保留稳定包装诊断');
+assert.equal(backfillGenerateCalls, 1, '存在 assistant 历史并显式开启回填时必须启动 batchEnabled 路径');
+assert.equal(backfillGenerateOptions?.assistantCount, 2,
+ '初始化回填的批次终点必须保留当前 assistant 总数');
+assert.deepEqual(backfillGenerateOptions?.historyBatch, [{ role: 'assistant', content: 'AI 二' }],
+    '初始化回填必须将用户选择的 recentAssistantCount 传入 scheduler.manual 并仅生成尾部窗口');
+assert.deepEqual(backfillCanonical.globalEnvelope.payload.scopes.chat.payload.operation.batchDraft,
+    { enabled: true, recentAssistantCount: 1, mergeAssistantCount: 1 },
+    '初始化 canonical 提交必须持久化与历史回填完全相同的批处理参数');
+assert.deepEqual(backfillCanonical.globalEnvelope.payload.scopes.chat.payload.generationSnapshots.map(snapshot => snapshot.assistantCount), [0],
+    '历史回填失败不得回滚或破坏已提交的 canonical full@0 基线');
+await assert.rejects(() => backfillFailureDeps.initializeTodayTrend({ presetId: 'preset', worldBookNames: ['厨房'], backfillExistingChat: true,
+    recentAssistantCount: 3, mergeAssistantCount: 1 }), error => error?.code === 'TT_HISTORY_WINDOW_INVALID',
+    '初始化必须以提交时 assistantCount 拒绝超出实时聊天范围的 recentAssistantCount');
+await assert.rejects(() => backfillFailureDeps.initializeTodayTrend({ presetId: 'preset', worldBookNames: ['厨房'], backfillExistingChat: true,
+    recentAssistantCount: 1, mergeAssistantCount: 2 }), error => error?.code === 'TT_HISTORY_WINDOW_INVALID',
+    '初始化必须拒绝大于最近处理层数的 mergeAssistantCount');
+assert.equal(backfillGenerateCalls, 1, '非法初始化回填窗口不得进入调度器');
+backfillCanonical = structuredClone(migratedValidV2);
+backfillGenerateOptions = null;
+await backfillFailureDeps.initializeTodayTrend({ presetId: 'preset', worldBookNames: ['厨房'], backfillExistingChat: false,
+    recentAssistantCount: 2, mergeAssistantCount: 1 });
+assert.equal(backfillGenerateCalls, 1, '初始化历史回填开关关闭时不得进入批处理');
+assert.equal(backfillGenerateOptions, null, '初始化历史回填开关关闭时不得向 scheduler.manual 传递参数');
+assert.equal(Object.hasOwn(backfillCanonical.globalEnvelope.payload.scopes.chat.payload.operation, 'batchDraft'), false,
+    '初始化历史回填开关关闭时不得持久化本次批处理草稿');
+
 await installedDeps.saveTodayTrendRule('world', '初始化期间的新规则', 'preset', 2);
 const delayedInitializationStore = structuredClone(installedStore);
 delayedInitializationStore.presets.preset.moduleRules.world = '迟到初始化规则';
@@ -4018,6 +4161,10 @@ const phase4ChangedFacade = buildReadOnlyShadow(normalizedPhase4Available);
 phase4ChangedFacade.scopes.chat.dynamics.active[0].title = '同 ID 的新业务事件';
 const phase4ChangedEventCandidate = normalizeTodayTrendV2Candidate(phase4ChangedFacade, normalizedPhase4Available);
 const phase4ChangedEventPayload = phase4ChangedEventCandidate.globalEnvelope.payload.scopes.chat.payload;
+assert.throws(() => replaceTodayTrendV2ScopeWithInitialization(normalizedPhase4Removed, valid, 'chat', 124),
+    error => error?.code === 'TT_INITIALIZATION_REBUILD_BLOCKED',
+    '旧 scope 存在 removed lifecycle 与 tombstone 时，受控初始化替换必须整单拒绝');
+
 assert.equal(phase4ChangedEventPayload.stageDetailsByEvent.service, undefined,
     '同 ID 事件的 v1 可见语义变化后不得继承旧 detail 正文');
 assert.equal(phase4ChangedEventPayload.removableEntityStateById['detail:service:4'], undefined,
@@ -5142,7 +5289,7 @@ for (const id of phase6RealPeriod.childSummaryRefs) {
 }
 
 const phase6ReducerSource = await readFile(new URL('../src/today-trend-history-reducer.js', import.meta.url), 'utf8');
-const phase6ComparatorSource = phase6ReducerSource.match(/candidates\.sort\(\(left, right\) => \{([\s\S]*?)\n    \}\);/)?.[1] || '';
+const phase6ComparatorSource = phase6ReducerSource.match(/candidates\.sort\(\(left, right\) => \{([\s\S]*?)\n\s{4}\}\);/)?.[1] || '';
 assert.match(phase6ComparatorSource, /left\.children\.length - right\.children\.length/,
     '候选 comparator 必须按 candidate projection child 数排序');
 assert.doesNotMatch(phase6ComparatorSource, /childSummaryRefs\.length/,
@@ -5455,6 +5602,20 @@ assert.throws(() => normalizeTodayTrendV2Envelope(invalidLegacyEnvelope), error 
 '旧 envelope 含非法自然日时必须返回字段路径诊断');
 assert.equal(JSON.stringify(invalidLegacyEnvelope), invalidLegacyBefore,
     '旧 envelope 迁移失败不得覆盖原持久化记录');
+
+for (const unsupportedLegacyStoryDate of ['04/05/2025', '15/04/2025', '2025.04.15', '2025-04-15T00:00:00Z', 'April 15, 2025']) {
+    const unsupportedLegacyEnvelope = structuredClone(legacyPhase5Envelope);
+    const unsupportedLegacyStage = unsupportedLegacyEnvelope.payload.globalEnvelope.payload.scopes.chat.payload.dynamics.active[0].stages
+        .find(stage => stage.kind === 'live-stage');
+    unsupportedLegacyStage.storyDate = unsupportedLegacyStoryDate;
+    const unsupportedLegacyBefore = JSON.stringify(unsupportedLegacyEnvelope);
+    assert.throws(() => normalizeTodayTrendV2Envelope(unsupportedLegacyEnvelope), error =>
+        error?.code === 'TT_V2_LEGACY_MIGRATION_FAILED'
+        && error.cause?.diagnostics?.[0]?.path?.endsWith('.storyDate'),
+    `旧 envelope 日期 ${unsupportedLegacyStoryDate} 不得被猜测解析，必须返回字段路径诊断`);
+    assert.equal(JSON.stringify(unsupportedLegacyEnvelope), unsupportedLegacyBefore,
+        `旧 envelope 日期 ${unsupportedLegacyStoryDate} 迁移失败不得覆盖原持久化记录`);
+}
 
 const danglingLegacyEnvelope = structuredClone(legacyPhase5Envelope);
 const danglingLegacyPeriod = danglingLegacyEnvelope.payload.globalEnvelope.payload.scopes.chat.payload.dynamics.active[0].stages
@@ -6135,7 +6296,7 @@ assert.equal(serializeTodayTrendV2ScopeForGeneration(phase9ArchivedFromManifest,
 const phase10PromptEnvelope = buildTodayTrendGenerationEnvelope({
     context: collectedContext, preset: valid.presets.preset, scope: valid.scopes.chat, promptScope: phase10PromptScope,
 });
-assert.match(phase10PromptEnvelope.userPrompt, /"kind\\\":\\\"day-summary\\\"/,
+assert.match(phase10PromptEnvelope.userPrompt, /"kind\\":\\"day-summary\\"/,
     '常规 AI envelope 必须使用 canonical summary serializer 的内容');
 assert.doesNotMatch(phase10PromptEnvelope.userPrompt, /完成北侧仓门加固/,
     '常规 AI envelope 不得回退到 facade 后泄漏 folded detail 正文');

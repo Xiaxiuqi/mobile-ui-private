@@ -1,12 +1,12 @@
 import { createTodayTrendCommitter } from './today-trend-commit.js';
 import { createTodayTrendGenerationController } from './today-trend-generation.js';
-import { createTodayTrendScheduler } from './today-trend-scheduler.js';
+import { countTodayTrendAssistantMessages, createTodayTrendScheduler } from './today-trend-scheduler.js';
 import { loadTodayTrendStore, saveTodayTrendStore } from './today-trend-storage.js';
 import { createEmptyTodayTrendScope } from './today-trend-model.js';
 import {
     buildReadOnlyShadow, normalizeTodayTrendV2Candidate, resolveTodayTrendV2DetailForTarget,
     resolveTodayTrendV2RetentionSettingsState, resolveTodayTrendV2UiScope, saveTodayTrendRetentionSettingsToV2,
-    serializeTodayTrendV2ScopeForGeneration,
+    serializeTodayTrendV2ScopeForGeneration, replaceTodayTrendV2ScopeWithInitialization,
 } from './today-trend-v2-model.js';
 
 export function installTodayTrend(_state, deps = {}) {
@@ -82,9 +82,29 @@ export function installTodayTrend(_state, deps = {}) {
         if (!storageId || storageId !== getStorageId() || !character?.name) throw new Error('请先打开有效的角色聊天');
         return { storageId, characterId: String(character.avatar || context.characterId || '').trim(), characterName: character.name.trim() };
     };
-    const initialize = async ({ worldBookNames, includeExistingChat = true, userRequirements = '', presetName = '', presetId = '', signal } = {}) => {
+    const initialize = async ({ worldBookNames, includeExistingChat = true, backfillExistingChat = false,
+        recentAssistantCount, mergeAssistantCount, userRequirements = '', presetName = '', presetId = '', signal } = {}) => {
         const identity = currentIdentity(getStorageId());
         const existing = await loadStore();
+        const assistantCount = countTodayTrendAssistantMessages(getCtx()?.chat);
+        const fallbackMergeAssistantCount = Math.min(5, assistantCount);
+        const normalizedRecentAssistantCount = backfillExistingChat === true && assistantCount > 0
+            ? (recentAssistantCount === undefined ? assistantCount : recentAssistantCount) : null;
+        const normalizedMergeAssistantCount = backfillExistingChat === true && assistantCount > 0
+            ? (mergeAssistantCount === undefined ? fallbackMergeAssistantCount : mergeAssistantCount) : null;
+        if (backfillExistingChat === true && assistantCount > 0
+            && (!Number.isSafeInteger(normalizedRecentAssistantCount) || normalizedRecentAssistantCount < 1
+                || normalizedRecentAssistantCount > assistantCount)) {
+            throw Object.assign(new Error('初始化历史回填 recentAssistantCount 越界'), { code: 'TT_HISTORY_WINDOW_INVALID' });
+        }
+        if (backfillExistingChat === true && assistantCount > 0
+            && (!Number.isSafeInteger(normalizedMergeAssistantCount) || normalizedMergeAssistantCount < 1
+                || normalizedMergeAssistantCount > normalizedRecentAssistantCount)) {
+            throw Object.assign(new Error('初始化历史回填 mergeAssistantCount 越界'), { code: 'TT_HISTORY_WINDOW_INVALID' });
+        }
+        const initializationBatchDraft = normalizedRecentAssistantCount === null ? null : {
+            enabled: true, recentAssistantCount: normalizedRecentAssistantCount, mergeAssistantCount: normalizedMergeAssistantCount,
+        };
         const requestedPresetId = String(presetId || '').trim();
         if (requestedPresetId && !existing.presets[requestedPresetId]) throw new Error('要重新初始化的世界预设不存在');
         const resolvedPresetId = requestedPresetId || nextPresetId(existing, identity.storageId);
@@ -96,34 +116,77 @@ export function installTodayTrend(_state, deps = {}) {
         if (signal) signal.addEventListener('abort', () => task.abortController.abort(signal.reason), { once: true });
         initialization = task;
         const active = () => initialization === task && !task.abortController.signal.aborted && getStorageId() === identity.storageId;
-        const result = await controller.initialize({ ...identity, worldBookNames, includeExistingChat, userRequirements, presetId: resolvedPresetId, signal: task.abortController.signal });
+        const canonicalAtStart = committer.supportsCanonical === true && typeof committer.loadCanonical === 'function'
+            ? await committer.loadCanonical() : null;
+        const expectedCanonicalScopeRevision = canonicalAtStart?.globalEnvelope?.payload?.scopes?.[identity.storageId]?.revision;
+        const result = await controller.initialize({ ...identity, worldBookNames, includeExistingChat, userRequirements,
+            presetId: resolvedPresetId, signal: task.abortController.signal });
         if (!active()) throw Object.assign(new Error('今日风向初始化已取消'), { name: 'AbortError' });
-        const initialized = await committer.commitStore(store => {
-            const presetId = result.store.scopes[identity.storageId].presetId;
-            const previousPreset = store.presets[presetId];
-            const currentScope = store.scopes[identity.storageId];
-            if ((expectedScopePresetId && currentScope?.presetId !== expectedScopePresetId)
-                || JSON.stringify(currentScope || null) !== JSON.stringify(expectedScope)
-                || (expectedPresetRevision && previousPreset?.revision !== expectedPresetRevision)
-                || (!expectedPresetRevision && previousPreset)) {
-                throw new Error('今日风向预设已变化，初始化结果已丢弃');
-            }
-            const next = structuredClone(store);
-            next.presets[presetId] = { ...structuredClone(result.store.presets[presetId]),
-                createdAt: previousPreset?.createdAt || result.store.presets[presetId].createdAt,
-                revision: previousPreset ? previousPreset.revision + 1 : 1,
-                updatedAt: Date.now() };
-            next.scopes[identity.storageId] = structuredClone(result.store.scopes[identity.storageId]);
-            if (presetName.trim()) next.presets[presetId].name = presetName.trim();
-            next.scopes[identity.storageId].operation.enabled = true;
-            return next;
-        }, { active });
+        const initialized = canonicalAtStart
+            ? await committer.commitStore(store => {
+                const currentFacade = buildReadOnlyShadow(store);
+                const currentScope = currentFacade.scopes[identity.storageId];
+                const previousPreset = currentFacade.presets[resolvedPresetId];
+                if ((expectedScopePresetId && currentScope?.presetId !== expectedScopePresetId)
+                    || JSON.stringify(currentScope || null) !== JSON.stringify(expectedScope)
+                    || (expectedPresetRevision && previousPreset?.revision !== expectedPresetRevision)
+                    || (!expectedPresetRevision && previousPreset)) throw new Error('今日风向预设已变化，初始化结果已丢弃');
+                const initializationStore = structuredClone(result.store);
+                const nextPreset = initializationStore.presets[resolvedPresetId];
+                nextPreset.createdAt = previousPreset?.createdAt || nextPreset.createdAt;
+                nextPreset.revision = previousPreset ? previousPreset.revision + 1 : 1;
+                nextPreset.updatedAt = Date.now();
+                if (presetName.trim()) nextPreset.name = presetName.trim();
+                initializationStore.scopes[identity.storageId].operation = {
+                    ...initializationStore.scopes[identity.storageId].operation,
+                    enabled: true,
+                    ...(initializationBatchDraft ? { batchDraft: initializationBatchDraft } : {}),
+                };
+                return replaceTodayTrendV2ScopeWithInitialization(store, initializationStore, identity.storageId, Date.now());
+            }, { active }, {
+                canonical: true,
+                scopeId: identity.storageId,
+                expectedStoreRevision: canonicalAtStart.globalEnvelope.revision,
+                ...(expectedCanonicalScopeRevision === undefined ? {} : { expectedScopeRevision: expectedCanonicalScopeRevision }),
+            })
+            : await committer.commitStore(store => {
+                const previousPreset = store.presets[resolvedPresetId];
+                const currentScope = store.scopes[identity.storageId];
+                if ((expectedScopePresetId && currentScope?.presetId !== expectedScopePresetId)
+                    || JSON.stringify(currentScope || null) !== JSON.stringify(expectedScope)
+                    || (expectedPresetRevision && previousPreset?.revision !== expectedPresetRevision)
+                    || (!expectedPresetRevision && previousPreset)) throw new Error('今日风向预设已变化，初始化结果已丢弃');
+                const next = structuredClone(store);
+                next.presets[resolvedPresetId] = { ...structuredClone(result.store.presets[resolvedPresetId]),
+                    createdAt: previousPreset?.createdAt || result.store.presets[resolvedPresetId].createdAt,
+                    revision: previousPreset ? previousPreset.revision + 1 : 1, updatedAt: Date.now() };
+                next.scopes[identity.storageId] = structuredClone(result.store.scopes[identity.storageId]);
+                if (presetName.trim()) next.presets[resolvedPresetId].name = presetName.trim();
+                next.scopes[identity.storageId].operation = {
+                    ...next.scopes[identity.storageId].operation,
+                    enabled: true,
+                    ...(initializationBatchDraft ? { batchDraft: initializationBatchDraft } : {}),
+                };
+                return next;
+            }, { active });
         if (!initialized) throw new Error('今日风向初始化已取消');
         if (!active()) throw Object.assign(new Error('今日风向初始化已取消'), { name: 'AbortError' });
         scheduler.arm(identity.storageId);
+        if (initializationBatchDraft) {
+            try {
+                await scheduler.manual({ batchEnabled: true, ...initializationBatchDraft });
+            } catch (error) {
+                if (error?.name === 'AbortError') throw error;
+                const failure = new Error(`今日风向已初始化，但溯及既往失败：${error?.message || '未知错误'}`, { cause: error });
+                failure.code = 'TT_INITIALIZATION_BACKFILL_FAILED';
+                failure.causeCode = error?.code || null;
+                throw failure;
+            }
+        }
         if (initialization === task) initialization = null;
         return initialized;
     };
+
     const cancelInitialization = reason => {
         initialization?.abortController.abort(reason || 'today-trend-initialization-cancelled');
         initialization = null;
