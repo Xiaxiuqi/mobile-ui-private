@@ -614,19 +614,12 @@ assert.deepEqual({ backfillExistingChat: initializedControllerOptions?.backfillE
     recentAssistantCount: initializedControllerOptions?.recentAssistantCount, mergeAssistantCount: initializedControllerOptions?.mergeAssistantCount },
 { backfillExistingChat: true, recentAssistantCount: 2, mergeAssistantCount: 1 },
     '初始化控制器必须保留草稿并将回填开关与两个批处理参数透传至安装层');
+assert.equal(initializedControllerOptions?.runBackfill, false, '普通初始化不得隐式启动历史批量更新');
 globalThis.FormData = controllerFormData;
-const controllerBatchSettingsButton = { disabled: false, dataset: { action: 'today-trend-open-batch-settings' } };
-controllerListeners.find(item => item.type === 'click' && item.capture)?.listener({
-    target: { closest: selector => selector === 'button[data-action]' ? controllerBatchSettingsButton : null },
-});
+const controllerCloseSettingsButton = { disabled: false, dataset: { action: 'today-trend-close-settings' }, closest: () => controllerCloseSettingsButton };
+controllerListeners.filter(item => item.type === 'click').forEach(item => item.listener({ target: controllerCloseSettingsButton }));
 await new Promise(resolve => setTimeout(resolve, 0));
-assert.match(controllerContainer.innerHTML, /data-today-trend-form="batch-settings"[\s\S]*溯及既往楼层更新[\s\S]*name="batchEnabled"/,
-    '主页面手动批量更新入口必须打开可显式启用的批量设置菜单');
-const controllerCloseSettingsButton = { disabled: false, dataset: { action: 'today-trend-close-settings' } };
-controllerListeners.find(item => item.type === 'click' && item.capture)?.listener({
-    target: { closest: selector => selector === 'button[data-action]' ? controllerCloseSettingsButton : null },
-});
-await new Promise(resolve => setTimeout(resolve, 0));
+assert.doesNotMatch(controllerContainer.innerHTML, /data-today-trend-form="batch-settings"/, '初始化后的设置页关闭后必须回到内容页，避免污染后续同步状态断言');
 const controllerGenerateAllButton = { disabled: false, dataset: { action: 'today-trend-generate-all' }, closest: () => controllerGenerateAllButton };
 controllerListeners.filter(item => item.type === 'click').forEach(item => item.listener({ target: controllerGenerateAllButton }));
 await new Promise(resolve => setTimeout(resolve, 0));
@@ -709,6 +702,10 @@ assert.match(backfillCreatePresetHtml, /name="mergeAssistantCount"[^>]*min="1" m
     '初始化历史回填开关开启时必须渲染并保留每批合并层数');
 assert.match(backfillCreatePresetHtml, /当前聊天 AI 回复累计层数：12。将处理尾部最近 N 层。/,
     '初始化历史回填参数必须明确尾部窗口语义');
+const emptyBackfillCreatePresetHtml = renderTodayTrendApp({ worldBooks: ['厨房设定'], assistantCount: 0,
+    initializationDraft: { includeExistingChat: true, backfillExistingChat: true } });
+assert.doesNotMatch(emptyBackfillCreatePresetHtml, /data-action="today-trend-initialize-and-batch"/,
+    '初始化历史回填开关开启但没有 AI 回复时不得展示不可执行的手动批量更新入口');
 
 const emptyWorldBooksHtml = renderTodayTrendApp({ worldBooks: [] });
 assert.doesNotMatch(emptyWorldBooksHtml, /pm-today-trend-mode-switch/, '无已有预设时不得展示无效的复用切换入口');
@@ -769,8 +766,8 @@ for (const view of [{ name: 'settings' }, { name: 'faction', mode: 'editor', edi
     assert.doesNotMatch(renderTodayTrendApp({ scope: valid.scopes.chat, presets: Object.values(valid.presets), view }), /data-today-trend-floor=/, '设置、编辑和规则页不得展示楼层仪表');
 }
 assert.match(appHtml, /today-trend-open-settings/, '主页面必须提供 APP 总设置入口');
-assert.match(appHtml, /data-action="today-trend-open-batch-settings"[^>]*aria-label="手动批量更新历史楼层"/,
-    '主页面必须提供与单次生成明确区分的手动批量更新入口');
+assert.doesNotMatch(appHtml, /today-trend-open-batch-settings|手动批量更新历史楼层/,
+    '顶栏不得提供错误归属的批量更新入口');
 assert.match(appHtml, /data-action="today-trend-generate-all"[^>]*aria-label="手动更新所有今日风向"/,
     '主页面单次生成入口不得被批量更新功能替换');
 const firstUseAppHtml = renderTodayTrendApp({ worldBooks: ['厨房设定'] });
@@ -2585,11 +2582,15 @@ const backfillFailureDeps = {
     }),
 };
 installTodayTrend({}, backfillFailureDeps);
+await backfillFailureDeps.initializeTodayTrend({ presetId: 'preset', worldBookNames: ['厨房'], backfillExistingChat: true,
+    recentAssistantCount: 1, mergeAssistantCount: 1 });
+assert.equal(backfillGenerateCalls, 0, '普通初始化即使保存回填配置也不得隐式启动 batchEnabled 路径');
+backfillCanonical = structuredClone(migratedValidV2);
 await assert.rejects(() => backfillFailureDeps.initializeTodayTrend({ presetId: 'preset', worldBookNames: ['厨房'], backfillExistingChat: true,
-    recentAssistantCount: 1, mergeAssistantCount: 1 }),
-    error => error?.code === 'TT_INITIALIZATION_BACKFILL_FAILED' && error?.causeCode === 'TT_HISTORY_TEST_FAILED',
-    '初始化后的普通历史回填失败必须保留稳定包装诊断');
-assert.equal(backfillGenerateCalls, 1, '存在 assistant 历史并显式开启回填时必须启动 batchEnabled 路径');
+    recentAssistantCount: 1, mergeAssistantCount: 1, runBackfill: true }),
+    /模拟历史生成失败/,
+    '用户明确选择手动批量更新后，历史批处理失败必须可观察并保留原始错误');
+assert.equal(backfillGenerateCalls, 1, '存在 assistant 历史且明确选择手动批量更新时必须启动 batchEnabled 路径');
 assert.equal(backfillGenerateOptions?.assistantCount, 2,
  '初始化回填的批次终点必须保留当前 assistant 总数');
 assert.deepEqual(backfillGenerateOptions?.historyBatch, [{ role: 'assistant', content: 'AI 二' }],
@@ -6499,6 +6500,15 @@ assert.match(phase12BatchOnHtml, /name="batchEnabled"[^>]*checked/, '批处理�
 assert.match(phase12BatchOnHtml, new RegExp(`generationSnapshots：固定保留最近 ${TODAY_TREND_LIMITS.generationSnapshots} 个记录`), '固定容量说明必须来自统一容量常量');
 assert.match(phase12BatchOnHtml, /name="recentAssistantCount"[^>]*max="8"/, '批处理窗口上限必须来自当前 assistantCount');
 assert.match(phase12BatchOnHtml, /data-action="today-trend-batch-generate"/, '开启批处理后必须显示手动更新动作');
+const phase12FailedBatchHtml = renderTodayTrendSettingsView({
+    scope: { ...phase10UiScope, storageId: 'chat', operation: { ...phase10UiScope.operation, lastSuccessfulAssistantCount: 3 } },
+    presets: Object.values(valid.presets), assistantCount: 8,
+    generation: { phase: 'failed', task: { storageId: 'chat', batchIndex: 1, batchCount: 3 }, lastError: '事件生命周期无效' },
+    batchDraft: { enabled: true, recentAssistantCount: 5, mergeAssistantCount: 2 },
+});
+assert.match(phase12FailedBatchHtml, /已成功更新：3；当前未更新的 AI 回复累计层数：5/, '第二批失败后必须按最新成功边界显示可续填累计层数');
+assert.match(phase12FailedBatchHtml, /第 2\/3 批失败：事件生命周期无效。已成功批次已保留；可按未更新累计层数重填后继续。/,
+    '第二批失败后必须显示精确批号、原始错误和续填提示');
 const phase12BatchListeners = [];
 let phase12GeneratedOptions = null;
 let phase12UiScope = structuredClone(phase10UiScope);
@@ -6574,7 +6584,8 @@ await new Promise(resolve => setTimeout(resolve, 0));
 assert.equal(phase12GeneratedOptions, null, '非法批处理表单不得发起生成请求');
 phase12BatchForm.checkValidity = () => true;
 phase12BatchForm.values.set('recentAssistantCount', '4');
-phase12BatchListeners.find(item => item.type === 'click' && item.capture)?.listener({ target: phase12BatchButton });
+await phase12BatchListeners.find(item => item.type === 'click' && item.capture)?.listener({ target: phase12BatchButton });
+await new Promise(resolve => setTimeout(resolve, 0));
 assert.equal(phase12GeneratedOptions, null, '超出当前聊天范围的批处理参数不得发起生成请求');
 assert.match(phase12BatchContainer.innerHTML, /最近处理层数必须在当前聊天 AI 回复累计层数范围内/,
     '超出当前聊天范围的批处理参数必须显示错误，而非静默无响应');
@@ -6588,6 +6599,7 @@ const phase12NavigationInitialBatchDraft = structuredClone(phase12NavigationScop
 let phase12NavigationSaveCalls = 0;
 let phase12NavigationGenerateCalls = 0;
 let phase12NavigationInitializeCalls = 0;
+let phase12NavigationInitializeOptions = null;
 const phase12NavigationFocusSelector = 'form[data-today-trend-form="batch-settings"] input[name="recentAssistantCount"]';
 const phase12NavigationContainer = {
     innerHTML: '', contains: () => true,
@@ -6606,8 +6618,9 @@ const phase12NavigationController = createTodayTrendPhoneController({
         getTodayTrendCurrentFloor: () => 33, getTodayTrendGenerationState: () => ({ phase: 'idle' }), subscribeTodayTrendGeneration: () => () => {},
         saveTodayTrendSettings: async () => { phase12NavigationSaveCalls += 1; },
         generateTodayTrend: async () => { phase12NavigationGenerateCalls += 1; },
-        initializeTodayTrend: async () => {
+        initializeTodayTrend: async options => {
             phase12NavigationInitializeCalls += 1;
+            phase12NavigationInitializeOptions = options;
             phase12NavigationScope.operation = { ...phase12NavigationScope.operation,
                 batchDraft: { enabled: true, recentAssistantCount: 2, mergeAssistantCount: 1 } };
         },
@@ -6615,33 +6628,32 @@ const phase12NavigationController = createTodayTrendPhoneController({
 });
 await phase12NavigationController.render();
 assert.doesNotMatch(phase12NavigationContainer.innerHTML, /data-today-trend-form="batch-settings"/,
-    '隔离的批量入口测试必须从非设置页开始，避免初始化状态掩盖导航回归');
-const phase12NavigationBatchButton = { disabled: false, dataset: { action: 'today-trend-open-batch-settings' }, closest: () => phase12NavigationBatchButton };
-phase12NavigationListeners.find(item => item.type === 'click' && item.capture)?.listener({ target: phase12NavigationBatchButton });
+    '隔离的初始化回填测试必须从非设置页开始，避免现有设置状态掩盖导航回归');
+assert.doesNotMatch(phase12NavigationContainer.innerHTML, /today-trend-open-batch-settings|手动批量更新历史楼层/,
+    '内容页不得保留已废弃的顶栏批量入口');
+const phase12NavigationReinitializeButton = { disabled: false, dataset: { action: 'today-trend-reinitialize' }, closest: () => phase12NavigationReinitializeButton };
+phase12NavigationListeners.find(item => item.type === 'click' && item.capture)?.listener({ target: phase12NavigationReinitializeButton });
 await new Promise(resolve => setTimeout(resolve, 0));
-assert.match(phase12NavigationContainer.innerHTML, /data-today-trend-form="batch-settings"[\s\S]*name="batchEnabled"[\s\S]*name="recentAssistantCount"/,
-    '从内容页点击批量入口必须打开可显式启用的批量设置菜单');
-assert.deepEqual(phase12NavigationFocusLog, [phase12NavigationFocusSelector],
-    '批量入口打开设置后必须且只能聚焦最近处理层数输入框');
-assert.equal(phase12NavigationSaveCalls, 0, '仅打开批量设置不得保存任何持久化设置');
-assert.equal(phase12NavigationGenerateCalls, 0, '仅打开批量设置不得触发单次或批量生成');
+assert.match(phase12NavigationContainer.innerHTML, /data-today-trend-form="initialize"/,
+    '重新初始化动作必须打开初始化表单，以便由用户选择回填开关与手动批量更新提交入口');
+assert.deepEqual(phase12NavigationFocusLog, [], '进入初始化页不得提前伪造批量设置的焦点结果');
+assert.equal(phase12NavigationSaveCalls, 0, '仅打开初始化页不得保存任何持久化设置');
+assert.equal(phase12NavigationGenerateCalls, 0, '仅打开初始化页不得触发单次或批量生成');
 assert.deepEqual(phase12NavigationScope.operation.batchDraft, phase12NavigationInitialBatchDraft,
-    '仅打开批量设置不得改写 batchDraft');
-const phase12NavigationCloseButton = { disabled: false, dataset: { action: 'today-trend-close-settings' }, closest: () => phase12NavigationCloseButton };
-phase12NavigationListeners.find(item => item.type === 'click' && item.capture)?.listener({ target: phase12NavigationCloseButton });
-await new Promise(resolve => setTimeout(resolve, 0));
+    '仅打开初始化页不得改写 batchDraft');
 const phase12NavigationFormData = globalThis.FormData;
 globalThis.FormData = class { constructor(form) { this.values = form.values; } get(name) { return this.values.get(name) ?? null; } getAll(name) { const value = this.values.get(name); return Array.isArray(value) ? value : value === undefined ? [] : [value]; } };
 const phase12NavigationInitializeForm = { dataset: { todayTrendForm: 'initialize' }, matches: selector => selector === 'form[data-today-trend-form]', checkValidity: () => true, reportValidity: () => {},
     values: new Map([['presetName', '初始预设'], ['worldBookNames', ['厨房']], ['includeExistingChat', 'on'], ['backfillExistingChat', 'on'], ['recentAssistantCount', '2'], ['mergeAssistantCount', '1']]) };
-for (const listener of phase12NavigationListeners.filter(item => item.type === 'submit')) listener.listener({ target: phase12NavigationInitializeForm, preventDefault() {} });
+for (const listener of phase12NavigationListeners.filter(item => item.type === 'submit')) listener.listener({ target: phase12NavigationInitializeForm, submitter: { dataset: { action: 'today-trend-initialize-and-batch' } }, preventDefault() {} });
 await new Promise(resolve => setTimeout(resolve, 0));
 globalThis.FormData = phase12NavigationFormData;
 assert.equal(phase12NavigationInitializeCalls, 1, '隔离初始化测试必须实际完成一次回填初始化调用');
+assert.equal(phase12NavigationInitializeOptions?.runBackfill, true, '手动批量更新提交按钮必须显式请求初始化后批处理');
 assert.match(phase12NavigationContainer.innerHTML, /data-today-trend-form="batch-settings"[\s\S]*name="recentAssistantCount"[^>]*value="2"/,
     '回填初始化成功后必须自动进入批量设置菜单');
-assert.deepEqual(phase12NavigationFocusLog, [phase12NavigationFocusSelector, phase12NavigationFocusSelector],
-    '回填初始化成功后必须使用与批量入口相同的焦点定位');
+assert.deepEqual(phase12NavigationFocusLog, [phase12NavigationFocusSelector],
+    '回填初始化成功后必须且只能聚焦批量设置的最近处理层数输入框');
 phase12NavigationController.destroy();
 for (const [name, maximum] of [['archivedDetailLatestEventCount', 80], ['archivedDetailRetentionFloors', 1000]]) {
     assert.match(phase11SettingsHtml, new RegExp(`name="${name}"[^>]*min="0"[^>]*max="${maximum}"[^>]*step="1"[^>]*required`),

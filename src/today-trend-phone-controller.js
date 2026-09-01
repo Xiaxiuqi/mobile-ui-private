@@ -98,11 +98,7 @@ export function createTodayTrendPhoneController({ state, deps, container }) {
         pendingFocusSelector = code === 'TT_RETENTION_SETTINGS_INVALID'
             ? 'form[data-today-trend-form="retention-settings"] input:invalid'
             : code === 'TT_SETTINGS_REVISION_CONFLICT' ? '.pm-today-trend-error' : '';
-        container.innerHTML = renderTodayTrendApp({ scope: lastScope, presets: lastPresets, worldBooks: worldBooks(), view: lastView,
-            currentFloor: deps.getTodayTrendCurrentFloor?.(), assistantCount: assistantCount(), error, initializing: false, initializationDraft, initializationOpen, reinitializing, initializationMode,
-            detailById, loadingDetailIds, retentionRevisions, retentionSaving, retentionDraft, diagnosticCopyStatus, batchDraft: lastScope?.operation?.batchDraft });
-        restoreFocus(pendingFocusSelector, renderEpoch);
-        pendingFocusSelector = '';
+        render().catch(() => {});
     };
     const rerender = view => render(view).catch(report);
     const generationChanged = snapshot => {
@@ -224,9 +220,6 @@ export function createTodayTrendPhoneController({ state, deps, container }) {
                 .then(() => generate(null, null, { batchEnabled: true, recentAssistantCount, mergeAssistantCount })).catch(report);
         }
         if (button.dataset.action === 'today-trend-open-settings') { settings = true; rerender(); }
-        if (button.dataset.action === 'today-trend-open-batch-settings') {
-            settings = true; pendingFocusSelector = 'form[data-today-trend-form="batch-settings"] input[name="recentAssistantCount"]'; rerender();
-        }
         if (button.dataset.action === 'today-trend-close-settings') { settings = false; retentionDraft = null; rerender(); }
         if (button.dataset.action === 'today-trend-use-preset') { initializationMode = 'reuse'; error = null; rerender(); }
         if (button.dataset.action === 'today-trend-create-preset') { initializationMode = 'create'; error = null; rerender(); }
@@ -277,6 +270,7 @@ export function createTodayTrendPhoneController({ state, deps, container }) {
             event.preventDefault();
             if (initializing || typeof deps.initializeTodayTrend !== 'function') return;
             if (!form.checkValidity?.()) { form.reportValidity?.(); return; }
+            const runBackfill = event.submitter?.dataset?.action === 'today-trend-initialize-and-batch';
             initializationDraft = draftFrom(data);
             if (initializationDraft.backfillExistingChat === true) {
                 const currentCount = assistantCount();
@@ -290,7 +284,8 @@ export function createTodayTrendPhoneController({ state, deps, container }) {
                 }
             }
             const taskAbort = new AbortController(); initAbort = taskAbort; initializing = true; error = null; rerender();
-            deps.initializeTodayTrend({ ...initializationDraft, presetId: reinitializing ? lastScope?.presetId : '', signal: taskAbort.signal }).then(() => {
+            deps.initializeTodayTrend({ ...initializationDraft, runBackfill,
+                presetId: reinitializing ? lastScope?.presetId : '', signal: taskAbort.signal }).then(() => {
                 if (taskAbort.signal.aborted || initAbort !== taskAbort) return;
                 const openedWithBackfill = initializationDraft.backfillExistingChat === true;
                 initializing = false; initAbort = null; initializationOpen = false; reinitializing = false; initializationMode = 'reuse'; initializationDraft = { includeExistingChat: true };
@@ -298,7 +293,14 @@ export function createTodayTrendPhoneController({ state, deps, container }) {
                 rerender();
             }).catch(cause => {
                 if (taskAbort.signal.aborted || initAbort !== taskAbort) return;
-                initializing = false; initAbort = null; report(cause);
+                initializing = false; initAbort = null;
+                if (runBackfill && initializationDraft.backfillExistingChat === true) {
+                    initializationOpen = false;
+                    reinitializing = false;
+                    initializationMode = 'reuse';
+                    settings = true;
+                }
+                report(cause);
             });
         }
         if (form.dataset.todayTrendForm === 'bind-preset') {

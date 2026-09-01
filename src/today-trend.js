@@ -83,7 +83,7 @@ export function installTodayTrend(_state, deps = {}) {
         return { storageId, characterId: String(character.avatar || context.characterId || '').trim(), characterName: character.name.trim() };
     };
     const initialize = async ({ worldBookNames, includeExistingChat = true, backfillExistingChat = false,
-        recentAssistantCount, mergeAssistantCount, userRequirements = '', presetName = '', presetId = '', signal } = {}) => {
+        recentAssistantCount, mergeAssistantCount, runBackfill = false, userRequirements = '', presetName = '', presetId = '', signal } = {}) => {
         const identity = currentIdentity(getStorageId());
         const existing = await loadStore();
         const assistantCount = countTodayTrendAssistantMessages(getCtx()?.chat);
@@ -172,17 +172,7 @@ export function installTodayTrend(_state, deps = {}) {
         if (!initialized) throw new Error('今日风向初始化已取消');
         if (!active()) throw Object.assign(new Error('今日风向初始化已取消'), { name: 'AbortError' });
         scheduler.arm(identity.storageId);
-        if (initializationBatchDraft) {
-            try {
-                await scheduler.manual({ batchEnabled: true, ...initializationBatchDraft });
-            } catch (error) {
-                if (error?.name === 'AbortError') throw error;
-                const failure = new Error(`今日风向已初始化，但溯及既往失败：${error?.message || '未知错误'}`, { cause: error });
-                failure.code = 'TT_INITIALIZATION_BACKFILL_FAILED';
-                failure.causeCode = error?.code || null;
-                throw failure;
-            }
-        }
+        if (runBackfill === true && initializationBatchDraft) await scheduler.manual({ batchEnabled: true, ...initializationBatchDraft });
         if (initialization === task) initialization = null;
         return initialized;
     };
