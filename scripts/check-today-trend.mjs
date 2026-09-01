@@ -1175,6 +1175,7 @@ assertCode(() => { const value = fixture(); value.scopes.chat.dynamics.active[0]
 assertCode(() => { const value = fixture(); value.scopes.chat.dynamics.active[0].latestStage = '不一致'; return value; }, 'TT_EVENT_STAGE_HISTORY');
 assertCode(() => { const value = fixture(); value.scopes.chat.dynamics.active[0].stages = []; return value; }, 'TT_EVENT_STAGE_HISTORY');
 assertCode(() => { const value = fixture(); value.scopes.chat.factions[0].relatedFactionIds = ['red']; return value; }, 'TT_FACTION_SELF');
+assertCode(() => { const value = fixture(); value.scopes.chat.factions[0].relatedFactionIds = ['missing-faction']; return value; }, 'TT_FACTION_RELATED');
 assertCode(() => { const value = fixture(); value.scopes.chat.factions[0].details = [{ label: '队长', value: '甲' }, { label: '队长', value: '乙' }]; return value; }, 'TT_FACTION_DETAILS');
 assertCode(() => { const value = fixture(); value.scopes.chat.factions[1].relatedFactionIds = ['red']; return value; }, 'TT_FACTION_RELATION_OVERLAP');
 assertCode(() => { const value = fixture(); value.scopes.chat.operation.enabled = 'true'; return value; }, 'TT_SCOPE');
@@ -2733,6 +2734,8 @@ assert.match(generationPrompts.systemPrompt, /stages 必须是非空字符串数
     '事件追踪生成提示词必须区分 v2 输入投影与 v1 字符串 stages 输出契约');
 
 assert.match(generationPrompts.systemPrompt, /daySummaries 的判定必须逐 event 独立执行/, '封日摘要判定不得受其他 event 的开放日期影响');
+assert.match(generationPrompts.systemPrompt, /每个满足条件的 event 都必须独立提供该摘要，不受本轮其他 event 数量限制/,
+    '封日摘要提示词不得引入跨事件数量配额');
 assert.match(generationPrompts.systemPrompt, /当前没有开放 live-stage、可信 story_date 缺失或未前进时，必须输出 daySummaries:\[\]，即使该 event 本轮追加了 stages 也禁止生成 daySummary/,
     '无开放 live-stage 的 event 即使本轮追加阶段也必须明确禁止伪造封日摘要');
 assert.match(generationPrompts.systemPrompt, /不允许新建 type 为 incident/, '未命中突发投骰时必须禁止新增事故');
@@ -2815,6 +2818,21 @@ assert.equal(fullyUpdated.scope.world.items[0].summary, '全量更新世界态�
 assert.equal(fullyUpdated.scope.reputation.circles[0].evaluation, '全量更新个人风评', '手动全量生成必须允许更新个人风评');
 assert.equal(fullyUpdated.scope.factions[0].summary, '全量更新势力图谱', '手动全量生成必须允许更新势力图谱');
 assert.equal(fullyUpdated.scope.dynamics.active[0].latestStage, '全量更新事件阶段', '手动全量生成必须允许更新事件追踪');
+const factionReferenceScope = structuredClone(valid.scopes.chat);
+factionReferenceScope.factions.push({
+    id: 'rival', name: '蓝队', summary: '对手队伍', parentId: null, relatedFactionIds: ['red'], details: [],
+    relation: { status: 'dislike', evaluation: '竞争激烈' },
+});
+const cleanedFactionReferences = await createTodayTrendGenerationController({ getCtx: () => ({}), gather: async () => collectedContext,
+    callAI: async () => JSON.stringify({ world: null, reputation: null, factions: factionReferenceScope.factions.map(faction =>
+        faction.id === 'red' ? { ...faction, relatedFactionIds: ['missing-faction', 'station'] } : faction), dynamics: null }),
+}).generate({ scope: valid.scopes.chat, preset: valid.presets.preset });
+const cleanedRedFaction = cleanedFactionReferences.scope.factions.find(faction => faction.id === 'red');
+const cleanedRivalFaction = cleanedFactionReferences.scope.factions.find(faction => faction.id === 'rival');
+assert.deepEqual(cleanedRedFaction.relatedFactionIds, [],
+    '生成链必须删除不存在和直接父子重叠的外部关联，避免将无效引用交给模型校验');
+assert.deepEqual(cleanedRivalFaction.relatedFactionIds, ['red'],
+    '生成链不得删除当前完整 factions 数组中的合法非父子外部关联');
 await assert.rejects(() => createTodayTrendGenerationController({
     getCtx: () => ({}), gather: async () => collectedContext,
     callAI: async () => JSON.stringify({ world: null, reputation: null, factions: null, dynamics: {
@@ -4375,6 +4393,34 @@ assert.equal(phase5NextPayload.stageDetailsByEvent.service.length, 2, '封日必
 assert.equal(phase5NextPayload.removableEntityStateById['day:service:2025-04-15'].state, 'available',
     '新 day-summary 必须与 available lifecycle 同事务写入');
 
+const phase5ParallelV1 = structuredClone(valid);
+phase5ParallelV1.scopes.chat.dynamics.active.push({
+    ...phase5ParallelV1.scopes.chat.dynamics.active[0], id: 'coordination', title: '后厨协调', stageLabel: '协调中',
+    stages: ['分配岗位'], latestStage: '分配岗位', relatedEventIds: [],
+});
+const phase5ParallelBase = migrateTodayTrendStoreToV2(normalizeTodayTrendStore(phase5ParallelV1)).store;
+const phase5ParallelScope = (store, serviceText, coordinationText) => {
+    const scope = structuredClone(buildReadOnlyShadow(store).scopes.chat);
+    for (const [id, text] of [['service', serviceText], ['coordination', coordinationText]]) {
+        const event = scope.dynamics.active.find(item => item.id === id);
+        event.stages.push(text);
+        event.latestStage = text;
+    }
+    return scope;
+};
+const phase5ParallelDated = applyTodayTrendGenerationToV2(phase5ParallelBase, 'chat',
+    phase5ParallelScope(phase5ParallelBase, '服务首日推进', '协调首日推进'), {
+        events: ['service', 'coordination'].map(eventId => ({ eventId, stages: [phase5Stage(`${eventId === 'service' ? '服务' : '协调'}首日推进`)], daySummaries: [], periodSummaries: [] })),
+    }, { trustedStoryDate: '2025-04-15', assistantCount: 8, generatedAt: 100 });
+const phase5ParallelNextDay = applyTodayTrendGenerationToV2(phase5ParallelDated, 'chat',
+    phase5ParallelScope(phase5ParallelDated, '服务次日推进', '协调次日推进'), {
+        events: ['service', 'coordination'].map(eventId => ({ eventId, stages: [phase5Stage(`${eventId === 'service' ? '服务' : '协调'}次日推进`)],
+            daySummaries: [{ summaryText: `${eventId} 首日摘要`, keyStages: [eventId] }], periodSummaries: [] })),
+    }, { trustedStoryDate: '2025-04-16', assistantCount: 9, generatedAt: 110 });
+assert.ok(phase5ParallelNextDay.globalEnvelope.payload.scopes.chat.payload.dynamics.active
+    .filter(event => ['service', 'coordination'].includes(event.id)).every(event => event.stages.at(-2).kind === 'day-summary'),
+    '多个事件在同一日期推进时必须各自封日，不能受跨事件数量配额拒绝');
+
 assert.throws(() => applyTodayTrendGenerationToV2(phase5Dated, 'chat',
     phase5GeneratedScope(phase5Dated, '日期倒退进展'), phase5Producer('service', [phase5Stage('日期倒退进展')]), {
         trustedStoryDate: '2025-04-14', assistantCount: 9,
@@ -4388,6 +4434,11 @@ assert.throws(() => applyTodayTrendGenerationToV2(phase5Dated, 'chat',
         { summaryText: '无效摘要', keyStages: ['missing-event'] },
     ]), { trustedStoryDate: '2025-04-16', assistantCount: 9 }),
 error => error?.code === 'TT_HISTORY_UNKNOWN_KEY_STAGE', 'day summary 未知 keyStage 必须整单拒绝');
+assert.throws(() => applyTodayTrendGenerationToV2(phase5Dated, 'chat',
+    phase5GeneratedScope(phase5Dated, 'dynamics 新阶段'), phase5Producer('service', [phase5Stage('history 错误阶段')]), {
+        trustedStoryDate: '2025-04-15', assistantCount: 9,
+    }), error => error?.code === 'TT_HISTORY_STAGE_MISMATCH',
+'history 与 dynamics 新增阶段正文不一致时必须整单拒绝');
 assert.throws(() => normalizeTodayTrendHistoryProducer(phase5Producer('service', [], [{
     summaryText: '过长摘要'.repeat(61), keyStages: ['service'],
 }])), error => error?.code === 'TT_HISTORY_SCHEMA_INVALID', 'summaryText 超过 240 字必须整单拒绝');
@@ -4425,15 +4476,12 @@ assert.deepEqual(
     phase5LeapPeriod.events[0].periodSummaries[0],
     'period producer 必须接受闰年 02-29 与跨月合法区间',
 );
-const phase5TooManyDaySummaries = {
-    events: [
-        { eventId: 'service', stages: [], daySummaries: [{ summaryText: '摘要一', keyStages: ['service'] }], periodSummaries: [] },
-        { eventId: 'rumor', stages: [], daySummaries: [{ summaryText: '摘要二', keyStages: ['service'] }], periodSummaries: [] },
-    ],
-};
-assert.throws(() => applyTodayTrendGenerationToV2(migratedValidV2, 'chat', buildReadOnlyShadow(migratedValidV2).scopes.chat,
-    phase5TooManyDaySummaries, { trustedStoryDate: '2025-04-15', assistantCount: 8 }),
-error => error?.code === 'TT_HISTORY_LIMIT_EXCEEDED', 'day summaries 超过 events / 2 必须整单拒绝');
+assert.throws(() => normalizeTodayTrendHistoryProducer(phase5Producer('service', [], [{
+    summaryText: '摘要一', keyStages: ['service'],
+}, {
+    summaryText: '摘要二', keyStages: ['service'],
+}])), error => error?.code === 'TT_HISTORY_LIMIT_EXCEEDED',
+'单个 event 每轮产生两条 day summary 必须继续整单拒绝');
 
 const phase5RolledBack = rollbackTodayTrendV2Scope(phase5NextDay, 'chat', 9);
 const phase5RolledBackPayload = phase5RolledBack.globalEnvelope.payload.scopes.chat.payload;

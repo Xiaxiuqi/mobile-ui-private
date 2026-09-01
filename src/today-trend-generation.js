@@ -49,12 +49,14 @@ const verifyDynamics = value => {
     }, '动态事件');
 };
 
-const withoutDirectParentChildLinks = factions => {
+const sanitizeFactionRelations = factions => {
     if (!Array.isArray(factions)) return factions;
+    const factionIds = new Set(factions.map(faction => faction?.id).filter(id => typeof id === 'string' && id));
     const parentById = new Map(factions.map(faction => [faction?.id, faction?.parentId]));
     return factions.map(faction => {
         if (!Array.isArray(faction?.relatedFactionIds)) return faction;
-        const relatedFactionIds = faction.relatedFactionIds.filter(id => id !== faction.parentId && parentById.get(id) !== faction.id);
+        const relatedFactionIds = faction.relatedFactionIds.filter(id => factionIds.has(id)
+            && id !== faction.parentId && parentById.get(id) !== faction.id);
         return relatedFactionIds.length === faction.relatedFactionIds.length ? faction : { ...faction, relatedFactionIds };
     });
 };
@@ -170,7 +172,7 @@ function assertTargetedGeneration(parsed, scope, target) {
 
 function normalizeGeneration(parsed, { scope, preset, allowIncident }) {
     if (!scope || !preset) throw new TypeError('今日风向生成缺少当前资料');
-    const generatedFactions = parsed.factions === null ? null : withoutDirectParentChildLinks(parsed.factions);
+    const generatedFactions = parsed.factions === null ? null : sanitizeFactionRelations(parsed.factions);
     const normalizeEventLatestStage = event => {
         if (!event || !Array.isArray(event.stages) || !event.stages.length) return event;
         const latestStage = event.stages.at(-1);
@@ -250,7 +252,7 @@ function normalizeInitialization(parsed, context, now, presetId = `${context.sto
         createdAt: timestamp, updatedAt: timestamp, source: context.source,
     };
     const scope = {
-        ...parsed.scope, factions: withoutDirectParentChildLinks(parsed.scope?.factions), storageId: context.storageId, characterId: context.characterId,
+        ...parsed.scope, factions: sanitizeFactionRelations(parsed.scope?.factions), storageId: context.storageId, characterId: context.characterId,
         characterName: context.characterName, presetId,
         operation: { enabled: false, mode: 'manual', intervalFloors: 1, lastSuccessfulAssistantCount: 0, lastSuccessfulRunAt: 0 },
         injection: { enabled: false },

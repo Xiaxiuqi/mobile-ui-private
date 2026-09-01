@@ -106,11 +106,9 @@ const allEvents = dynamics => [...dynamics.active, ...dynamics.archived];
 const mapEvents = dynamics => new Map(allEvents(dynamics).map(event => [event.id, event]));
 const same = (left, right) => JSON.stringify(left) === JSON.stringify(right);
 
-function assertProducerLimits(producer, payload) {
-    const eventCount = allEvents(payload.dynamics).length;
+function assertProducerLimits(producer) {
     const dayCount = producer.events.reduce((count, item) => count + item.daySummaries.length, 0);
     const periodCount = producer.events.reduce((count, item) => count + item.periodSummaries.length, 0);
-    if (dayCount > Math.floor(eventCount / 2)) fail('TT_HISTORY_LIMIT_EXCEEDED', 'day summaries 超过 events / 2');
     if (periodCount > Math.floor(dayCount / 3)) fail('TT_HISTORY_LIMIT_EXCEEDED', 'period summaries 超过 day summaries / 3');
 }
 
@@ -376,7 +374,7 @@ export function applyTodayTrendHistoryProducer(payloadValue, producerValue, {
     const payload = clone(payloadValue);
     let detailPoolChanged = false;
     const producer = normalizeTodayTrendHistoryProducer(producerValue);
-    assertProducerLimits(producer, payload);
+    assertProducerLimits(producer);
     const candidates = mapEvents(payload.dynamics);
     const previous = previousPayload ? mapEvents(previousPayload.dynamics) : new Map();
     const producedIds = new Set(producer.events.map(item => item.eventId));
