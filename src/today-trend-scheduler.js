@@ -272,6 +272,7 @@ export function createTodayTrendScheduler({
         floor: task.floor,
         target: task.target ? Object.freeze({ ...task.target }) : null,
         ...(Number.isSafeInteger(task.batchIndex) && task.batchIndex >= 0 ? { batchIndex: task.batchIndex } : {}),
+        ...(Number.isSafeInteger(task.lastCommittedBatchIndex) && task.lastCommittedBatchIndex >= 0 ? { lastCommittedBatchIndex: task.lastCommittedBatchIndex } : {}),
         ...(Number.isSafeInteger(task.batchCount) && task.batchCount > 0 ? { batchCount: task.batchCount } : {}),
     }) : null;
     const state = () => Object.freeze({
@@ -390,7 +391,7 @@ export function createTodayTrendScheduler({
             pendingTurns: Number.isInteger(pendingTurns) && pendingTurns >= 0 ? pendingTurns : 0,
             incidentProbability, target, summaryOnly: summaryOnly === true,
             abortController: new AbortController(), batchEnabled: batchEnabled === true, recentAssistantCount, mergeAssistantCount,
-            batchIndex: null, batchCount: null,
+            batchIndex: null, lastCommittedBatchIndex: null, batchCount: null,
         };
         terminalTask = null;
         activeTask = task;
@@ -516,6 +517,8 @@ export function createTodayTrendScheduler({
                     }, { active: () => isActive(task) }, { canonical: true, scopeId: id,
                         expectedStoreRevision, expectedScopeRevision });
                     if (!committed || !isActive(task)) throw cancelled();
+                    task.lastCommittedBatchIndex = batchIndex;
+                    publish();
                     const remainingFeedback = Math.max(0, commitFeedbackMs - Math.max(0, now() - commitStartedAt));
                     if (remainingFeedback > 0) await wait(remainingFeedback);
                     if (!isActive(task)) throw cancelled();

@@ -26544,6 +26544,7 @@ ${targetInstruction}`
       floor: task.floor,
       target: task.target ? Object.freeze({ ...task.target }) : null,
       ...Number.isSafeInteger(task.batchIndex) && task.batchIndex >= 0 ? { batchIndex: task.batchIndex } : {},
+      ...Number.isSafeInteger(task.lastCommittedBatchIndex) && task.lastCommittedBatchIndex >= 0 ? { lastCommittedBatchIndex: task.lastCommittedBatchIndex } : {},
       ...Number.isSafeInteger(task.batchCount) && task.batchCount > 0 ? { batchCount: task.batchCount } : {}
     }) : null;
     const state = () => Object.freeze({
@@ -26683,6 +26684,7 @@ ${targetInstruction}`
         recentAssistantCount,
         mergeAssistantCount,
         batchIndex: null,
+        lastCommittedBatchIndex: null,
         batchCount: null
       };
       terminalTask = null;
@@ -26843,6 +26845,8 @@ ${targetInstruction}`
               expectedScopeRevision
             });
             if (!committed2 || !isActive(task)) throw cancelled();
+            task.lastCommittedBatchIndex = batchIndex;
+            publish();
             const remainingFeedback2 = Math.max(0, commitFeedbackMs - Math.max(0, now2() - commitStartedAt2));
             if (remainingFeedback2 > 0) await wait(remainingFeedback2);
             if (!isActive(task)) throw cancelled();

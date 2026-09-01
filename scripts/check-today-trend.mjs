@@ -6591,6 +6591,74 @@ assert.match(phase12BatchContainer.innerHTML, /最近处理层数必须在当前
     '超出当前聊天范围的批处理参数必须显示错误，而非静默无响应');
 globalThis.FormData = phase12FormData;
 phase12BatchController.destroy();
+
+let phase12RefreshCanonical = structuredClone(batchReadyValidV2);
+let phase12RefreshGenerateCalls = 0;
+let phase12RefreshReleaseSecondBatch;
+const phase12RefreshStates = [];
+let phase12RefreshGenerationListener = null;
+const phase12RefreshChat = [
+    { role: 'assistant', content: '提交边界第一批正文' },
+    { role: 'assistant', content: '提交边界第二批正文' },
+];
+const phase12RefreshContainer = {
+    innerHTML: '', contains: () => true,
+    addEventListener: () => {}, removeEventListener: () => {}, querySelector: () => null,
+};
+const phase12RefreshController = createTodayTrendPhoneController({
+    state: { phoneWindow: { querySelector: selector => selector === '.pm-today-trend-page' ? phase12RefreshContainer : null } },
+    container: phase12RefreshContainer,
+    deps: {
+        getStorageId: () => 'chat',
+        getTodayTrendStore: async () => buildReadOnlyShadow(phase12RefreshCanonical),
+        getTodayTrendUiScope: async storageId => resolveTodayTrendV2UiScope(phase12RefreshCanonical, storageId),
+        getCtx: () => ({ chat: phase12RefreshChat }), getTodayTrendCurrentFloor: () => 2,
+        getTodayTrendGenerationState: () => phase12RefreshStates.at(-1) || { phase: 'idle', task: null },
+        subscribeTodayTrendGeneration: listener => { phase12RefreshGenerationListener = listener; return () => {}; },
+        generateTodayTrend: async () => {},
+    },
+});
+await phase12RefreshController.render();
+const phase12RefreshScheduler = createTodayTrendScheduler({
+    controller: { generate: async ({ scope, assistantCount }) => {
+        phase12RefreshGenerateCalls += 1;
+        if (phase12RefreshGenerateCalls === 2) {
+            await new Promise(resolve => { phase12RefreshReleaseSecondBatch = resolve; });
+        }
+        const generatedScope = structuredClone(scope);
+        generatedScope.world.items[0].summary = assistantCount === 1 ? '首批提交后立即显示的 canonical 内容' : '第二批提交内容';
+        return { scope: generatedScope, history: { events: [] } };
+    } },
+    committer: {
+        supportsCanonical: true, invalidateCommits: () => {},
+        loadCanonical: async () => structuredClone(phase12RefreshCanonical),
+        commitStore: async mutate => {
+            phase12RefreshCanonical = await mutate(structuredClone(phase12RefreshCanonical));
+            return buildReadOnlyShadow(phase12RefreshCanonical);
+        },
+    },
+    getStore: async () => buildReadOnlyShadow(phase12RefreshCanonical), getStorageId: () => 'chat',
+    getChat: () => phase12RefreshChat, getFloor: () => 2, commitFeedbackMs: 0,
+});
+const phase12RefreshUnsubscribe = phase12RefreshScheduler.subscribe(snapshot => {
+    phase12RefreshStates.push(snapshot);
+    phase12RefreshGenerationListener?.(snapshot);
+});
+const phase12RefreshRun = phase12RefreshScheduler.manual({ batchEnabled: true, recentAssistantCount: 2, mergeAssistantCount: 1 });
+for (let index = 0; index < 100 && (typeof phase12RefreshReleaseSecondBatch !== 'function'
+    || !phase12RefreshContainer.innerHTML.includes('首批提交后立即显示的 canonical 内容')); index += 1) await Promise.resolve();
+const phase12FirstCommitSnapshot = phase12RefreshStates.find(snapshot => snapshot.phase === 'committing'
+    && snapshot.task?.batchIndex === 0 && snapshot.task?.lastCommittedBatchIndex === 0);
+assert.ok(phase12FirstCommitSnapshot, '首批 canonical 提交后必须立即发布可观察的提交边界 snapshot');
+assert.equal(phase12RefreshGenerateCalls, 2, '首批提交完成后必须已进入第二批生成而不等待任务结束');
+assert.equal(typeof phase12RefreshReleaseSecondBatch, 'function', '第二批生成必须保持挂起以固定首批提交后的观察窗口');
+assert.match(phase12RefreshContainer.innerHTML, /首批提交后立即显示的 canonical 内容/,
+    '第二批尚未完成时手机控制器必须由首批提交边界通知重绘最新 canonical 内容');
+phase12RefreshReleaseSecondBatch();
+await phase12RefreshRun;
+phase12RefreshUnsubscribe();
+phase12RefreshController.destroy();
+
 const phase12NavigationListeners = [];
 const phase12NavigationFocusLog = [];
 const phase12NavigationScope = structuredClone(phase10UiScope);
