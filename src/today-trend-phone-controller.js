@@ -224,6 +224,9 @@ export function createTodayTrendPhoneController({ state, deps, container }) {
                 .then(() => generate(null, null, { batchEnabled: true, recentAssistantCount, mergeAssistantCount })).catch(report);
         }
         if (button.dataset.action === 'today-trend-open-settings') { settings = true; rerender(); }
+        if (button.dataset.action === 'today-trend-open-batch-settings') {
+            settings = true; pendingFocusSelector = 'form[data-today-trend-form="batch-settings"] input[name="recentAssistantCount"]'; rerender();
+        }
         if (button.dataset.action === 'today-trend-close-settings') { settings = false; retentionDraft = null; rerender(); }
         if (button.dataset.action === 'today-trend-use-preset') { initializationMode = 'reuse'; error = null; rerender(); }
         if (button.dataset.action === 'today-trend-create-preset') { initializationMode = 'create'; error = null; rerender(); }
@@ -289,7 +292,10 @@ export function createTodayTrendPhoneController({ state, deps, container }) {
             const taskAbort = new AbortController(); initAbort = taskAbort; initializing = true; error = null; rerender();
             deps.initializeTodayTrend({ ...initializationDraft, presetId: reinitializing ? lastScope?.presetId : '', signal: taskAbort.signal }).then(() => {
                 if (taskAbort.signal.aborted || initAbort !== taskAbort) return;
-                initializing = false; initAbort = null; initializationOpen = false; reinitializing = false; initializationMode = 'reuse'; initializationDraft = { includeExistingChat: true }; rerender();
+                const openedWithBackfill = initializationDraft.backfillExistingChat === true;
+                initializing = false; initAbort = null; initializationOpen = false; reinitializing = false; initializationMode = 'reuse'; initializationDraft = { includeExistingChat: true };
+                if (openedWithBackfill) { settings = true; pendingFocusSelector = 'form[data-today-trend-form="batch-settings"] input[name="recentAssistantCount"]'; }
+                rerender();
             }).catch(cause => {
                 if (taskAbort.signal.aborted || initAbort !== taskAbort) return;
                 initializing = false; initAbort = null; report(cause);

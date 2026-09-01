@@ -10,14 +10,14 @@ function batchSettingsGroup(assistantCount, generationBusy, batchDraft = {}) {
     const batchEnabled = batchDraft.enabled === true;
     const recentAssistantCount = Number.isSafeInteger(batchDraft.recentAssistantCount) ? batchDraft.recentAssistantCount : 1;
     const mergeAssistantCount = Number.isSafeInteger(batchDraft.mergeAssistantCount) ? batchDraft.mergeAssistantCount : defaultMerge;
-    const details = batchEnabled ? `
-        <p class="pm-today-trend-retention-help">当前聊天 AI 回复累计层数：${count}。批量参数会保存到当前聊天设置。</p>
+    const details = `
+        <p class="pm-today-trend-retention-help">当前聊天 AI 回复累计层数：${count}。批量参数会保存到当前聊天设置；启用后才可手动批量更新。</p>
         <label class="pm-today-trend-field"><span>手动处理最近 assistant 层数</span><input class="pm-today-trend-input" name="recentAssistantCount" type="number" inputmode="numeric" min="1" max="${Math.max(count, 1)}" step="1" required value="${recentAssistantCount}" ${disabled ? 'disabled' : ''}></label>
         <label class="pm-today-trend-field"><span>每多少层合并为一次</span><input class="pm-today-trend-input" name="mergeAssistantCount" type="number" inputmode="numeric" min="1" max="${Math.max(count, 1)}" step="1" required value="${mergeAssistantCount}" ${disabled ? 'disabled' : ''}></label>
         <p class="pm-today-trend-retention-help">generationSnapshots：固定保留最近 ${TODAY_TREND_LIMITS.generationSnapshots} 个记录。该容量不可配置，也不会因打开或保存设置触发生成或清理。</p>
-        <div class="pm-today-trend-form-actions"><button type="button" data-action="today-trend-batch-generate" ${disabled ? 'disabled' : ''}>${generationBusy ? '正在批量更新' : '手动批量更新'}</button></div>` : '';
+        <div class="pm-today-trend-form-actions"><button type="button" data-action="today-trend-batch-generate" ${disabled || !batchEnabled ? 'disabled' : ''}>${generationBusy ? '正在批量更新' : '手动批量更新'}</button></div>`;
     return `<fieldset class="pm-today-trend-batch-settings"><legend>溯及既往楼层更新</legend>
-        <label class="pm-today-trend-switch pm-today-trend-batch-switch"><span><b>启用溯及既往楼层更新</b><small>开启后显示已保存的批量处理参数。</small></span><input name="batchEnabled" type="checkbox" role="switch" aria-checked="${batchEnabled === true}"${batchEnabled ? ' checked' : ''}${generationBusy ? ' disabled' : ''}><i aria-hidden="true"></i></label>${details}
+        <label class="pm-today-trend-switch pm-today-trend-batch-switch"><span><b>启用溯及既往楼层更新</b><small>开启后允许按下方参数执行手动批量更新。</small></span><input name="batchEnabled" type="checkbox" role="switch" aria-checked="${batchEnabled === true}"${batchEnabled ? ' checked' : ''}${generationBusy ? ' disabled' : ''}><i aria-hidden="true"></i></label>${details}
     </fieldset>`;
 }
 
