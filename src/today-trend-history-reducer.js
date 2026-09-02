@@ -106,12 +106,6 @@ const allEvents = dynamics => [...dynamics.active, ...dynamics.archived];
 const mapEvents = dynamics => new Map(allEvents(dynamics).map(event => [event.id, event]));
 const same = (left, right) => JSON.stringify(left) === JSON.stringify(right);
 
-function assertProducerLimits(producer) {
-    const dayCount = producer.events.reduce((count, item) => count + item.daySummaries.length, 0);
-    const periodCount = producer.events.reduce((count, item) => count + item.periodSummaries.length, 0);
-    if (periodCount > Math.floor(dayCount / 3)) fail('TT_HISTORY_LIMIT_EXCEEDED', 'period summaries 超过 day summaries / 3');
-}
-
 function appendStageProjections(event, stages, storyDate, floor) {
     let sequence = event.stages.reduce((maximum, stage) => Math.max(maximum, stage.sourceStageEnd), 0);
     let undatedSequence = event.stages.reduce((maximum, stage) => Math.max(maximum,
@@ -374,7 +368,6 @@ export function applyTodayTrendHistoryProducer(payloadValue, producerValue, {
     const payload = clone(payloadValue);
     let detailPoolChanged = false;
     const producer = normalizeTodayTrendHistoryProducer(producerValue);
-    assertProducerLimits(producer);
     const candidates = mapEvents(payload.dynamics);
     const previous = previousPayload ? mapEvents(previousPayload.dynamics) : new Map();
     const producedIds = new Set(producer.events.map(item => item.eventId));
@@ -392,6 +385,36 @@ export function applyTodayTrendHistoryProducer(payloadValue, producerValue, {
     for (const item of producer.events) {
         const event = candidates.get(item.eventId);
         if (!event || event.lifecycle !== 'active') fail('TT_HISTORY_UNKNOWN_EVENT', 'history producer 只能指向当前 active event');
+        assertStageAlignment(previous.get(item.eventId) || null, event, item.stages);
+    }
+    const effectiveDaySummariesByEventId = new Map();
+    let effectiveDaySummaryCount = 0;
+    const periodSummaryCount = producer.events.reduce((count, item) => count + item.periodSummaries.length, 0);
+    for (const item of producer.events) {
+        const event = candidates.get(item.eventId);
+        if (!event || event.lifecycle !== 'active') fail('TT_HISTORY_UNKNOWN_EVENT', 'history producer 只能指向当前 active event');
+        const prior = previous.get(item.eventId) || null;
+        const historicalEvent = prior ? clone(prior) : clone(event);
+        historicalEvent.stages = prior ? clone(prior.stages) : [];
+        const knownDate = latestKnownDate(historicalEvent);
+        const openDate = openLiveDate(historicalEvent);
+        if (trustedStoryDate !== null && knownDate !== null && trustedStoryDate < knownDate) {
+            fail('TT_DATE_REGRESSION', '可信 storyDate 早于 event 历史日期');
+        }
+        const requiresSummary = trustedStoryDate !== null && openDate !== null && trustedStoryDate > openDate;
+        if (requiresSummary && item.daySummaries.length !== 1) {
+            fail('TT_DATE_CONFLICT', '日期前进必须恰好提供一个 day summary');
+        }
+        const effectiveDaySummaries = requiresSummary ? item.daySummaries : [];
+        effectiveDaySummariesByEventId.set(item.eventId, effectiveDaySummaries);
+        effectiveDaySummaryCount += effectiveDaySummaries.length;
+    }
+    if (periodSummaryCount > Math.floor(effectiveDaySummaryCount / 3)) {
+        fail('TT_HISTORY_LIMIT_EXCEEDED', 'period summaries 超过有效 day summaries / 3');
+    }
+    for (const item of producer.events) {
+        const event = candidates.get(item.eventId);
+        if (!event || event.lifecycle !== 'active') fail('TT_HISTORY_UNKNOWN_EVENT', 'history producer 只能指向当前 active event');
         const prior = previous.get(item.eventId) || null;
         if (prior && previousPayload) {
             const oldDetails = previousPayload.stageDetailsByEvent?.[item.eventId];
@@ -404,18 +427,14 @@ export function applyTodayTrendHistoryProducer(payloadValue, producerValue, {
                 }
             }
         }
-        assertStageAlignment(prior, event, item.stages);
         event.stages = prior ? clone(prior.stages) : [];
-        const knownDate = latestKnownDate(event);
         const openDate = openLiveDate(event);
-        if (trustedStoryDate !== null && knownDate !== null && trustedStoryDate < knownDate) {
-            fail('TT_DATE_REGRESSION', '可信 storyDate 早于 event 历史日期');
-        }
         const requiresSummary = trustedStoryDate !== null && openDate !== null && trustedStoryDate > openDate;
-        if (item.daySummaries.length !== (requiresSummary ? 1 : 0)) {
-            fail('TT_DATE_CONFLICT', requiresSummary ? '日期前进必须恰好提供一个 day summary' : '当前日期没有可封闭的 live-stage');
-        }
-        if (requiresSummary) detailPoolChanged = closeLiveDate(event, openDate, item.daySummaries[0], payload, knownEventIds) || detailPoolChanged;
+        // A day summary cannot close a same-day or absent live-stage.  It is transient
+        // model output, not persisted history, so discard it rather than rejecting an
+        // otherwise append-only update that can be applied safely.
+        const effectiveDaySummaries = effectiveDaySummariesByEventId.get(item.eventId);
+        if (requiresSummary) detailPoolChanged = closeLiveDate(event, openDate, effectiveDaySummaries[0], payload, knownEventIds) || detailPoolChanged;
         appendStageProjections(event, item.stages, trustedStoryDate, Number.isSafeInteger(assistantCount) ? assistantCount : null);
         if (!event.stages.length) fail('TT_HISTORY_SCHEMA_INVALID', 'history producer 不得产生空 event 历史');
         planPeriodCompaction(event, payload, item.periodSummaries, assistantCount);

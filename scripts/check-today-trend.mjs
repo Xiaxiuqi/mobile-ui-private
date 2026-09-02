@@ -4030,7 +4030,7 @@ const phase4AvailableEvent = phase4AvailablePayload.dynamics.active[0];
 phase4AvailableEvent.stages = [structuredClone(phase4ProjectionFixtures.day)];
 phase4AvailableEvent.latestStage = phase4ProjectionFixtures.day.summary;
 phase4AvailablePayload.stageDetailsByEvent.service = [{
-    id: 'detail:service:4', sourceStageSequence: 4, text: '完成北侧仓门加固', storyDate: '2025-04-15',
+    id: 'detail:service:4', sourceStageSequence: 4, text: '完成阶段详情', storyDate: '2025-04-15',
 }];
 const availableDetailState = {
     entityType: 'detail', entityId: 'detail:service:4', eventId: 'service', state: 'available',
@@ -4054,7 +4054,7 @@ const phase4IsolationResult = normalizeTodayTrendV2Candidate(phase4IsolationInpu
 phase4IsolationInput.globalEnvelope.payload.scopes.chat.payload.stageDetailsByEvent.service[0].text = '归一化后篡改输入 detail';
 phase4IsolationInput.globalEnvelope.payload.scopes.chat.payload.dynamics.active[0].stages[0].summary = '归一化后篡改输入 day summary';
 assert.equal(phase4IsolationResult.globalEnvelope.payload.scopes.chat.payload.stageDetailsByEvent.service[0].text,
-    '完成北侧仓门加固', 'v2 candidate 归一化结果中的 detail 必须与调用方输入隔离');
+    '完成阶段详情', 'v2 candidate 归一化结果中的 detail 必须与调用方输入隔离');
 assert.equal(phase4IsolationResult.globalEnvelope.payload.scopes.chat.payload.dynamics.active[0].stages[0].summary,
     '完成仓门修复', 'v2 candidate 归一化结果中的 day-summary 不得被调用方后续修改污染');
 const phase4DetailExtra = structuredClone(phase4Available);
@@ -4380,6 +4380,31 @@ const phase5SameDay = applyTodayTrendGenerationToV2(phase5Dated, 'chat',
 assert.deepEqual(phase5SameDay.globalEnvelope.payload.scopes.chat.payload.dynamics.active[0].stages.slice(-2).map(stage => stage.kind),
     ['live-stage', 'live-stage'], '同日进展必须按 producer 原序追加 live-stage');
 
+const phase5SameDayWithRedundantSummary = applyTodayTrendGenerationToV2(phase5SameDay, 'chat',
+    phase5GeneratedScope(phase5SameDay, '同日冗余摘要后的继续备餐'), phase5Producer('service', [phase5Stage('同日冗余摘要后的继续备餐')], [
+        { summaryText: '模型误报的当日摘要', keyStages: ['service'] },
+    ]), { trustedStoryDate: '2025-04-15', assistantCount: 10, generatedAt: 115 });
+const phase5SameDayWithRedundantSummaryEvent = phase5SameDayWithRedundantSummary.globalEnvelope.payload.scopes.chat.payload.dynamics.active[0];
+assert.deepEqual(phase5SameDayWithRedundantSummaryEvent.stages.slice(-3).map(stage => stage.kind),
+    ['live-stage', 'live-stage', 'live-stage'], '同日冗余 day summary 不得阻止 live-stage 继续追加');
+assert.equal(phase5SameDayWithRedundantSummaryEvent.stages.some(stage => stage.kind === 'day-summary'), false,
+    '同日冗余 day summary 不得封闭或改写既有阶段历史');
+assert.equal(phase5SameDayWithRedundantSummaryEvent.stages.at(-1).text, '同日冗余摘要后的继续备餐',
+    '容错后仍必须追加本轮对应阶段正文');
+
+const phase5NoOpenLiveWithRedundantSummary = applyTodayTrendGenerationToV2(migratedValidV2, 'chat',
+    phase5GeneratedScope(migratedValidV2, '首次记录但模型误报摘要'), phase5Producer('service', [phase5Stage('首次记录但模型误报摘要')], [
+        { summaryText: '不存在可封闭日期的摘要', keyStages: ['service'] },
+    ]), { trustedStoryDate: '2025-04-15', assistantCount: 8, generatedAt: 105 });
+const phase5NoOpenLiveWithRedundantSummaryPayload = phase5NoOpenLiveWithRedundantSummary.globalEnvelope.payload.scopes.chat.payload;
+const phase5NoOpenLiveWithRedundantSummaryEvent = phase5NoOpenLiveWithRedundantSummaryPayload.dynamics.active[0];
+assert.equal(phase5NoOpenLiveWithRedundantSummaryEvent.stages.at(-1).kind, 'live-stage',
+    '没有开放 live-stage 时的冗余 day summary 不得阻止首个 live-stage 追加');
+assert.equal(phase5NoOpenLiveWithRedundantSummaryEvent.stages.some(stage => stage.kind === 'day-summary'), false,
+    '没有开放 live-stage 时不得伪造 day-summary');
+assert.equal(phase5NoOpenLiveWithRedundantSummaryPayload.stageDetailsByEvent.service, undefined,
+    '没有可封闭阶段时不得创建 detail 池副作用');
+
 const phase5NextDay = applyTodayTrendGenerationToV2(phase5SameDay, 'chat',
     phase5GeneratedScope(phase5SameDay, '次日开始复盘'), phase5Producer('service', [phase5Stage('次日开始复盘')], [
         { summaryText: '首日完成摆盘与备餐', keyStages: ['service'] },
@@ -4439,6 +4464,29 @@ assert.throws(() => applyTodayTrendGenerationToV2(phase5Dated, 'chat',
         trustedStoryDate: '2025-04-15', assistantCount: 9,
     }), error => error?.code === 'TT_HISTORY_STAGE_MISMATCH',
 'history 与 dynamics 新增阶段正文不一致时必须整单拒绝');
+assert.throws(() => applyTodayTrendGenerationToV2(phase5SameDay, 'chat',
+    phase5GeneratedScope(phase5SameDay, '复合错误的 dynamics 阶段'), phase5Producer('service', [phase5Stage('复合错误的 history 阶段')], [
+        { summaryText: '同日冗余摘要', keyStages: ['service'] },
+    ]), { trustedStoryDate: '2025-04-15', assistantCount: 10,
+    }), error => error?.code === 'TT_HISTORY_STAGE_MISMATCH',
+    '历史追加不一致必须优先于同日冗余 day summary 的容错判定暴露');
+assert.throws(() => applyTodayTrendGenerationToV2(phase5Dated, 'chat',
+    phase5GeneratedScope(phase5Dated, '日期倒退的 dynamics 阶段'), phase5Producer('service', [phase5Stage('日期倒退的 history 阶段')]), {
+        trustedStoryDate: '2025-04-14', assistantCount: 10,
+    }), error => error?.code === 'TT_HISTORY_STAGE_MISMATCH',
+    '历史追加不一致必须优先于日期倒退错误暴露');
+assert.throws(() => applyTodayTrendGenerationToV2(phase5Dated, 'chat',
+    phase5GeneratedScope(phase5Dated, '跨日缺摘要的 dynamics 阶段'), phase5Producer('service', [phase5Stage('跨日缺摘要的 history 阶段')]), {
+        trustedStoryDate: '2025-04-16', assistantCount: 10,
+    }), error => error?.code === 'TT_HISTORY_STAGE_MISMATCH',
+    '历史追加不一致必须优先于跨日缺少 day summary 错误暴露');
+assert.throws(() => applyTodayTrendGenerationToV2(phase5SameDay, 'chat',
+    phase5GeneratedScope(phase5SameDay, '冗余摘要不能支撑时期折叠'), phase5Producer('service', [phase5Stage('冗余摘要不能支撑时期折叠')], [
+        { summaryText: '无效当日摘要', keyStages: ['service'] },
+    ], [{ summaryText: '无效摘要不应提供配额', startDate: '2025-04-15', endDate: '2025-04-15', childSummaryRefs: [] }]), {
+        trustedStoryDate: '2025-04-15', assistantCount: 10,
+    }), error => error?.code === 'TT_HISTORY_LIMIT_EXCEEDED',
+    '冗余 day summary 不得为 period summary 提供配额');
 assert.throws(() => normalizeTodayTrendHistoryProducer(phase5Producer('service', [], [{
     summaryText: '过长摘要'.repeat(61), keyStages: ['service'],
 }])), error => error?.code === 'TT_HISTORY_SCHEMA_INVALID', 'summaryText 超过 240 字必须整单拒绝');
@@ -6096,7 +6144,7 @@ assert.deepEqual(phase9ActiveSnapshotPayload.archivedRemovableDataByEvent.servic
     'active event 的 manifest 容器不得复制 day-summary 正文');
 assert.equal(resolveTodayTrendV2DetailForTarget(
     phase9ActiveSnapshotStore, 'chat', 'service', 'detail:service:4', 46,
-)?.text, '完成北侧仓门加固',
+)?.text, '完成阶段详情',
 'active event detail 必须在正文、summary source floor、manifest 可见性与 available lifecycle 全部满足时可读');
 let phase9BoundedManifestStore = phase9ActiveSnapshotStore;
 for (let assistantCount = 47; assistantCount <= 70; assistantCount += 1) {
@@ -6139,7 +6187,7 @@ assert.equal(phase9ActiveRolledBackPayload.generationSnapshots.some(snapshot =>
     'active rollback 必须保留目标楼层可见的 snapshot manifest 引用');
 assert.equal(resolveTodayTrendV2DetailForTarget(
     phase9ActiveRolledBack, 'chat', 'service', 'detail:service:4', 60,
-)?.text, '完成北侧仓门加固', 'active rollback 后目标楼层 detail 仍须通过同一 manifest 可见性链读取');
+)?.text, '完成阶段详情', 'active rollback 后目标楼层 detail 仍须通过同一 manifest 可见性链读取');
 const phase9EvictedRoot = phase9ActiveSnapshotPayload.generationSnapshots.find(snapshot => snapshot.assistantCount === 46)
     ?.checkpointRef?.rootEntityId;
 assert.equal(phase9BoundedManifestPayload.generationSnapshots.some(snapshot => snapshot.checkpointRef?.rootEntityId === phase9EvictedRoot), false,
@@ -6166,7 +6214,7 @@ assert.equal(Object.keys(phase9ArchivedFromManifestPayload.archivedRemovableData
     'active→archived 必须保留同一稳定 manifest，不得复制或丢失');
 assert.equal(resolveTodayTrendV2DetailForTarget(
     phase9ArchivedFromManifest, 'chat', 'service', 'detail:service:4', 71,
-)?.text, '完成北侧仓门加固', 'active→archived 后同一 detail 必须保持可读性连续');
+)?.text, '完成阶段详情', 'active→archived 后同一 detail 必须保持可读性连续');
 
 const phase9ResolverStore = structuredClone(phase8ArchivedStore);
 const phase9ResolverPayload = phase9ResolverStore.globalEnvelope.payload.scopes.chat.payload;
@@ -6191,10 +6239,10 @@ phase9ResolverPayload.generationSnapshots = [phase9ResolverSnapshot];
 const phase9ResolvedDetail = resolveTodayTrendV2DetailForTarget(
     phase9ResolverStore, 'chat', 'service', phase9ResolverDetailId, 46,
 );
-assert.equal(phase9ResolvedDetail?.text, '完成北侧仓门加固',
+assert.equal(phase9ResolvedDetail?.text, '完成阶段详情',
     'detail resolver 仅在正文、summary 来源楼层、manifest 可见性与 available lifecycle 全部满足时返回正文');
 phase9ResolvedDetail.text = '调用方篡改';
-assert.equal(phase9ResolverPayload.stageDetailsByEvent.service[0].text, '完成北侧仓门加固',
+assert.equal(phase9ResolverPayload.stageDetailsByEvent.service[0].text, '完成阶段详情',
     'detail resolver 返回值必须与 canonical 正文隔离');
 for (const target of [null, -1, 45]) {
     assert.equal(resolveTodayTrendV2DetailForTarget(
@@ -6225,7 +6273,7 @@ assert.deepEqual(phase9RemovedResolution, {
     status: 'unavailable', code: 'TT_DETAIL_REMOVED', detailId: phase9ResolverDetailId, eventId: 'service',
     removalReason: 'archived-retention', removedAtAssistantCount: 47,
 }, 'detail resolver 必须明确区分 removed unavailable 与 unknown');
-assert.equal(JSON.stringify(phase9RemovedResolution).includes('完成北侧仓门加固'), false,
+assert.equal(JSON.stringify(phase9RemovedResolution).includes('完成阶段详情'), false,
     'removed unavailable 诊断不得泄漏 detail 正文');
 const phase9HistoricalDetail = structuredClone(phase9ActiveSnapshotStore);
 const phase9HistoricalPayload = phase9HistoricalDetail.globalEnvelope.payload.scopes.chat.payload;
@@ -6241,7 +6289,7 @@ phase9HistoricalPayload.removableEntityTombstonesById[phase9ResolverDetailId] =
     structuredClone(phase9HistoricalPayload.removableEntityStateById[phase9ResolverDetailId]);
 assert.equal(resolveTodayTrendV2DetailForTarget(
     phase9HistoricalDetail, 'chat', 'service', phase9ResolverDetailId, 46,
-)?.text, '完成北侧仓门加固', '当前 #47 删除 detail 时，读取 #46 必须从 retained checkpoint 恢复正文');
+)?.text, '完成阶段详情', '当前 #47 删除 detail 时，读取 #46 必须从 retained checkpoint 恢复正文');
 assert.equal(resolveTodayTrendV2DetailForTarget(
     phase9HistoricalDetail, 'chat', 'service', phase9ResolverDetailId, 47,
 )?.status, 'unavailable', '当前 #47 已删除的 detail 必须保持 unavailable');
@@ -6368,7 +6416,7 @@ assert.throws(() => validateTodayTrendV2Transition(phase8ArchiveBase, phase8Sequ
 const phase10PromptScope = serializeTodayTrendV2ScopeForGeneration(phase9ArchivedFromManifest, 'chat');
 assert.ok(phase10PromptScope.length <= 12000, '常规 AI canonical serializer 必须限制 current_today_trend 在 12000 字符内');
 assert.match(phase10PromptScope, /"kind":"day-summary"/, '常规 AI serializer 必须保留折叠日期摘要投影');
-assert.doesNotMatch(phase10PromptScope, /完成北侧仓门加固/, '常规 AI serializer 不得泄漏 folded stage-detail 正文');
+assert.doesNotMatch(phase10PromptScope, /完成阶段详情/, '常规 AI serializer 不得泄漏 folded stage-detail 正文');
 assert.doesNotMatch(phase10PromptScope, /detailRefs|stageDetailsByEvent|archivedRemovableDataByEvent|removableEntityStateById|Tombstones|"lifecycle"/,
     '常规 AI serializer 不得泄漏 detail 引用或 removable 内部状态');
 assert.equal(serializeTodayTrendV2ScopeForGeneration(phase9ArchivedFromManifest, 'missing'), null,
@@ -6378,7 +6426,7 @@ const phase10PromptEnvelope = buildTodayTrendGenerationEnvelope({
 });
 assert.match(phase10PromptEnvelope.userPrompt, /"kind\\":\\"day-summary\\"/,
     '常规 AI envelope 必须使用 canonical summary serializer 的内容');
-assert.doesNotMatch(phase10PromptEnvelope.userPrompt, /完成北侧仓门加固/,
+assert.doesNotMatch(phase10PromptEnvelope.userPrompt, /完成阶段详情/,
     '常规 AI envelope 不得回退到 facade 后泄漏 folded detail 正文');
 const phase10SummaryOnlyPrompt = buildTodayTrendGenerationEnvelope({
     context: collectedContext, preset: valid.presets.preset, scope: valid.scopes.chat, summaryOnly: true,
@@ -6520,10 +6568,10 @@ assert.ok(phase10UiEvent.stages.some(stage => stage.kind === 'day-summary' && st
 const phase10UiHtml = renderTodayTrendDynamicsView({
     scope: phase10UiScope,
     dynamicsTab: 'archived',
-    detailById: { [phase9ResolverDetailId]: { status: 'available', text: '完成北侧仓门加固' } },
+    detailById: { [phase9ResolverDetailId]: { status: 'available', text: '完成阶段详情' } },
 });
 assert.match(phase10UiHtml, /data-action="today-trend-load-detail"/, 'UI 必须为 detail ref 输出按需读取动作');
-assert.match(phase10UiHtml, /完成北侧仓门加固/, '可用 detail 必须渲染正文');
+assert.match(phase10UiHtml, /完成阶段详情/, '可用 detail 必须渲染正文');
 const phase10UiUnavailableHtml = renderTodayTrendDynamicsView({
     scope: phase10UiScope,
     dynamicsTab: 'archived',

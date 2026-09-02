@@ -9832,11 +9832,6 @@ ${entry2.content}` : entry2.content;
   var allEvents = (dynamics) => [...dynamics.active, ...dynamics.archived];
   var mapEvents = (dynamics) => new Map(allEvents(dynamics).map((event) => [event.id, event]));
   var same = (left, right) => JSON.stringify(left) === JSON.stringify(right);
-  function assertProducerLimits(producer) {
-    const dayCount = producer.events.reduce((count, item) => count + item.daySummaries.length, 0);
-    const periodCount = producer.events.reduce((count, item) => count + item.periodSummaries.length, 0);
-    if (periodCount > Math.floor(dayCount / 3)) fail2("TT_HISTORY_LIMIT_EXCEEDED", "period summaries \u8D85\u8FC7 day summaries / 3");
-  }
   function appendStageProjections(event, stages, storyDate, floor) {
     let sequence = event.stages.reduce((maximum, stage) => Math.max(maximum, stage.sourceStageEnd), 0);
     let undatedSequence = event.stages.reduce((maximum, stage) => Math.max(
@@ -10137,7 +10132,6 @@ ${entry2.content}` : entry2.content;
     const payload = clone4(payloadValue);
     let detailPoolChanged = false;
     const producer = normalizeTodayTrendHistoryProducer(producerValue);
-    assertProducerLimits(producer);
     const candidates = mapEvents(payload.dynamics);
     const previous = previousPayload ? mapEvents(previousPayload.dynamics) : /* @__PURE__ */ new Map();
     const producedIds = new Set(producer.events.map((item) => item.eventId));
@@ -10154,6 +10148,36 @@ ${entry2.content}` : entry2.content;
     for (const item of producer.events) {
       const event = candidates.get(item.eventId);
       if (!event || event.lifecycle !== "active") fail2("TT_HISTORY_UNKNOWN_EVENT", "history producer \u53EA\u80FD\u6307\u5411\u5F53\u524D active event");
+      assertStageAlignment(previous.get(item.eventId) || null, event, item.stages);
+    }
+    const effectiveDaySummariesByEventId = /* @__PURE__ */ new Map();
+    let effectiveDaySummaryCount = 0;
+    const periodSummaryCount = producer.events.reduce((count, item) => count + item.periodSummaries.length, 0);
+    for (const item of producer.events) {
+      const event = candidates.get(item.eventId);
+      if (!event || event.lifecycle !== "active") fail2("TT_HISTORY_UNKNOWN_EVENT", "history producer \u53EA\u80FD\u6307\u5411\u5F53\u524D active event");
+      const prior = previous.get(item.eventId) || null;
+      const historicalEvent = prior ? clone4(prior) : clone4(event);
+      historicalEvent.stages = prior ? clone4(prior.stages) : [];
+      const knownDate = latestKnownDate(historicalEvent);
+      const openDate = openLiveDate(historicalEvent);
+      if (trustedStoryDate !== null && knownDate !== null && trustedStoryDate < knownDate) {
+        fail2("TT_DATE_REGRESSION", "\u53EF\u4FE1 storyDate \u65E9\u4E8E event \u5386\u53F2\u65E5\u671F");
+      }
+      const requiresSummary = trustedStoryDate !== null && openDate !== null && trustedStoryDate > openDate;
+      if (requiresSummary && item.daySummaries.length !== 1) {
+        fail2("TT_DATE_CONFLICT", "\u65E5\u671F\u524D\u8FDB\u5FC5\u987B\u6070\u597D\u63D0\u4F9B\u4E00\u4E2A day summary");
+      }
+      const effectiveDaySummaries = requiresSummary ? item.daySummaries : [];
+      effectiveDaySummariesByEventId.set(item.eventId, effectiveDaySummaries);
+      effectiveDaySummaryCount += effectiveDaySummaries.length;
+    }
+    if (periodSummaryCount > Math.floor(effectiveDaySummaryCount / 3)) {
+      fail2("TT_HISTORY_LIMIT_EXCEEDED", "period summaries \u8D85\u8FC7\u6709\u6548 day summaries / 3");
+    }
+    for (const item of producer.events) {
+      const event = candidates.get(item.eventId);
+      if (!event || event.lifecycle !== "active") fail2("TT_HISTORY_UNKNOWN_EVENT", "history producer \u53EA\u80FD\u6307\u5411\u5F53\u524D active event");
       const prior = previous.get(item.eventId) || null;
       if (prior && previousPayload) {
         const oldDetails = previousPayload.stageDetailsByEvent?.[item.eventId];
@@ -10166,18 +10190,11 @@ ${entry2.content}` : entry2.content;
           }
         }
       }
-      assertStageAlignment(prior, event, item.stages);
       event.stages = prior ? clone4(prior.stages) : [];
-      const knownDate = latestKnownDate(event);
       const openDate = openLiveDate(event);
-      if (trustedStoryDate !== null && knownDate !== null && trustedStoryDate < knownDate) {
-        fail2("TT_DATE_REGRESSION", "\u53EF\u4FE1 storyDate \u65E9\u4E8E event \u5386\u53F2\u65E5\u671F");
-      }
       const requiresSummary = trustedStoryDate !== null && openDate !== null && trustedStoryDate > openDate;
-      if (item.daySummaries.length !== (requiresSummary ? 1 : 0)) {
-        fail2("TT_DATE_CONFLICT", requiresSummary ? "\u65E5\u671F\u524D\u8FDB\u5FC5\u987B\u6070\u597D\u63D0\u4F9B\u4E00\u4E2A day summary" : "\u5F53\u524D\u65E5\u671F\u6CA1\u6709\u53EF\u5C01\u95ED\u7684 live-stage");
-      }
-      if (requiresSummary) detailPoolChanged = closeLiveDate(event, openDate, item.daySummaries[0], payload, knownEventIds) || detailPoolChanged;
+      const effectiveDaySummaries = effectiveDaySummariesByEventId.get(item.eventId);
+      if (requiresSummary) detailPoolChanged = closeLiveDate(event, openDate, effectiveDaySummaries[0], payload, knownEventIds) || detailPoolChanged;
       appendStageProjections(event, item.stages, trustedStoryDate, Number.isSafeInteger(assistantCount) ? assistantCount : null);
       if (!event.stages.length) fail2("TT_HISTORY_SCHEMA_INVALID", "history producer \u4E0D\u5F97\u4EA7\u751F\u7A7A event \u5386\u53F2");
       planPeriodCompaction(event, payload, item.periodSummaries, assistantCount);
