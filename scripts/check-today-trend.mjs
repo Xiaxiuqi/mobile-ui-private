@@ -1184,6 +1184,13 @@ const legacyInjection = fixture(); delete legacyInjection.scopes.chat.injection.
 assert.equal(normalizeTodayTrendStore(legacyInjection).scopes.chat.injection.minimalUi, false, '旧资料缺少极简 UI 字段时必须兼容回退为关闭');
 assertCode(() => { const value = fixture(); value.presets.preset.source.includeExistingChat = 1; return value; }, 'TT_PRESET');
 assertCode(() => { const value = fixture(); value.scopes.chat.dynamics.active[0].relatedEventIds = ['missing']; return value; }, 'TT_EVENT_RELATED');
+assertCode(() => { const value = fixture(); value.scopes.chat.dynamics.active[0].relatedEventIds = ['service']; return value; }, 'TT_EVENT_RELATED');
+const crossLifecycleRelated = fixture();
+crossLifecycleRelated.scopes.chat.dynamics.active[0].relatedEventIds = ['rumor'];
+assert.deepEqual(
+    normalizeTodayTrendStore(crossLifecycleRelated).scopes.chat.dynamics.active[0].relatedEventIds,
+    ['rumor'],
+    '事件关联必须允许引用同一次 dynamics 中的 archived 事件');
 assertCode(() => { const value = fixture(); value.scopes.chat.dynamics.archived[0].outcome = 'resolved'; return value; }, 'TT_EVENT_OUTCOME');
 assertCode(() => { const value = fixture(); value.scopes.chat.dynamics.archived[0] = { ...value.scopes.chat.dynamics.archived[0], type: 'normal', outcome: 'confirmed' }; return value; }, 'TT_EVENT_OUTCOME');
 assertCode(() => { const value = fixture(); value.scopes.chat.dynamics.archived[0] = { ...value.scopes.chat.dynamics.archived[0], type: 'underground', outcome: 'absorbed' }; return value; }, 'TT_EVENT_OUTCOME');
@@ -2661,6 +2668,9 @@ assert.match(collectedContext.mainChatText, /晚餐服务/, '启用已有正文�
 const initializationPrompts = buildTodayTrendInitializationEnvelope({ context: collectedContext });
 assert.match(initializationPrompts.systemPrompt, /顶层只能有 preset 和 scope/, '初始化提示词必须锁定单一返回协议');
 assert.match(initializationPrompts.systemPrompt, /A\.parentId 等于 B\.id[\s\S]*保留 parentId 并删除对应外部关联[\s\S]*只针对直接父子/, '初始化提示词必须声明直接父子与外部关联互斥');
+assert.match(initializationPrompts.systemPrompt, /relatedEventIds 只能引用本次 dynamics 完整 active 与 archived 集合中其他事件的精确 ID/, '初始化提示词必须限制关联到同次 dynamics 的确事件 ID');
+assert.match(initializationPrompts.systemPrompt, /禁止引用自身、标题、自然语言名称、已不存在的旧 ID 或猜测 ID/, '初始化提示词必须禁止 self、标题、自然语言、旧 ID 和猜测 ID 关联');
+assert.match(initializationPrompts.systemPrompt, /没有合法关联时必须输出 \[\]/, '初始化提示词必须要求无合法关联时输出空数组');
 assert.match(initializationPrompts.userPrompt, /world_book_data/, '初始化提示词必须传递世界书内容');
 assert.match(initializationPrompts.userPrompt, /main_chat_data/, '初始化提示词必须传递已有正文');
 assert.deepEqual(initializationPrompts, buildCanonicalTodayTrendInitializationEnvelope({ context: collectedContext }),
@@ -2738,6 +2748,11 @@ assert.match(generationPrompts.systemPrompt, /每个满足条件的 event 都必
     '封日摘要提示词不得引入跨事件数量配额');
 assert.match(generationPrompts.systemPrompt, /当前没有开放 live-stage、可信 story_date 缺失或未前进时，必须输出 daySummaries:\[\]，即使该 event 本轮追加了 stages 也禁止生成 daySummary/,
     '无开放 live-stage 的 event 即使本轮追加阶段也必须明确禁止伪造封日摘要');
+assert.match(generationPrompts.systemPrompt, /relatedEventIds 只能引用本次 dynamics 完整 active 与 archived 集合中其他事件的精确 ID/,
+    '增量提示词必须限制关联到同次 dynamics 的精确事件 ID');
+assert.match(generationPrompts.systemPrompt, /禁止引用自身、标题、自然语言名称、已不存在的旧 ID 或猜测 ID/,
+    '增量提示词必须禁止 self、标题、自然语言、旧 ID 和猜测 ID 关联');
+assert.match(generationPrompts.systemPrompt, /没有合法关联时必须输出 \[\]/, '增量提示词必须要求无合法关联时输出空数组');
 assert.match(generationPrompts.systemPrompt, /不允许新建 type 为 incident/, '未命中突发投骰时必须禁止新增事故');
 assert.match(generationPrompts.systemPrompt, /地下线升级必须归档旧事件，再新建关联的 incident/, '生成提示词必须禁止原地改写地下线类型');
 assert.match(generationPrompts.systemPrompt, /A\.parentId 等于 B\.id[\s\S]*保留 parentId 并删除对应外部关联[\s\S]*只针对直接父子/, '增量提示词必须声明直接父子与外部关联互斥');
