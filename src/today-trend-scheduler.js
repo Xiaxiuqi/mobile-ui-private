@@ -488,6 +488,7 @@ export function createTodayTrendScheduler({
                             injection: current.injection, generationSnapshots: batchScope.generationSnapshots };
                         return applyTodayTrendGenerationToV2(store, id, nextScope, generated.history ?? { events: [] }, {
                             trustedStoryDate, assistantCount: batchAssistantCount, generatedAt, snapshot: true,
+                            archives: generated.archives ?? [],
                         });
                     }, { active: () => isActive(task) }, { canonical: true, scopeId: id,
                         expectedStoreRevision, expectedScopeRevision });

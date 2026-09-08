@@ -1448,7 +1448,7 @@ export function mergeTodayTrendV1StoreIntoV2(currentValue, facadeValue, { assist
 
 export function applyTodayTrendGenerationToV2(currentValue, storageId, generatedScope, history, {
     trustedStoryDate = null, assistantCount = null, generatedAt = 0, snapshot = true,
-    rerollFromAssistantCount = null,
+    rerollFromAssistantCount = null, archives = [],
 } = {}) {
     const current = normalizeTodayTrendV2Store(currentValue);
     const previousEnvelope = current.globalEnvelope.payload.scopes[storageId];
@@ -1468,6 +1468,26 @@ export function applyTodayTrendGenerationToV2(currentValue, storageId, generated
     let payload = applyTodayTrendHistoryProducer(envelope.payload, history, {
         trustedStoryDate, assistantCount, previousPayload: previousEnvelope.payload,
     });
+    // Batch transport defers lifecycle changes until the active-only producer has
+    // materialized canonical stages/details. No intermediate state is committed.
+    const archiveIds = new Set();
+    for (const operation of archives) {
+        const index = payload.dynamics.active.findIndex(event => event.id === operation.eventId);
+        if (index < 0 || archiveIds.has(operation.eventId)) failure('TT_HISTORY_UNKNOWN_EVENT', 'archive 只能指向 active');
+        if (!generatedScope.dynamicsSettings.autoComplete || !generatedScope.dynamicsSettings.archiveCompleted) {
+            failure('TT_HISTORY_SCHEMA_INVALID', '当前设置不允许自动归档事件');
+        }
+        archiveIds.add(operation.eventId);
+        const [event] = payload.dynamics.active.splice(index, 1);
+        if (operation.outcome === 'absorbed' && (event.type !== 'underground'
+            || !payload.dynamics.active.some(next => next.type === 'incident' && next.relatedEventIds.includes(event.id)))) {
+            failure('TT_HISTORY_SCHEMA_INVALID', '地下线升级必须新建关联突发事件');
+        }
+        payload.dynamics.archived.push({ ...event, lifecycle: 'archived', outcome: operation.outcome,
+            finalResult: operation.finalResult, archivedSequence: payload.historyRetentionState.nextArchivedSequence++,
+            archivedAtAssistantCount: reliableAssistantCount(assistantCount) });
+    }
+    if (archiveIds.size) migrateArchivedRemovable(payload, payload, archiveIds);
     const reliableCount = reliableAssistantCount(assistantCount);
     if (reliableCount !== null && (payload.historyRetentionState.highWaterAssistantCount === null
         || reliableCount > payload.historyRetentionState.highWaterAssistantCount)) {

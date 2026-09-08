@@ -1,4 +1,5 @@
 import { generationErrorMessage, parseFirstJsonObject } from './ai.js';
+import { materializeTodayTrendBatchDelta } from './today-trend-batch-delta.js';
 import { gatherTodayTrendContext } from './today-trend-context.js';
 import { normalizeTodayTrendHistoryProducer } from './today-trend-history-reducer.js';
 import { TODAY_TREND_VERSION, normalizeTodayTrendScope, normalizeTodayTrendStore } from './today-trend-model.js';
@@ -322,7 +323,27 @@ export function createTodayTrendGenerationController({
             const raw = await callAI(prompts.systemPrompt, prompts.userPrompt, { isolated: true, signal: input.signal });
             assertActive(input.signal);
             input.onPhase?.('parsing');
-            const parsed = parseUpdate(raw, { requireHistory });
+            let delta = null;
+            if (Array.isArray(input.historyBatch)) {
+                delta = materializeTodayTrendBatchDelta(parseFirstJsonObject(raw, '历史批增量 JSON 无效'), input.scope, now());
+                // Reuse the established module validators, without changing ordinary generation.
+                delta.parsed = parseGeneration(JSON.stringify(delta.parsed), { requireHistory: true });
+            }
+            const parsed = delta ? delta.parsed : parseUpdate(raw, { requireHistory });
+            if (delta) {
+                const candidate = structuredClone(parsed);
+                for (const operation of delta.archives) {
+                    const index = candidate.dynamics.active.findIndex(event => event.id === operation.eventId);
+                    const [event] = candidate.dynamics.active.splice(index, 1);
+                    candidate.dynamics.archived.push({ ...event, lifecycle: 'archived',
+                        outcome: operation.outcome, finalResult: operation.finalResult });
+                }
+                normalizeUpdate(candidate, { scope: input.scope, preset: input.preset,
+                    allowIncident: input.allowIncident === true, now });
+                return { context, scope: normalizeUpdate(parsed, { scope: input.scope, preset: input.preset,
+                    allowIncident: input.allowIncident === true, now }), history: parsed.history,
+                    archives: delta.archives, raw };
+            }
             if (input.summaryOnly === true
                 && ['world', 'reputation', 'factions', 'dynamics'].some(key => parsed[key] !== null)) {
                 throw new Error('summary-only 不得返回结构模块变更');

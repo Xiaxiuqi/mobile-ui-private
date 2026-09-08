@@ -4370,6 +4370,93 @@ for (const time of ['24:00', '12:60', '7:30', 'abcde']) {
 assert.throws(() => normalizeTodayTrendHistoryProducer({ events: [], debug: true }),
     error => error?.code === 'TT_HISTORY_SCHEMA_INVALID', 'history producer 顶层额外字段必须整单拒绝');
 
+// Historical batch DTO is a transport adapter; canonical history is produced locally.
+const { materializeTodayTrendBatchDelta } = await import('../src/today-trend-batch-delta.js');
+const batchEmpty = () => ({ world: { upserts: [] }, reputation: { upserts: [] }, factions: { upserts: [] },
+    dynamics: { create: [], appendStages: [], archive: [] }, history: { events: [] } });
+const batchBase = buildReadOnlyShadow(migratedValidV2).scopes.chat;
+assert.deepEqual(materializeTodayTrendBatchDelta(batchEmpty(), batchBase, 100).parsed.dynamics, batchBase.dynamics);
+const batchDto = batchEmpty();
+batchDto.dynamics.appendStages.push({ eventId: 'service', stages: ['批量最终进展'] });
+batchDto.dynamics.archive.push({ eventId: 'service', outcome: 'resolved', finalResult: '批次完成' });
+const batchMaterialized = materializeTodayTrendBatchDelta(batchDto, batchBase, 100);
+const batchCandidate = { ...batchBase, ...batchMaterialized.parsed };
+delete batchCandidate.history;
+batchCandidate.dynamicsSettings = { ...batchCandidate.dynamicsSettings, autoComplete: true, archiveCompleted: true };
+const beforeBatch = JSON.stringify(migratedValidV2);
+const batchArchived = applyTodayTrendGenerationToV2(migratedValidV2, 'chat', batchCandidate, batchMaterialized.parsed.history,
+    { trustedStoryDate: '2025-04-15', assistantCount: 8, generatedAt: 100, archives: batchMaterialized.archives });
+const batchArchivedEvent = batchArchived.globalEnvelope.payload.scopes.chat.payload.dynamics.archived.find(event => event.id === 'service');
+assert.equal(batchArchivedEvent.stages.at(-1).text, '批量最终进展');
+assert.equal(batchArchivedEvent.stages.at(-1).storyDate, '2025-04-15');
+assert.equal(batchArchivedEvent.createdAt, batchBase.dynamics.active.find(event => event.id === 'service').createdAt);
+assert.equal(JSON.stringify(migratedValidV2), beforeBatch, '候选生成不能半写 canonical 输入');
+const archivedScope = buildReadOnlyShadow(batchArchived).scopes.chat;
+assert.throws(() => materializeTodayTrendBatchDelta(batchDto, archivedScope, 200), /active/);
+const duplicateStageDto = batchEmpty();
+duplicateStageDto.history.events.push({ eventId: 'service', stages: [], daySummaries: [], periodSummaries: [] });
+assert.throws(() => materializeTodayTrendBatchDelta(duplicateStageDto, batchBase, 100), /字段集合/);
+const batchController = createTodayTrendGenerationController({ getCtx: () => ({}), gather: async () => ({}),
+    buildGeneration: () => ({ systemPrompt: '', userPrompt: '' }), callAI: async () => JSON.stringify(batchDto), now: () => 100 });
+const batchGenerated = await batchController.generate({ scope: { ...batchBase, dynamicsSettings: batchCandidate.dynamicsSettings }, preset: buildReadOnlyShadow(migratedValidV2).presets[batchBase.presetId],
+    historyBatch: [], storyDate: '2025-04-15', allowIncident: true });
+assert.deepEqual(batchGenerated.archives, batchDto.dynamics.archive);
+assert.equal(batchGenerated.history.events[0].stages[0].text, '批量最终进展');
+const batchControllerCanonical = applyTodayTrendGenerationToV2(migratedValidV2, 'chat', batchGenerated.scope,
+    batchGenerated.history, { trustedStoryDate: '2025-04-15', assistantCount: 8, generatedAt: 100, archives: batchGenerated.archives });
+assert.deepEqual(batchControllerCanonical, batchArchived, '真实生成控制器输出必须落入同一 canonical 结果');
+const createBatch = batchEmpty();
+const { type, title, stageLabel, origin, participants, relatedEventIds } = batchBase.dynamics.active.find(event => event.id === 'service');
+createBatch.dynamics.create.push({ id: 'batch-new', type, title, stageLabel, origin, participants,
+    relatedEventIds, initialStage: '新事件开始' });
+createBatch.dynamics.appendStages.push({ eventId: 'batch-new', stages: ['新事件继续', '新事件结束'] });
+createBatch.dynamics.archive.push({ eventId: 'batch-new', outcome: 'resolved', finalResult: '同批完成' });
+const createController = createTodayTrendGenerationController({ getCtx: () => ({}), gather: async () => ({}),
+    buildGeneration: () => ({ systemPrompt: '', userPrompt: '' }), callAI: async () => JSON.stringify(createBatch), now: () => 100 });
+const createInput = { scope: { ...batchBase, dynamicsSettings: batchCandidate.dynamicsSettings },
+    preset: buildReadOnlyShadow(migratedValidV2).presets[batchBase.presetId], historyBatch: [], storyDate: '2025-04-15', allowIncident: true };
+const createdBatch = await createController.generate(createInput);
+const createdCanonical = applyTodayTrendGenerationToV2(migratedValidV2, 'chat', createdBatch.scope, createdBatch.history,
+    { trustedStoryDate: '2025-04-15', assistantCount: 8, generatedAt: 100, archives: createdBatch.archives });
+const newlyArchived = createdCanonical.globalEnvelope.payload.scopes.chat.payload.dynamics.archived.find(event => event.id === 'batch-new');
+assert.deepEqual(newlyArchived.stages.map(stage => stage.text), ['新事件开始', '新事件继续', '新事件结束']);
+assert.equal(newlyArchived.stages.every(stage => stage.storyDate === '2025-04-15'), true);
+assert.equal(Object.hasOwn(newlyArchived, 'initialStage'), false, '传输字段不能持久化');
+for (const invalid of [null, {}, '', ' ', 42, '字'.repeat(601)]) {
+    const dto = structuredClone(createBatch);
+    dto.dynamics.create[0].initialStage = invalid;
+    assert.throws(() => materializeTodayTrendBatchDelta(dto, batchBase, 100), /create\[batch-new\].initialStage/);
+    dto.dynamics.create[0].initialStage = '开始';
+    dto.dynamics.appendStages[0].stages = [invalid];
+    assert.throws(() => materializeTodayTrendBatchDelta(dto, batchBase, 100), /appendStages\[batch-new\].stages\[0\]/);
+}
+const objectProtocol = structuredClone(createBatch);
+delete objectProtocol.dynamics.create[0].initialStage;
+objectProtocol.dynamics.create[0].stages = [phase5Stage('旧协议')];
+assert.throws(() => materializeTodayTrendBatchDelta(objectProtocol, batchBase, 100), /create\[batch-new\].*initialStage/);
+const duplicateCreate = structuredClone(createBatch);
+duplicateCreate.dynamics.create[0].id = 'service';
+assert.throws(() => materializeTodayTrendBatchDelta(duplicateCreate, batchBase, 100), /create\[service\].id/);
+createBatch.dynamics.create[0].relatedEventIds = ['missing-reference'];
+await assert.rejects(() => createController.generate(createInput));
+createBatch.dynamics.create[0].relatedEventIds = relatedEventIds;
+createBatch.dynamics.create[0].type = 'incident';
+await assert.rejects(() => createController.generate({ ...createInput, allowIncident: false }));
+createBatch.dynamics.create[0].type = type;
+await assert.rejects(() => createController.generate({ ...createInput,
+    scope: { ...createInput.scope, dynamicsSettings: { ...createInput.scope.dynamicsSettings, autoComplete: false, archiveCompleted: false } } }));
+const archivedNoopController = createTodayTrendGenerationController({ getCtx: () => ({}), gather: async () => ({}),
+    buildGeneration: () => ({ systemPrompt: '', userPrompt: '' }), callAI: async () => JSON.stringify(batchEmpty()), now: () => 200 });
+const archivedNoop = await archivedNoopController.generate({ ...createInput, scope: archivedScope });
+const archivedNoopCanonical = applyTodayTrendGenerationToV2(batchArchived, 'chat', archivedNoop.scope, archivedNoop.history,
+    { trustedStoryDate: '2025-04-15', assistantCount: 9, generatedAt: 200, archives: archivedNoop.archives });
+assert.deepEqual(archivedNoopCanonical.globalEnvelope.payload.scopes.chat.payload.dynamics.archived,
+    batchArchived.globalEnvelope.payload.scopes.chat.payload.dynamics.archived, '旧 canonical archived 隐藏阶段必须逐字段保留');
+assert.deepEqual(archivedNoopCanonical.globalEnvelope.payload.scopes.chat.payload.stageDetailsByEvent,
+    batchArchived.globalEnvelope.payload.scopes.chat.payload.stageDetailsByEvent, '空增量不得重建或丢弃隐藏 detail 池');
+
+
+
 const phase5Dated = applyTodayTrendGenerationToV2(migratedValidV2, 'chat',
     phase5GeneratedScope(migratedValidV2, '完成摆盘'), phase5Producer('service', [phase5Stage('完成摆盘')]), {
         trustedStoryDate: '2025-04-15', assistantCount: 8,generatedAt: 100,
@@ -4430,6 +4517,31 @@ assert.deepEqual(phase5NextEvent.stages.slice(-2).map(stage => stage.kind), ['da
     '日期前进必须先封闭旧日，再按原序追加新日 stage');
 assert.equal(phase5NextEvent.stages.at(-2).detailCount, 2, '封日摘要必须保留被折叠 live-stage 的 detail 数量');
 assert.equal(phase5NextPayload.stageDetailsByEvent.service.length, 2, '封日必须把原 live-stage 正文迁入 detail 容器');
+// Reuse producer-generated closed-day details, then archive through the real batch controller.
+const batchDetailArchive = await batchController.generate({ ...createInput, storyDate: '2025-04-16',
+    scope: { ...buildReadOnlyShadow(phase5NextDay).scopes.chat, dynamicsSettings: batchCandidate.dynamicsSettings } });
+const batchArchivedWithDetails = applyTodayTrendGenerationToV2(phase5NextDay, 'chat', batchDetailArchive.scope,
+    batchDetailArchive.history, { trustedStoryDate: '2025-04-16', assistantCount: 11, generatedAt: 150,
+        archives: batchDetailArchive.archives });
+const batchDetailBaseline = structuredClone(batchArchivedWithDetails.globalEnvelope.payload.scopes.chat.payload);
+assert.ok(batchDetailBaseline.dynamics.archived.some(event => event.id === 'service'),
+    '非空 detail 保留夹具必须已归档 service');
+assert.equal(batchDetailBaseline.stageDetailsByEvent.service?.length, 2,
+    '空增量前置：必须保留 history producer 跨日封入的两条真实 canonical detail');
+assert.deepEqual(batchDetailBaseline.stageDetailsByEvent.service, phase5NextPayload.stageDetailsByEvent.service,
+    '归档前置：detail 必须来自既有 history producer，而非手工构造 schema');
+const batchDetailNoop = await archivedNoopController.generate({ ...createInput, storyDate: '2025-04-16',
+    scope: buildReadOnlyShadow(batchArchivedWithDetails).scopes.chat });
+const batchDetailNoopCanonical = applyTodayTrendGenerationToV2(batchArchivedWithDetails, 'chat', batchDetailNoop.scope,
+    batchDetailNoop.history, { trustedStoryDate: '2025-04-16', assistantCount: 12, generatedAt: 200,
+        archives: batchDetailNoop.archives });
+const batchDetailNoopPayload = batchDetailNoopCanonical.globalEnvelope.payload.scopes.chat.payload;
+assert.equal(batchDetailNoopPayload.stageDetailsByEvent.service?.length, 2,
+    '真实 controller 空增量落入 canonical 后 detail 必须仍非空');
+assert.deepEqual(batchDetailNoopPayload.stageDetailsByEvent, batchDetailBaseline.stageDetailsByEvent,
+    '真实 controller 空增量必须逐字段保留非空 canonical detail 池');
+assert.deepEqual(batchDetailNoopPayload.dynamics.archived, batchDetailBaseline.dynamics.archived,
+    '真实 controller 空增量必须逐字段保留携带 detail 的 archived 事件');
 assert.equal(phase5NextPayload.removableEntityStateById['day:service:2025-04-15'].state, 'available',
     '新 day-summary 必须与 available lifecycle 同事务写入');
 
@@ -4839,6 +4951,36 @@ assert.equal([...phase5MultiHarness.records.keys()].some(key => key.startsWith(T
 assert.deepEqual((await phase5MultiAuthorityWithTrace.load()).v2Store.globalEnvelope.payload.scopes.sibling,
     batchReadyWithSiblingV2.globalEnvelope.payload.scopes.sibling,
     '批量生成只能提交当前 scope，不得因 v1 facade 合并改写 sibling canonical scope');
+
+// Real controller + storage/authority: failed later batch retains the accepted first batch.
+let deltaBatchCalls = 0;
+let deltaBatchFail = true;
+const deltaBatchController = createTodayTrendGenerationController({ getCtx: () => ({}), gather: async () => ({}),
+    buildGeneration: () => ({ systemPrompt: '', userPrompt: '' }), now: () => 200,
+    callAI: async () => {
+        deltaBatchCalls += 1;
+        if (deltaBatchFail && deltaBatchCalls === 2) throw new Error('delta-second-batch-failed');
+        const dto = batchEmpty();
+        dto.world.upserts.push({ id: `delta-${deltaBatchCalls}`, name: '增量世界', summary: `成功批${deltaBatchCalls}` });
+        return JSON.stringify(dto);
+    } });
+const deltaBatchScheduler = createTodayTrendScheduler({ controller: deltaBatchController, committer: phase5MultiCommitter,
+    getStore: phase5MultiStorage.load, getStorageId: () => 'chat', getChat: () => phase5MultiChat,
+    getFloor: () => 4, commitFeedbackMs: 0 });
+await assert.rejects(() => deltaBatchScheduler.manual({ batchEnabled: true, recentAssistantCount: 4, mergeAssistantCount: 2 }), /delta-second-batch-failed/);
+const deltaAfterFailure = await phase5MultiStorage.loadCanonical();
+assert.equal(deltaAfterFailure.globalEnvelope.payload.scopes.chat.payload.world.items.some(item => item.id === 'delta-1'), true);
+await new Promise(resolve => setTimeout(resolve, 0));
+assert.equal(deltaBatchCalls, 2, '失败不得自动恢复或继续调用 AI');
+deltaBatchFail = false;
+await deltaBatchScheduler.manual({ batchEnabled: true, recentAssistantCount: 2, mergeAssistantCount: 2 });
+assert.equal(deltaBatchCalls, 3, '用户修改窗口后只能执行新手动窗口');
+assert.equal((await phase5MultiStorage.loadCanonical()).globalEnvelope.payload.scopes.chat.payload.world.items.some(item => item.id === 'delta-3'), true);
+const deltaBeforeCasConflict = await phase5MultiStorage.loadCanonical();
+await assert.rejects(() => phase5MultiCommitter.commitStore(store => store, {}, { canonical: true, scopeId: 'chat',
+    expectedStoreRevision: deltaBeforeCasConflict.globalEnvelope.revision - 1,
+    expectedScopeRevision: deltaBeforeCasConflict.globalEnvelope.payload.scopes.chat.revision }));
+assert.deepEqual(await phase5MultiStorage.loadCanonical(), deltaBeforeCasConflict, '过期 CAS 不得覆盖手动继续后的 canonical');
 
 let phase5MultiDrifted = false;
 const phase5CanonicalDriftCommitter = createTodayTrendCommitter({
