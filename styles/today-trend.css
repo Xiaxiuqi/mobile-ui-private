@@ -149,6 +149,9 @@
 .pm-today-trend-first-use .pm-today-trend-book-option span{min-width:0;overflow-wrap:anywhere;color:var(--pm-color-text-secondary);font-size:var(--pm-font-size-body);line-height:var(--pm-line-height-body);}
 .pm-today-trend-first-use .pm-today-trend-empty-state{padding:var(--pm-space-3);border:1px solid var(--pm-color-border-default);border-radius:var(--pm-radius-control);background:var(--pm-color-surface-control);color:var(--pm-color-text-primary);font-size:var(--pm-font-size-label);line-height:var(--pm-line-height-body);}
 .pm-today-trend-first-use .pm-today-trend-init-switch{padding-inline:var(--pm-space-1);}
+.pm-today-trend-first-use .pm-today-trend-init-switch>span{display:flex;min-width:0;flex-direction:column;gap:var(--pm-space-0-5);}
+.pm-today-trend-first-use .pm-today-trend-init-switch b{font-size:var(--pm-font-size-label);}
+.pm-today-trend-first-use .pm-today-trend-init-switch small{color:var(--pm-color-text-tertiary);font-size:var(--pm-font-size-helper);line-height:var(--pm-line-height-body);}
 .pm-today-trend-first-use .pm-today-trend-init-actions{flex-direction:column;flex-wrap:nowrap;}
 .pm-today-trend-first-use .pm-today-trend-init-actions button,.pm-today-trend-first-use .pm-today-trend-bind-form>button{display:grid;box-sizing:border-box;width:100%;min-height:var(--pm-size-control-default);place-items:center;text-align:center;}
 .pm-today-trend-first-use .pm-today-trend-primary-action{border-color:var(--pm-color-accent);background:var(--pm-color-accent);color:var(--pm-color-on-accent);}

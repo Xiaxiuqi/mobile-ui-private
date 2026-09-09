@@ -710,7 +710,7 @@ for (const name of ['presetName', 'worldBookNames', 'includeExistingChat', 'user
 }
 assert.match(createPresetHtml, /<span>预设名称<\/span>/, '初始化表单必须保留既有预设名称文案');
 assert.match(createPresetHtml, /name="backfillExistingChat"[^>]*role="switch"[^>]*aria-checked="false"/, '创建模式必须提供默认关闭的显式历史回填开关');
-assert.match(createPresetHtml, /初始化后溯及既往更新<small>按既有 AI 回复逐批生成历史状态，可能发起多次 AI 请求。<\/small>/,
+assert.match(createPresetHtml, /<b>初始化后溯及既往更新<\/b><small>按既有 AI 回复逐批生成历史状态，可能发起多次 AI 请求。<\/small>/,
     '初始化历史回填开关必须明确告知多次 AI 请求副作用');
 assert.doesNotMatch(createPresetHtml, /name="recentAssistantCount"|name="mergeAssistantCount"/,
     '初始化历史回填开关关闭时不得渲染批处理参数菜单');
@@ -720,8 +720,8 @@ assert.match(backfillCreatePresetHtml, /name="recentAssistantCount"[^>]*min="1" 
     '初始化历史回填开关开启时必须按实时 assistantCount 渲染并保留最近处理层数');
 assert.match(backfillCreatePresetHtml, /name="mergeAssistantCount"[^>]*min="1" max="12"[^>]*value="3"/,
     '初始化历史回填开关开启时必须渲染并保留每批合并层数');
-assert.match(backfillCreatePresetHtml, /当前聊天 AI 回复累计层数：12。将处理尾部最近 N 层。/,
-    '初始化历史回填参数必须明确尾部窗口语义');
+assert.match(backfillCreatePresetHtml, /当前聊天 AI 回复累计层数<\/span><b>12<\/b>/,
+    '初始化历史回填参数必须按统计行显示尾部窗口层数');
 const emptyBackfillCreatePresetHtml = renderTodayTrendApp({ worldBooks: ['厨房设定'], assistantCount: 0,
     initializationDraft: { includeExistingChat: true, backfillExistingChat: true } });
 assert.doesNotMatch(emptyBackfillCreatePresetHtml, /data-action="today-trend-initialize-and-batch"/,
