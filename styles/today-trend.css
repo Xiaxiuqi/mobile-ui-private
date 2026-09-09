@@ -79,7 +79,6 @@
 .pm-today-trend-settings-save button[type="submit"]{width:100%;min-height:var(--pm-size-control-default);border-radius:var(--pm-radius-control);color:var(--pm-color-on-accent);text-align:center;}
 .pm-today-trend-batch-settings{display:flex;min-width:0;flex-direction:column;gap:var(--pm-space-2);}
 .pm-today-trend-batch-settings legend{padding:var(--pm-space-0);color:var(--pm-color-text-primary);font-size:var(--pm-font-size-label);font-weight:var(--pm-font-weight-semibold);line-height:var(--pm-line-height-control);}
-.pm-today-trend-batch-switch{padding:var(--pm-space-px-7) var(--pm-space-0-5);border:0;background:transparent;text-align:left;}
 .pm-today-trend-settings .pm-today-trend-preset-warning{color:var(--pm-color-text-tertiary);font-size:var(--pm-font-size-helper);line-height:var(--pm-line-height-body);}
 .pm-today-trend-retention-settings{display:flex;min-width:0;flex-direction:column;gap:var(--pm-space-2);}
 .pm-today-trend-retention-settings legend{padding:var(--pm-space-0);color:var(--pm-color-text-primary);font-size:var(--pm-font-size-label);font-weight:var(--pm-font-weight-semibold);line-height:var(--pm-line-height-control);}
@@ -88,6 +87,8 @@
 .pm-today-trend-batch-stat:first-child{border-top:0;}
 .pm-today-trend-retention-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:var(--pm-space-2);}
 .pm-today-trend-batch-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:var(--pm-space-2);}
+.pm-today-trend-batch-fields .pm-today-trend-field>span{font-size:var(--pm-font-size-helper);}
+.pm-today-trend-batch-actions{justify-content:flex-end;}
 .pm-today-trend-settings .pm-today-trend-retention-fields small,.pm-today-trend-settings .pm-today-trend-retention-unavailable{color:var(--pm-color-text-tertiary);font-size:var(--pm-font-size-helper);line-height:var(--pm-line-height-body);}
 .pm-today-trend-retention-save{display:block;}
 .pm-today-trend-retention-save button[type="submit"]{width:100%;min-height:var(--pm-size-control-default);text-align:center;}
@@ -100,10 +101,10 @@
 .pm-today-trend-diagnostic button:focus-visible{outline:var(--pm-today-trend-focus-offset) solid var(--pm-color-focus-ring);outline-offset:var(--pm-today-trend-focus-offset);}
 .pm-today-trend-diagnostic-copy-status{color:var(--pm-color-text-secondary);font-size:var(--pm-font-size-helper);line-height:var(--pm-line-height-control);}
 .pm-today-trend-switch{display:flex;align-items:center;justify-content:space-between;gap:var(--pm-space-3);min-height:var(--pm-size-control-default);color:var(--pm-color-text-primary);font-size:var(--pm-font-size-body);line-height:var(--pm-line-height-control);cursor:pointer;}
-.pm-today-trend-injection-switch,.pm-today-trend-minimal-ui-switch{padding:var(--pm-space-px-7) var(--pm-space-0-5);border:0;background:transparent;text-align:left;}
-.pm-today-trend-injection-switch>span,.pm-today-trend-minimal-ui-switch>span{display:flex;min-width:0;flex-direction:column;gap:var(--pm-space-0-5);}
-.pm-today-trend-injection-switch b,.pm-today-trend-minimal-ui-switch b{font-size:var(--pm-font-size-label);}
-.pm-today-trend-injection-switch small,.pm-today-trend-minimal-ui-switch small{color:var(--pm-color-text-tertiary);font-size:var(--pm-font-size-helper);line-height:var(--pm-line-height-body);}
+.pm-today-trend-injection-switch,.pm-today-trend-minimal-ui-switch,.pm-today-trend-batch-switch{padding:var(--pm-space-px-7) var(--pm-space-0-5);border:0;background:transparent;text-align:left;}
+.pm-today-trend-injection-switch>span,.pm-today-trend-minimal-ui-switch>span,.pm-today-trend-batch-switch>span{display:flex;min-width:0;flex-direction:column;gap:var(--pm-space-0-5);}
+.pm-today-trend-injection-switch b,.pm-today-trend-minimal-ui-switch b,.pm-today-trend-batch-switch b{font-size:var(--pm-font-size-label);}
+.pm-today-trend-injection-switch small,.pm-today-trend-minimal-ui-switch small,.pm-today-trend-batch-switch small{color:var(--pm-color-text-tertiary);font-size:var(--pm-font-size-helper);line-height:var(--pm-line-height-body);}
 .pm-today-trend-injection-switch>i{width:36px;height:20px;flex:0 0 36px;border-radius:var(--pm-radius-pill);background:var(--pm-color-control-off);transition:background var(--pm-motion-normal) var(--pm-motion-ease);}
 .pm-today-trend-minimal-ui-switch>i{width:var(--pm-today-trend-switch-width);height:var(--pm-today-trend-switch-height);flex:0 0 var(--pm-today-trend-switch-width);border-radius:var(--pm-radius-pill);background:var(--pm-color-control-off);transition:background var(--pm-motion-normal) var(--pm-motion-ease);}
 .pm-today-trend-injection-switch>i::after{top:2px;left:2px;width:16px;height:16px;border-radius:var(--pm-radius-circle);background:var(--pm-color-on-dark);transition:transform var(--pm-motion-normal) var(--pm-motion-ease);}

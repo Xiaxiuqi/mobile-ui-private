@@ -26,7 +26,7 @@ function batchSettingsGroup(scope, assistantCount, generationBusy, generation = 
             <label class="pm-today-trend-field"><span>每多少层合并为一次</span><input class="pm-today-trend-input" name="mergeAssistantCount" type="number" inputmode="numeric" min="1" max="${Math.max(count, 1)}" step="1" required value="${mergeAssistantCount}" ${disabled ? 'disabled' : ''}></label>
         </div>
         ${failedBatch ? `<p class="pm-today-trend-error" role="alert">${escapeHtml(failedBatch)}。已成功批次已保留；可按未更新累计层数重填后继续。</p>` : ''}
-        <div class="pm-today-trend-form-actions"><button type="button" data-action="today-trend-batch-generate" ${disabled ? 'disabled' : ''}>${generationBusy ? '正在批量更新' : '手动批量更新'}</button></div>` : '';
+        <div class="pm-today-trend-form-actions pm-today-trend-batch-actions"><button type="button" data-action="today-trend-batch-generate" ${disabled ? 'disabled' : ''}>${generationBusy ? '正在批量更新' : '手动批量更新'}</button></div>` : '';
     return `<fieldset class="pm-today-trend-batch-settings"><legend>溯及既往楼层更新</legend>
         <label class="pm-today-trend-switch pm-today-trend-batch-switch"><span><b>启用</b><small>开启后可按下方参数手动批量更新历史楼层。</small></span><input name="batchEnabled" type="checkbox" role="switch" aria-checked="${batchEnabled === true}"${batchEnabled ? ' checked' : ''}${generationBusy ? ' disabled' : ''}><i aria-hidden="true"></i></label>${details}
     </fieldset>`;
