@@ -81,8 +81,7 @@
 .pm-today-trend-retention-settings{display:flex;min-width:0;flex-direction:column;gap:var(--pm-space-2);}
 .pm-today-trend-retention-settings legend{padding:var(--pm-space-0);color:var(--pm-color-text-primary);font-size:var(--pm-font-size-label);font-weight:var(--pm-font-weight-semibold);line-height:var(--pm-line-height-control);}
 .pm-today-trend-retention-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:var(--pm-space-2);}
-.pm-today-trend-settings .pm-today-trend-retention-fields small,.pm-today-trend-settings .pm-today-trend-retention-example,.pm-today-trend-settings .pm-today-trend-retention-unavailable{color:var(--pm-color-text-tertiary);font-size:var(--pm-font-size-helper);line-height:var(--pm-line-height-body);}
-.pm-today-trend-settings .pm-today-trend-retention-warning{padding:var(--pm-space-2);border:1px solid var(--pm-color-warning);border-radius:var(--pm-radius-control);background:var(--pm-color-surface-control);color:var(--pm-color-text-primary);font-size:var(--pm-font-size-helper);line-height:var(--pm-line-height-body);}
+.pm-today-trend-settings .pm-today-trend-retention-fields small,.pm-today-trend-settings .pm-today-trend-retention-unavailable{color:var(--pm-color-text-tertiary);font-size:var(--pm-font-size-helper);line-height:var(--pm-line-height-body);}
 .pm-today-trend-retention-save{display:block;}
 .pm-today-trend-retention-save button[type="submit"]{width:100%;min-height:var(--pm-size-control-default);text-align:center;}
 .pm-today-trend-shell input.pm-today-trend-input:invalid{border-color:var(--pm-color-danger);}

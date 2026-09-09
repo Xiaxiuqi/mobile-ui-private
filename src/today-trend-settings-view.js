@@ -38,15 +38,12 @@ function retentionSettingsGroup(scope, revisions, saving, generationBusy, draft)
         && Number.isSafeInteger(revisions?.settingsRevision) && revisions.settingsRevision >= 1;
     const disabled = saving || generationBusy || !available;
     return `<fieldset class="pm-today-trend-retention-settings"><legend>事件追踪归档数据保留设置</legend>
-        <p class="pm-today-trend-retention-help">控制已归档事件的可展开阶段详情与日期摘要。默认保留最近 2 个归档事件，或最近 20 楼内归档的事件；N 与 L 任一条件满足即保留。</p>
-        <div class="pm-today-trend-retention-fields"><label class="pm-today-trend-field"><span>最近归档事件数 N（0..80）</span><input class="pm-today-trend-input" name="archivedDetailLatestEventCount" type="number" inputmode="numeric" min="0" max="80" step="1" required value="${escapeAttr(nValue)}" ${disabled ? 'disabled' : ''}><small>设为 0 可关闭按事件数量保留。</small></label>
-        <label class="pm-today-trend-field"><span>归档后保留楼层数 L（0..1000）</span><input class="pm-today-trend-input" name="archivedDetailRetentionFloors" type="number" inputmode="numeric" min="0" max="1000" step="1" required value="${escapeAttr(lValue)}" ${disabled ? 'disabled' : ''}><small>设为 0 可关闭按楼层范围保留。</small></label></div>
+        <p class="pm-today-trend-retention-help">默认保留最近 2 个归档事件，或最近 20 楼内归档的事件。</p>
+        <div class="pm-today-trend-retention-fields"><label class="pm-today-trend-field"><span>保留归档事件数</span><input class="pm-today-trend-input" name="archivedDetailLatestEventCount" type="number" inputmode="numeric" min="0" max="80" step="1" required value="${escapeAttr(nValue)}" ${disabled ? 'disabled' : ''}></label>
+        <label class="pm-today-trend-field"><span>保留楼层数</span><input class="pm-today-trend-input" name="archivedDetailRetentionFloors" type="number" inputmode="numeric" min="0" max="1000" step="1" required value="${escapeAttr(lValue)}" ${disabled ? 'disabled' : ''}></label></div>
         <input type="hidden" name="expectedScopeRevision" value="${available ? escapeAttr(String(revisions.scopeRevision)) : ''}"><input type="hidden" name="expectedSettingsRevision" value="${available ? escapeAttr(String(revisions.settingsRevision)) : ''}">
-        <p class="pm-today-trend-retention-combinations">组合语义：N&gt;0/L&gt;0 时按 OR 保护；N&gt;0/L=0 时只按最近事件数；N=0/L&gt;0 时只按楼层；N=0/L=0 时不保留可移除详细数据。</p>
-        <p class="pm-today-trend-retention-example">示例：L=20 时，在 #32 查看于 #12 归档的事件仍受保护；到 #33 时，仅当 N 条件仍满足才继续保留。</p>
-        <p class="pm-today-trend-retention-warning">保存只更新保留策略，不会立即清理。缩小配置后，后续成功事务可能在安全点不可逆删除超出保护范围的详细数据；聊天回退不会恢复，之后增大配置也不会复活已删除正文。事件固定核心始终保留，包括标题、起因、主体与结果。</p>
-        <div class="pm-today-trend-form-actions pm-today-trend-retention-save"><button type="submit" ${disabled ? 'disabled' : ''} aria-busy="${saving}">${saving ? '正在保存保留设置' : '保存归档保留设置'}</button></div>
-        ${available ? '' : '<p class="pm-today-trend-retention-unavailable" role="status">canonical 修订信息不可用，当前禁止保存。</p>'}
+        <div class="pm-today-trend-form-actions pm-today-trend-retention-save"><button type="submit" ${disabled ? 'disabled' : ''} aria-busy="${saving}">${saving ? '正在保存' : '保存'}</button></div>
+        ${available ? '' : '<p class="pm-today-trend-retention-unavailable" role="status">暂时无法保存，请重新打开本页后重试。</p>'}
     </fieldset>`;
 }
 

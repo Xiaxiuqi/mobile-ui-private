@@ -7007,10 +7007,16 @@ for (const [name, maximum] of [['archivedDetailLatestEventCount', 80], ['archive
     assert.match(phase11SettingsHtml, new RegExp(`name="${name}"[^>]*min="0"[^>]*max="${maximum}"[^>]*step="1"[^>]*required`),
         `retention 设置必须为 ${name} 提供整数范围契约`);
 }
-for (const text of ['默认保留最近 2 个归档事件', '最近 20 楼', '任一条件满足即保留', '设为 0 可关闭', '#32', '#12', '#33',
+for (const text of ['默认保留最近 2 个归档事件', '最近 20 楼', '保留归档事件数', '保留楼层数']) {
+    assert.match(phase11SettingsHtml, new RegExp(text), `retention 设置必须显示简洁说明：${text}`);
+}
+for (const text of ['任一条件满足即保留', '设为 0 可关闭', '#32', '#12', '#33',
     'N&gt;0/L&gt;0', 'N&gt;0/L=0', 'N=0/L&gt;0', 'N=0/L=0', '阶段详情与日期摘要',
     '不会立即清理', '不可逆删除', '聊天回退不会恢复', '增大配置也不会复活已删除正文', '事件固定核心始终保留']) {
-    assert.match(phase11SettingsHtml, new RegExp(text), `retention 设置必须显示风险与语义说明：${text}`);
+    assert.doesNotMatch(phase11SettingsHtml, new RegExp(text), `retention 设置不得再显示冗余说明：${text}`);
+}
+for (const text of ['组合语义', '示例：L=20', '保存只更新保留策略', 'canonical 修订信息不可用', '保存归档保留设置']) {
+    assert.doesNotMatch(phase11SettingsHtml, new RegExp(text), `retention 设置不得再显示冗余说明：${text}`);
 }
 assert.match(phase11SettingsHtml, /name="expectedScopeRevision"[^>]*value="\d+"/, 'retention 表单必须携带 canonical scope revision');
 assert.match(phase11SettingsHtml, /name="expectedSettingsRevision"[^>]*value="\d+"/, 'retention 表单必须携带 settings revision');
@@ -7126,7 +7132,7 @@ phase11RetentionForm.values.set('archivedDetailLatestEventCount', '2');
 for (const listener of phase11ControllerListeners.filter(item => item.type === 'submit')) listener.listener({ target: phase11RetentionForm, preventDefault() {} });
 await new Promise(resolve => setTimeout(resolve, 0));
 assert.match(phase11ControllerContainer.innerHTML,
-    /data-today-trend-form="retention-settings"[\s\S]*button type="submit" disabled aria-busy="true">正在保存保留设置<\/button>/,
+    /data-today-trend-form="retention-settings"[\s\S]*button type="submit" disabled aria-busy="true">正在保存<\/button>/,
     'retention 保存期间必须禁用提交按钮并暴露稳定 loading 状态');
 const phase11BeforeDestroyHtml = phase11ControllerContainer.innerHTML;
 phase11Controller.destroy();
