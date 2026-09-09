@@ -28410,15 +28410,20 @@ periodSummaries \u9879\u4EC5 summaryText,startDate,endDate,childSummaryRefs\uFF1
     const synced = Number.isSafeInteger(scope?.operation?.lastSuccessfulAssistantCount) && scope.operation.lastSuccessfulAssistantCount >= 0 ? Math.min(scope.operation.lastSuccessfulAssistantCount, count) : 0;
     const pending = Math.max(0, count - synced);
     const failedBatch = generation.phase === "failed" && generation.task?.storageId === scope?.storageId && Number.isSafeInteger(generation.task?.batchIndex) && Number.isSafeInteger(generation.task?.batchCount) ? `\u7B2C ${generation.task.batchIndex + 1}/${generation.task.batchCount} \u6279\u5931\u8D25\uFF1A${String(generation.lastError || "\u672A\u77E5\u9519\u8BEF")}` : "";
-    const details = `
-        <p class="pm-today-trend-retention-help">\u5F53\u524D\u804A\u5929 AI \u56DE\u590D\u7D2F\u8BA1\u5C42\u6570\uFF1A${count}\uFF1B\u5DF2\u6210\u529F\u66F4\u65B0\uFF1A${synced}\uFF1B\u5F53\u524D\u672A\u66F4\u65B0\u7684 AI \u56DE\u590D\u7D2F\u8BA1\u5C42\u6570\uFF1A${pending}\u3002\u6279\u91CF\u53C2\u6570\u4F1A\u4FDD\u5B58\u5230\u5F53\u524D\u804A\u5929\u8BBE\u7F6E\uFF1B\u542F\u7528\u540E\u624D\u53EF\u624B\u52A8\u6279\u91CF\u66F4\u65B0\u3002</p>
-        <label class="pm-today-trend-field"><span>\u624B\u52A8\u5904\u7406\u6700\u8FD1 assistant \u5C42\u6570</span><input class="pm-today-trend-input" name="recentAssistantCount" type="number" inputmode="numeric" min="1" max="${Math.max(count, 1)}" step="1" required value="${recentAssistantCount}" ${disabled ? "disabled" : ""}></label>
-        <label class="pm-today-trend-field"><span>\u6BCF\u591A\u5C11\u5C42\u5408\u5E76\u4E3A\u4E00\u6B21</span><input class="pm-today-trend-input" name="mergeAssistantCount" type="number" inputmode="numeric" min="1" max="${Math.max(count, 1)}" step="1" required value="${mergeAssistantCount}" ${disabled ? "disabled" : ""}></label>
-        <p class="pm-today-trend-retention-help">generationSnapshots\uFF1A\u56FA\u5B9A\u4FDD\u7559\u6700\u8FD1 ${TODAY_TREND_LIMITS.generationSnapshots} \u4E2A\u8BB0\u5F55\u3002\u8BE5\u5BB9\u91CF\u4E0D\u53EF\u914D\u7F6E\uFF0C\u4E5F\u4E0D\u4F1A\u56E0\u6253\u5F00\u6216\u4FDD\u5B58\u8BBE\u7F6E\u89E6\u53D1\u751F\u6210\u6216\u6E05\u7406\u3002</p>
+    const details = batchEnabled ? `
+        <div class="pm-today-trend-batch-stats">
+            <div class="pm-today-trend-batch-stat"><span>\u5F53\u524D\u804A\u5929 AI \u56DE\u590D\u7D2F\u8BA1\u5C42\u6570</span><b>${count}</b></div>
+            <div class="pm-today-trend-batch-stat"><span>\u5DF2\u6210\u529F\u66F4\u65B0</span><b>${synced}</b></div>
+            <div class="pm-today-trend-batch-stat"><span>\u5F53\u524D\u672A\u66F4\u65B0\u7684 AI \u56DE\u590D\u7D2F\u8BA1\u5C42\u6570</span><b>${pending}</b></div>
+        </div>
+        <div class="pm-today-trend-batch-fields">
+            <label class="pm-today-trend-field"><span>\u624B\u52A8\u5904\u7406\u6700\u8FD1AI\u56DE\u590D\u5C42\u6570</span><input class="pm-today-trend-input" name="recentAssistantCount" type="number" inputmode="numeric" min="1" max="${Math.max(count, 1)}" step="1" required value="${recentAssistantCount}" ${disabled ? "disabled" : ""}></label>
+            <label class="pm-today-trend-field"><span>\u6BCF\u591A\u5C11\u5C42\u5408\u5E76\u4E3A\u4E00\u6B21</span><input class="pm-today-trend-input" name="mergeAssistantCount" type="number" inputmode="numeric" min="1" max="${Math.max(count, 1)}" step="1" required value="${mergeAssistantCount}" ${disabled ? "disabled" : ""}></label>
+        </div>
         ${failedBatch ? `<p class="pm-today-trend-error" role="alert">${escapeHtml(failedBatch)}\u3002\u5DF2\u6210\u529F\u6279\u6B21\u5DF2\u4FDD\u7559\uFF1B\u53EF\u6309\u672A\u66F4\u65B0\u7D2F\u8BA1\u5C42\u6570\u91CD\u586B\u540E\u7EE7\u7EED\u3002</p>` : ""}
-        <div class="pm-today-trend-form-actions"><button type="button" data-action="today-trend-batch-generate" ${disabled || !batchEnabled ? "disabled" : ""}>${generationBusy ? "\u6B63\u5728\u6279\u91CF\u66F4\u65B0" : "\u624B\u52A8\u6279\u91CF\u66F4\u65B0"}</button></div>`;
+        <div class="pm-today-trend-form-actions"><button type="button" data-action="today-trend-batch-generate" ${disabled ? "disabled" : ""}>${generationBusy ? "\u6B63\u5728\u6279\u91CF\u66F4\u65B0" : "\u624B\u52A8\u6279\u91CF\u66F4\u65B0"}</button></div>` : "";
     return `<fieldset class="pm-today-trend-batch-settings"><legend>\u6EAF\u53CA\u65E2\u5F80\u697C\u5C42\u66F4\u65B0</legend>
-        <label class="pm-today-trend-switch pm-today-trend-batch-switch"><span><b>\u542F\u7528\u6EAF\u53CA\u65E2\u5F80\u697C\u5C42\u66F4\u65B0</b><small>\u5F00\u542F\u540E\u5141\u8BB8\u6309\u4E0B\u65B9\u53C2\u6570\u6267\u884C\u624B\u52A8\u6279\u91CF\u66F4\u65B0\u3002</small></span><input name="batchEnabled" type="checkbox" role="switch" aria-checked="${batchEnabled === true}"${batchEnabled ? " checked" : ""}${generationBusy ? " disabled" : ""}><i aria-hidden="true"></i></label>${details}
+        <label class="pm-today-trend-switch pm-today-trend-batch-switch"><span><b>\u542F\u7528</b><small>\u5F00\u542F\u540E\u53EF\u6309\u4E0B\u65B9\u53C2\u6570\u624B\u52A8\u6279\u91CF\u66F4\u65B0\u5386\u53F2\u697C\u5C42\u3002</small></span><input name="batchEnabled" type="checkbox" role="switch" aria-checked="${batchEnabled === true}"${batchEnabled ? " checked" : ""}${generationBusy ? " disabled" : ""}><i aria-hidden="true"></i></label>${details}
     </fieldset>`;
   }
   function retentionSettingsGroup(scope, revisions2, saving, generationBusy, draft) {

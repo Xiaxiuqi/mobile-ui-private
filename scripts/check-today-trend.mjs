@@ -6757,24 +6757,27 @@ const phase12BatchOffHtml = renderTodayTrendSettingsView({
     scope: phase10UiScope, presets: Object.values(valid.presets), assistantCount: 8,
 });
 assert.match(phase12BatchOffHtml, /name="batchEnabled"[^>]*role="switch"/, '批处理默认必须提供关闭状态开关');
-assert.match(phase12BatchOffHtml, /name="recentAssistantCount"[^>]*value="1"/, '批处理关闭时仍必须显示可配置的最近处理层数');
-assert.match(phase12BatchOffHtml, /name="mergeAssistantCount"[^>]*value="5"/, '批处理关闭时仍必须显示可配置的合并层数');
-assert.match(phase12BatchOffHtml, /data-action="today-trend-batch-generate" disabled/, '批处理未启用时手动更新动作必须保持禁用');
+assert.doesNotMatch(phase12BatchOffHtml, /name="recentAssistantCount"/, '批处理关闭时必须隐藏最近处理层数等展开详情');
+assert.doesNotMatch(phase12BatchOffHtml, /name="mergeAssistantCount"/, '批处理关闭时必须隐藏合并层数等展开详情');
+assert.doesNotMatch(phase12BatchOffHtml, /data-action="today-trend-batch-generate"/, '批处理未启用时不得显示手动更新动作');
 const phase12BatchOnHtml = renderTodayTrendSettingsView({
     scope: phase10UiScope, presets: Object.values(valid.presets), assistantCount: 8,
     batchDraft: { enabled: true, recentAssistantCount: 4, mergeAssistantCount: 2 },
 });
 assert.match(phase12BatchOnHtml, /name="batchEnabled"[^>]*checked/, '批处理开启状态必须反映在开关上');
-assert.match(phase12BatchOnHtml, new RegExp(`generationSnapshots：固定保留最近 ${TODAY_TREND_LIMITS.generationSnapshots} 个记录`), '固定容量说明必须来自统一容量常量');
+assert.doesNotMatch(phase12BatchOnHtml, /generationSnapshots/, '批量设置不得再显示固定容量说明');
 assert.match(phase12BatchOnHtml, /name="recentAssistantCount"[^>]*max="8"/, '批处理窗口上限必须来自当前 assistantCount');
 assert.match(phase12BatchOnHtml, /data-action="today-trend-batch-generate"/, '开启批处理后必须显示手动更新动作');
+assert.match(phase12BatchOnHtml, /手动处理最近AI回复层数/, '批处理开启后必须显示易懂的最近处理层数标签');
+assert.match(phase12BatchOnHtml, /pm-today-trend-batch-stat/, '批处理开启后必须显示统计行');
 const phase12FailedBatchHtml = renderTodayTrendSettingsView({
     scope: { ...phase10UiScope, storageId: 'chat', operation: { ...phase10UiScope.operation, lastSuccessfulAssistantCount: 3 } },
     presets: Object.values(valid.presets), assistantCount: 8,
     generation: { phase: 'failed', task: { storageId: 'chat', batchIndex: 1, batchCount: 3 }, lastError: '事件生命周期无效' },
     batchDraft: { enabled: true, recentAssistantCount: 5, mergeAssistantCount: 2 },
 });
-assert.match(phase12FailedBatchHtml, /已成功更新：3；当前未更新的 AI 回复累计层数：5/, '第二批失败后必须按最新成功边界显示可续填累计层数');
+assert.match(phase12FailedBatchHtml, /已成功更新<\/span><b>3<\/b>/, '第二批失败后必须按最新成功边界显示已成功更新层数');
+assert.match(phase12FailedBatchHtml, /当前未更新的 AI 回复累计层数<\/span><b>5<\/b>/, '第二批失败后必须按最新成功边界显示可续填累计层数');
 assert.match(phase12FailedBatchHtml, /第 2\/3 批失败：事件生命周期无效。已成功批次已保留；可按未更新累计层数重填后继续。/,
     '第二批失败后必须显示精确批号、原始错误和续填提示');
 const phase12BatchListeners = [];

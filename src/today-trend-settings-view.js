@@ -1,4 +1,3 @@
-import { TODAY_TREND_LIMITS } from './today-trend-model.js';
 import { BACK_ICON_SVG, EDIT_ICON_SVG, REFRESH_ICON_SVG } from './icons.js';
 import { escapeAttr, escapeHtml } from './ui.js';
 import { trendActionMenu, trendModuleHead } from './today-trend-ui.js';
@@ -16,15 +15,20 @@ function batchSettingsGroup(scope, assistantCount, generationBusy, generation = 
     const failedBatch = generation.phase === 'failed' && generation.task?.storageId === scope?.storageId
         && Number.isSafeInteger(generation.task?.batchIndex) && Number.isSafeInteger(generation.task?.batchCount)
         ? `第 ${generation.task.batchIndex + 1}/${generation.task.batchCount} 批失败：${String(generation.lastError || '未知错误')}` : '';
-    const details = `
-        <p class="pm-today-trend-retention-help">当前聊天 AI 回复累计层数：${count}；已成功更新：${synced}；当前未更新的 AI 回复累计层数：${pending}。批量参数会保存到当前聊天设置；启用后才可手动批量更新。</p>
-        <label class="pm-today-trend-field"><span>手动处理最近 assistant 层数</span><input class="pm-today-trend-input" name="recentAssistantCount" type="number" inputmode="numeric" min="1" max="${Math.max(count, 1)}" step="1" required value="${recentAssistantCount}" ${disabled ? 'disabled' : ''}></label>
-        <label class="pm-today-trend-field"><span>每多少层合并为一次</span><input class="pm-today-trend-input" name="mergeAssistantCount" type="number" inputmode="numeric" min="1" max="${Math.max(count, 1)}" step="1" required value="${mergeAssistantCount}" ${disabled ? 'disabled' : ''}></label>
-        <p class="pm-today-trend-retention-help">generationSnapshots：固定保留最近 ${TODAY_TREND_LIMITS.generationSnapshots} 个记录。该容量不可配置，也不会因打开或保存设置触发生成或清理。</p>
+    const details = batchEnabled ? `
+        <div class="pm-today-trend-batch-stats">
+            <div class="pm-today-trend-batch-stat"><span>当前聊天 AI 回复累计层数</span><b>${count}</b></div>
+            <div class="pm-today-trend-batch-stat"><span>已成功更新</span><b>${synced}</b></div>
+            <div class="pm-today-trend-batch-stat"><span>当前未更新的 AI 回复累计层数</span><b>${pending}</b></div>
+        </div>
+        <div class="pm-today-trend-batch-fields">
+            <label class="pm-today-trend-field"><span>手动处理最近AI回复层数</span><input class="pm-today-trend-input" name="recentAssistantCount" type="number" inputmode="numeric" min="1" max="${Math.max(count, 1)}" step="1" required value="${recentAssistantCount}" ${disabled ? 'disabled' : ''}></label>
+            <label class="pm-today-trend-field"><span>每多少层合并为一次</span><input class="pm-today-trend-input" name="mergeAssistantCount" type="number" inputmode="numeric" min="1" max="${Math.max(count, 1)}" step="1" required value="${mergeAssistantCount}" ${disabled ? 'disabled' : ''}></label>
+        </div>
         ${failedBatch ? `<p class="pm-today-trend-error" role="alert">${escapeHtml(failedBatch)}。已成功批次已保留；可按未更新累计层数重填后继续。</p>` : ''}
-        <div class="pm-today-trend-form-actions"><button type="button" data-action="today-trend-batch-generate" ${disabled || !batchEnabled ? 'disabled' : ''}>${generationBusy ? '正在批量更新' : '手动批量更新'}</button></div>`;
+        <div class="pm-today-trend-form-actions"><button type="button" data-action="today-trend-batch-generate" ${disabled ? 'disabled' : ''}>${generationBusy ? '正在批量更新' : '手动批量更新'}</button></div>` : '';
     return `<fieldset class="pm-today-trend-batch-settings"><legend>溯及既往楼层更新</legend>
-        <label class="pm-today-trend-switch pm-today-trend-batch-switch"><span><b>启用溯及既往楼层更新</b><small>开启后允许按下方参数执行手动批量更新。</small></span><input name="batchEnabled" type="checkbox" role="switch" aria-checked="${batchEnabled === true}"${batchEnabled ? ' checked' : ''}${generationBusy ? ' disabled' : ''}><i aria-hidden="true"></i></label>${details}
+        <label class="pm-today-trend-switch pm-today-trend-batch-switch"><span><b>启用</b><small>开启后可按下方参数手动批量更新历史楼层。</small></span><input name="batchEnabled" type="checkbox" role="switch" aria-checked="${batchEnabled === true}"${batchEnabled ? ' checked' : ''}${generationBusy ? ' disabled' : ''}><i aria-hidden="true"></i></label>${details}
     </fieldset>`;
 }
 
