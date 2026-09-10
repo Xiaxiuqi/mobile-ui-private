@@ -1,9 +1,10 @@
 import { BIDIRECTIONAL_KEY, TODAY_TREND_INJECTION_KEY_PREFIX } from './constants.js';
 import { normalizeInjectionConfig } from './behavior-config.js';
-import { allocateCalendarFamilyBudget, allocateContextBudget, estimateContextTokens, normalizeBudgetConfig, trimToEstimatedTokens } from './budget.js';
+import { DEFAULT_SAFE_INPUT_TOKENS, allocateCalendarFamilyBudget, allocateContextBudget, estimateContextTokens, normalizeBudgetConfig, trimToEstimatedTokens } from './budget.js';
 import { formatQuoteContext } from './chat-message-model.js';
 import { renderCommunitySource } from './community-injection.js';
 import { renderTodayTrendInjection } from './today-trend-injection.js';
+import { buildStoryOraclePlanInjection } from './story-oracle-model.js';
 import { resolveEmojiText } from './messaging.js';
 import { getGroupMembers, resolveCommunitySources, resolvePhoneSources } from './permissions.js';
 import {
@@ -12,7 +13,7 @@ import {
 import { occasionScopeFor, expandOccasions } from './calendar-occasion-model.js';
 import { buildCulturalFestivals, HOLIDAY_YEAR_RANGE, holidayYearFromCache, mergeCalendarDateFacts, normalizeHolidayCache } from './calendar-holiday.js';
 import { CYCLE_SELF_SUBJECT, cycleScopeFor, cycleSubjectKeys, predictCycleRange } from './calendar-cycle-model.js';
-import { outfitScopeFor, renderOutfitInjection } from './calendar-outfit-model.js';
+import { OUTFIT_SELF_SUBJECT, outfitScopeFor, renderOutfitInjection } from './calendar-outfit-model.js';
 import { recipeScopeFor, renderRecipeInjection } from './calendar-recipe-model.js';
 import { weatherCodeLabel } from './calendar-weather.js';
 import { resolveWeatherForDate } from './calendar-weather-source.js';
@@ -36,6 +37,7 @@ const COMMUNITY_KEY_PREFIX = `${BIDIRECTIONAL_KEY}:community:`;
 const CALENDAR_KEY_PREFIX = `${BIDIRECTIONAL_KEY}:calendar:`;
 const OUTFIT_KEY_PREFIX = `${BIDIRECTIONAL_KEY}:outfit:`;
 const RECIPE_KEY_PREFIX = `${BIDIRECTIONAL_KEY}:recipe:`;
+const STORY_ORACLE_KEY_PREFIX = `${BIDIRECTIONAL_KEY}:story-oracle:`;
 
 function injectionKey(name) {
     return `${BIDIRECTIONAL_KEY}:${encodeURIComponent(name)}`;
@@ -80,7 +82,7 @@ export function replaceExtensionPrompts({ context, runtime, prompts }) {
             || typeof prompt.content !== 'string' || !prompt.content) continue;
         seen.add(prompt.key);
         try {
-            context.setExtensionPrompt(prompt.key, prompt.content, prompt.position, prompt.depth, false, 0);
+            context.setExtensionPrompt(prompt.key, prompt.content, prompt.position, prompt.depth, prompt.scan === true, 0);
             activeKeys.add(prompt.key);
             written += 1;
             const source = prompt.source || 'other';
@@ -212,6 +214,7 @@ export function renderCalendarContextInjection({
         }
         }
     }
+    let hasOccasionFacts = false;
     if (calendarScope.injectionScheduleEnabled) {
         const occasionScope = occasionScopeFor(occasionStore, currentStorageId);
         const extendedScope = { occasions: occasionScope.occasions.filter(usesExtendedOccasionWindow) };
@@ -225,12 +228,19 @@ export function renderCalendarContextInjection({
             const kind = calendarRepeatLabel(occasion.repeat) || (occasion.type === 'birthday' ? '生日' : '纪念日');
             addFact(occasion.date, `${kind}：${occasion.title}${occasion.note ? `（${occasion.note.replace(/\s+/g, ' ').slice(0, 180)}）` : ''}`);
         }
+        hasOccasionFacts = occasionScope.occasions.length > 0;
     }
     const holidays = normalizeHolidayCache(holidayStore);
     const holidayYears = [...new Set(scheduleDates.map(date => Number(date.slice(0, 4))))];
+    const hasEventFacts = Object.values(calendarScope.events || {}).some(events => Array.isArray(events) && events.length > 0);
+    const hasHolidayFacts = holidayYears.some(year => (holidayYearFromCache(holidays, holidays.selectedCountry, year)?.entries || []).length > 0);
+    const hasWeatherFacts = Boolean(weatherStore?.location);
+    const hasCycleFacts = cycleSubjectKeys(cycleStore, currentStorageId)
+        .some(subject => cycleScopeFor(cycleStore, currentStorageId, subject).enabled);
+    const hasRealCalendarFacts = hasEventFacts || hasHolidayFacts || hasWeatherFacts || hasCycleFacts || hasOccasionFacts;
     if (calendarScope.injectionScheduleEnabled) for (const year of holidayYears) {
         const legal = holidayYearFromCache(holidays, holidays.selectedCountry, year)?.entries || [];
-        const cultural = year >= HOLIDAY_YEAR_RANGE.min && year <= HOLIDAY_YEAR_RANGE.max
+        const cultural = hasRealCalendarFacts && year >= HOLIDAY_YEAR_RANGE.min && year <= HOLIDAY_YEAR_RANGE.max
             ? buildCulturalFestivals(year) : [];
         for (const item of mergeCalendarDateFacts(legal, cultural)) {
             if (!scheduleDates.includes(item.date)) continue;
@@ -264,7 +274,7 @@ export function renderCalendarContextInjection({
 export function buildContextInjectionPrompts({
     currentStorageId, currentActorName, currentConversationKey, selectedByStorage, historiesByStorage, groupsByStorage,
     injectionConfig, interactiveStore, budgetConfig, userName, emojis, safeMaxTokens, calendarStore,
-    calendarOccasions, calendarHolidays, calendarWeather, calendarCycles, calendarRecipes, calendarOutfits, todayTrendStore,
+    calendarOccasions, calendarHolidays, calendarWeather, calendarCycles, calendarRecipes, calendarOutfits, todayTrendStore, storyOraclePlans = [],
 } = {}) {
     const config = normalizeBudgetConfig(budgetConfig);
     const phonePermission = resolvePhoneSources({
@@ -286,6 +296,7 @@ export function buildContextInjectionPrompts({
         return [{
             key: injectionKey(source.sourceId),
             source: 'phone',
+            scan: true,
             content: body,
             contentPrefix: '[手机短信记忆 — 私密]\n',
             contentSuffix: '\n[结束]',
@@ -325,17 +336,23 @@ export function buildContextInjectionPrompts({
         const groupMembers = getGroupMembers({ currentStorageId, currentConversationKey, groupsByStorage });
         const names = [...new Set(groupMembers.map(name => name.trim()).filter(Boolean))];
         const isGroupConversation = typeof currentConversationKey === 'string' && currentConversationKey.startsWith('__group_');
-        const subjects = isGroupConversation ? names : [currentActorName || '当前角色'];
-        for (const name of subjects) {
-            const subject = `role:${name}`;
+        const subjects = [
+            { key: OUTFIT_SELF_SUBJECT, label: OUTFIT_SELF_SUBJECT },
+            ...(isGroupConversation ? names : [currentActorName || '当前角色']).map(name => ({ key: `role:${name}`, label: name })),
+        ];
+        for (const { key: subject, label } of subjects) {
             const body = renderOutfitInjection(outfitScopeFor(calendarOutfits, currentStorageId, subject), {
-                start: calendarReferenceDate(calendarScope), subject: name,
+                start: calendarReferenceDate(calendarScope), subject: label,
             });
             if (!body) continue;
+            const [subjectLine, ...days] = body.split('\n');
             outfitItems.push({
                 key: `${OUTFIT_KEY_PREFIX}${encodeURIComponent(`${currentStorageId}::${subject}`)}`,
                 source: 'outfit',
-                content: `[角色穿搭]\n${body}\n[结束]`,
+                contentPrefix: `[角色穿搭]\n${subjectLine}\n`,
+                content: days.join('\n'),
+                contentSuffix: '\n[结束]',
+                completeLines: true,
                 position: injection.calendar.position,
                 depth: injection.calendar.depth,
             });
@@ -373,6 +390,21 @@ ${body}
             depth: injection.todayTrend.depth,
         });
     }
+    const storyOracle = buildStoryOraclePlanInjection(storyOraclePlans);
+    const storyOracleItem = storyOracle.content && currentStorageId ? {
+        key: `${STORY_ORACLE_KEY_PREFIX}${encodeURIComponent(currentStorageId)}`,
+        source: 'storyOracle',
+        content: storyOracle.content,
+        position: injection.calendar.position,
+        depth: injection.calendar.depth,
+    } : null;
+    const storyOracleDemand = storyOracleItem ? renderedItemTokenDemand(storyOracleItem) : 0;
+    const baseSafeMaxTokens = Number.isInteger(safeMaxTokens) && safeMaxTokens > 0 ? safeMaxTokens : DEFAULT_SAFE_INPUT_TOKENS;
+    const baseBudgetTokens = Math.min(config.targetTokens, baseSafeMaxTokens);
+    const storyOracleBudgetRejected = Boolean(storyOracleItem && storyOracleDemand >= baseBudgetTokens);
+    const storyOraclePrompt = storyOracleItem && !storyOracleBudgetRejected
+        ? { prompts: [{ ...storyOracleItem }], usedTokens: storyOracleDemand, truncatedCount: 0 }
+        : { prompts: [], usedTokens: 0, truncatedCount: 0 };
     const calendarFamilyDemand = {
         calendar: calendarItems.reduce((sum, item) => sum + renderedItemTokenDemand(item), 0),
         recipe: recipeItems.reduce((sum, item) => sum + renderedItemTokenDemand(item), 0),
@@ -384,7 +416,11 @@ ${body}
         calendar: Object.values(calendarFamilyDemand).reduce((sum, value) => sum + value, 0),
         todayTrend: todayTrendItems.reduce((sum, item) => sum + renderedItemTokenDemand(item), 0),
     };
-    const budget = allocateContextBudget({ config, safeMaxTokens, demandBySource });
+    const budget = allocateContextBudget({
+        config,
+        safeMaxTokens: storyOracleBudgetRejected ? baseSafeMaxTokens : Math.max(1, baseBudgetTokens - storyOracleDemand),
+        demandBySource,
+    });
     const calendarFamilyBudget = allocateCalendarFamilyBudget({
         tokenLimit: budget.allocations.calendar,
         demandBySource: calendarFamilyDemand,
@@ -396,7 +432,7 @@ ${body}
     const outfit = allocateRenderedPrompts(outfitItems, calendarFamilyBudget.allocations.outfit);
     const todayTrend = allocateRenderedPrompts(todayTrendItems, budget.allocations.todayTrend);
     return {
-        prompts: [...phone.prompts, ...community.prompts, ...calendar.prompts, ...recipe.prompts, ...outfit.prompts, ...todayTrend.prompts],
+        prompts: [...phone.prompts, ...community.prompts, ...calendar.prompts, ...recipe.prompts, ...outfit.prompts, ...todayTrend.prompts, ...storyOraclePrompt.prompts],
         diagnostics: {
             estimated: true,
             budget,
@@ -420,7 +456,15 @@ ${body}
             outfit: { demandTokens: calendarFamilyDemand.outfit, allocatedTokens: calendarFamilyBudget.allocations.outfit, promptCount: outfit.prompts.length, usedTokens: outfit.usedTokens },
             calendarFamilyBudget,
             todayTrend: { enabled: todayTrendScope?.injection?.enabled === true, demandTokens: demandBySource.todayTrend, allocatedTokens: budget.allocations.todayTrend, promptCount: todayTrend.prompts.length, usedTokens: todayTrend.usedTokens },
-            usedTokens: phone.usedTokens + community.usedTokens + calendar.usedTokens + recipe.usedTokens + outfit.usedTokens + todayTrend.usedTokens,
+            storyOracle: {
+                enabledCount: Array.isArray(storyOraclePlans) ? storyOraclePlans.length : 0,
+                demandTokens: storyOracleDemand,
+                allocatedTokens: storyOraclePrompt.usedTokens,
+                promptCount: storyOraclePrompt.prompts.length,
+                usedTokens: storyOraclePrompt.usedTokens,
+                rejected: storyOracle.rejected || (storyOracleBudgetRejected ? `剧情线路超过本轮可用上下文预算（${storyOracleDemand}/${baseBudgetTokens} tokens），未注入主聊天。` : ''),
+            },
+            usedTokens: phone.usedTokens + community.usedTokens + calendar.usedTokens + recipe.usedTokens + outfit.usedTokens + todayTrend.usedTokens + storyOraclePrompt.usedTokens,
             truncatedCount: phone.truncatedCount + community.truncatedCount + calendar.truncatedCount + recipe.truncatedCount + outfit.truncatedCount + todayTrend.truncatedCount,
         },
     };

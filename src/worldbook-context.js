@@ -54,11 +54,15 @@ function throwIfAborted(signal) {
 }
 
 export async function buildWorldBookContext(context, {
-    module, config = globalThis.window?.__pmWorldBookConfig, signal, scope: requestedScope = null, memberIds = [], maxChars, worldBookOptions = {}, bookNames = null,
+    module, config = globalThis.window?.__pmWorldBookConfig, signal, scope: requestedScope = null, memberIds = [], maxChars, worldBookOptions = {}, bookNames = null, activationMode = 'chat',
 } = {}) {
     const current = normalizeWorldBookConfig(config);
     if (!WORLD_BOOK_MODULES.includes(module)) return '';
     if (typeof context?.loadWorldInfo !== 'function') return '';
+    if (!['chat', 'selected'].includes(activationMode)) throw new TypeError('世界书激活模式无效');
+    if (activationMode === 'selected' && (!Array.isArray(bookNames) || !bookNames.some(name => text(name).trim()))) {
+        throw new TypeError('独立世界书读取必须显式指定书籍');
+    }
     throwIfAborted(signal);
     const requestedNames = Array.isArray(bookNames)
         ? new Set(bookNames.map(name => text(name).trim()).filter(Boolean)) : null;
@@ -100,7 +104,7 @@ export async function buildWorldBookContext(context, {
         throwIfAborted(signal);
         for (const entry of normalizeBookEntries(bookName, book)) {
             throwIfAborted(signal);
-            if (!scanMatches(entry, messages)) continue;
+            if (activationMode === 'chat' && !scanMatches(entry, messages)) continue;
             const memberPrivate = scope?.kind === 'group'
                 && groupMemberIds.some(memberId => isMemberPrivateWorldBookEntryAllowed(current, entry, memberId));
             const groupExplicitlyAllowsColumn = scope?.kind === 'group'
@@ -118,4 +122,42 @@ export async function buildWorldBookContext(context, {
         }
     }
     return contents.join('\n\n');
+}
+
+
+export async function loadWorldBookPreview(context, {
+    config = globalThis.window?.__pmWorldBookConfig,
+    signal,
+    scope: requestedScope = null,
+    module = 'chat',
+    maxChars = 60000,
+} = {}) {
+    const current = normalizeWorldBookConfig(config);
+    if (!WORLD_BOOK_MODULES.includes(module) || typeof context?.loadWorldInfo !== 'function') return { entries: [], truncated: false };
+    throwIfAborted(signal);
+    const selectedNames = getReadableWorldBookNames(context, current).filter(Boolean);
+    const scope = requestedScope?.kind === 'group' || requestedScope?.kind === 'character' || requestedScope?.kind === 'public'
+        ? requestedScope : contextScope(context);
+    const limit = Number.isFinite(Number(maxChars)) && Number(maxChars) > 0 ? Math.min(current.maxChars, Math.trunc(maxChars)) : current.maxChars;
+    const entries = [];
+    let total = 0;
+    let truncated = false;
+    for (const bookName of selectedNames) {
+        throwIfAborted(signal);
+        let book;
+        try { book = await context.loadWorldInfo(bookName); } catch (error) {
+            if (isAbortError(error)) throw error;
+            continue;
+        }
+        for (const entry of normalizeBookEntries(bookName, book)) {
+            throwIfAborted(signal);
+            if (!isWorldBookEntryAllowed(current, entry, { module, scope })) continue;
+            const next = total + entry.content.length + (entries.length ? 2 : 0);
+            if (next > limit) { truncated = true; break; }
+            entries.push({ bookName: entry.bookName, uid: String(entry.uid), column: entry.column, content: entry.content });
+            total = next;
+        }
+        if (truncated) break;
+    }
+    return { entries, truncated };
 }

@@ -9,6 +9,7 @@ import {
     getGalBubbleAssistantText, getGalBubblePrompt, getGalBubbleScriptDefinition,
     installGalBubble, parseGalBubbleMessages, reconcileGalBubble, uninstallGalBubble,
 } from '../src/gal-bubble.js';
+import { createEmptyUserGenerationStore } from '../src/user-generation-model.js';
 import { createDefaultTodayTrendDynamicsSettings, createEmptyTodayTrendStore, normalizeTodayTrendStore } from '../src/today-trend-model.js';
 import { createTodayTrendStorage, todayTrendJournal, todayTrendV2Authority } from '../src/today-trend-storage.js';
 import { createTodayTrendCommitter } from '../src/today-trend-commit.js';
@@ -30,10 +31,10 @@ import {
     loadBgSettings, loadLocalBackground, materializeLocalBackgrounds, saveBgGlobal, saveBgLocal, saveDesktopBg,
 } from '../src/storage-background.js';
 import {
-    addOrUpdateProfile, clearPluginData, loadCharacterBehavior, loadGroupMeta, loadInjectionConfig, pmIDBDel, pmIDBGet, pmIDBSet,
+    addOrUpdateProfile, clearPluginData, HISTORY_RECOVERY_KEY, loadCharacterBehavior, loadGroupMeta, loadInjectionConfig, pmIDBDel, pmIDBGet, pmIDBSet,
     BRANCH_LINEAGE_STORE_KEY, PLUGIN_IDB_DYNAMIC_PREFIXES, PLUGIN_IDB_STATIC_KEYS, PLUGIN_LOCAL_STORAGE_KEYS,
     commitBranchLineage, completeBranchLineageBackup, loadBranchLineage, loadHistoriesFromIDB, saveCharacterBehavior, saveGroupMeta,
-    saveHistoriesStrict, saveInjectionConfig, rollbackBranchLineageBackup, saveBidirectional, saveBranchLineage, saveBranchLineageForBackup, saveBudgetConfig, savePokeConfig,
+    saveHistoriesBeforeUnload, saveHistoriesStrict, saveInjectionConfig, rollbackBranchLineageBackup, saveBidirectional, saveBranchLineage, saveBranchLineageForBackup, saveBudgetConfig, savePokeConfig,
     loadWorldBookConfig, saveWorldBookConfig,
 } from '../src/storage.js';
 import { installConversation } from '../src/conversation.js';
@@ -47,7 +48,7 @@ import { installDiagnosticApi } from '../src/diagnostic.js';
 import { gatherContext, getStorageIdFor, getUserPersona, resolveOutfitTarget } from '../src/host-context.js';
 import { awaitPendingBranchInheritance, beginBranchInheritance, inheritPhoneDataOnBranch, mergeBranchScope, mergePhoneUiBranchScope, resolveBranchInheritance } from '../src/branch-scope-inheritance.js';
 import {
-    completeDirectoryBranchScope, enqueueDirectoryOperation, getActiveDirectoryBranchScopes, markDirectoryBranchScope,
+    awaitDirectoryOperations, completeDirectoryBranchScope, enqueueDirectoryOperation, getActiveDirectoryBranchScopes, markDirectoryBranchScope,
 } from '../src/directory-save-coordinator.js';
 import {
     commitAutoPokeConfig, getAutoPokeConfig, normalizeAutoPoke, resetAutoPokeCounter,
@@ -504,6 +505,7 @@ assert.equal(ignoredSelectionKey.clickCalls, 0);
 
 const suspensionCalls = [];
 handlePhonePageSuspension({
+    persistCurrentHistory: () => suspensionCalls.push(['persist', 'beforeunload']),
     cancelCommunityGeneration: reason => suspensionCalls.push(['community', reason]),
     cancelCalendarTasks: reason => suspensionCalls.push(['calendar', reason]),
     cancelTodayTrendInitialization: reason => suspensionCalls.push(['today-trend-initialization', reason]),
@@ -514,6 +516,7 @@ handlePhonePageSuspension({
     disarm: reason => suspensionCalls.push(['disarm', reason]),
 });
 assert.deepEqual(suspensionCalls, [
+    ['persist', 'beforeunload'],
     ['save', 'beforeunload'],
     ['community', 'beforeunload'],
     ['calendar', 'beforeunload'],
@@ -1102,6 +1105,20 @@ assert.deepEqual(galParsedMessages, [
     { side: 'left', name: '林夏', text: '你好' },
     { side: 'right', name: 'YOYO', text: '我说&lt;晚点见&gt;｜别等我' },
 ], 'GAL 单聊解析必须去除标签、别名和结构竖线，并保留 right、转义尖括号与正文全角竖线');
+const galCompatibleMessage = '<msg side=“left”>林夏（夏夏）｜兼容台词</msg>';
+assert.deepEqual(parseGalBubbleMessages(galCompatibleMessage), [
+    { side: 'left', name: '林夏', text: '兼容台词' },
+], 'GAL 解析器必须兼容中文弯引号属性值和全角结构竖线');
+const galHostRegexDefinition = getGalBubbleScriptDefinition().findRegex;
+const [, galHostRegexSource, galHostRegexFlags] = galHostRegexDefinition.match(/^\/([\s\S]*)\/([a-z]*)$/) || [];
+assert.ok(galHostRegexSource && galHostRegexFlags, 'GAL 宿主正则定义必须保持 /pattern/flags 格式');
+const galHostMatches = [...galCompatibleMessage.matchAll(new RegExp(galHostRegexSource, galHostRegexFlags))];
+assert.deepEqual(galHostMatches.map(match => match.slice(1, 5)), [
+    ['left', '林夏', '夏夏', '兼容台词'],
+], 'GAL 宿主替换正则必须与运行时解析器兼容相同的弯引号和全角结构竖线');
+assert.deepEqual(parseGalBubbleMessages('<msg side="left">林夏|别名|你好</msg>'), [
+    { side: 'left', name: '林夏', text: '别名|你好' },
+], 'GAL 名字必须在首个半角结构竖线处结束，不能把分隔符吞入名字');
 assert.equal(parseGalBubbleMessages('<msg side="left">林夏|  </msg>'), null, 'GAL 空正文不得产出消息');
 assert.equal(parseGalBubbleMessages('林夏|没有标签'), null, '非 GAL 格式不得伪造消息');
 assert.equal(parseGalBubbleMessages('<msg side="left">林夏|你好</msg>\n裸叙述'), null,
@@ -1124,41 +1141,36 @@ assert.deepEqual(exportedGalScript, getGalBubbleScriptDefinition(),
 const galGroupResponse = parseGroupResponse([
     '<msg side="left">Alice（A）|你好</msg>',
     '<msg side="right">Bob|我也在</msg>',
-].join('\n'), ['Alice', 'Bob'], { galBubbleEnabled: true });
+].join('\n'), ['Alice', 'Bob']);
 assert.deepEqual(galGroupResponse, [{ name: 'Alice', sentences: ['你好'] }],
-    'GAL 群聊必须在通用清洗前解析，并且不得把 right 消息伪装成角色发言');
+    '手机群聊必须在通用清洗前适配完整 msg 文本，并且不得把 right 消息伪装成角色发言');
 assert.deepEqual(parseGroupResponse(
     '<msg side="left">Alice|第一句｜第二句</msg>',
-    ['Alice', 'Bob'], { galBubbleEnabled: true },
-), [{ name: 'Alice', sentences: ['第一句｜第二句'] }], 'GAL 正文全角竖线不得被误作格式分隔符');
+    ['Alice', 'Bob'],
+), [{ name: 'Alice', sentences: ['第一句｜第二句'] }], '手机群聊 msg 正文全角竖线不得被误作格式分隔符');
 assert.deepEqual(parseGroupResponse(
     '<msg side="right">YOYO|我说&lt;晚点见&gt;</msg>',
-    ['Alice', 'Bob'], { galBubbleEnabled: true },
-), [], 'GAL 群聊不得把用户的 right 消息错误归属给首个角色');
+    ['Alice', 'Bob'],
+), [], '手机群聊不得把用户的 right 消息错误归属给首个角色');
 assert.deepEqual(parseGroupResponse(
     '<msg side="left">未知角色|越权发言</msg>\n<msg side="left">Alice|合法发言</msg>',
-    ['Alice', 'Bob'], { galBubbleEnabled: true },
+    ['Alice', 'Bob'],
 ), [{ name: 'Alice', sentences: ['合法发言'] }],
-    '随机 NPC 关闭时未知 GAL 角色必须被丢弃，不能粘连到已有或首个成员');
+    '随机 NPC 关闭时未知 msg 角色必须被丢弃，不能粘连到已有或首个成员');
 assert.deepEqual(parseGroupResponse(
     '<msg side="left">路人群友·小周|临时发言</msg>',
-    ['Alice', 'Bob'], { galBubbleEnabled: true, allowUnknownSpeakers: true },
-), [{ name: '路人群友·小周', sentences: ['临时发言'] }], '随机 NPC 开启时 GAL 路径必须沿用既有身份白名单');
-const galDisabledRaw = '<msg side="left">Alice（A）|你好</msg>\nBob：原有发言';
-assert.deepEqual(
-    parseGroupResponse(galDisabledRaw, ['Alice', 'Bob'], { galBubbleEnabled: false }),
-    parseGroupResponse(galDisabledRaw, ['Alice', 'Bob']),
-    'GAL 关闭时必须保持既有群聊解析路径',
-);
+    ['Alice', 'Bob'], { allowUnknownSpeakers: true },
+), [{ name: '路人群友·小周', sentences: ['临时发言'] }], '随机 NPC 开启时 msg 适配必须沿用既有身份白名单');
+const mixedMsgRaw = '<msg side="left">Alice（A）|你好</msg>\nBob：原有发言';
 assert.deepEqual(parseGroupResponse(
-    galDisabledRaw, ['Alice', 'Bob'], { galBubbleEnabled: false },
+    mixedMsgRaw, ['Alice', 'Bob'],
 ), [{ name: 'Alice', sentences: ['Alice（A）|你好'] }, { name: 'Bob', sentences: ['原有发言'] }],
-    'GAL 关闭时通用清洗器仍应处理标签而不解析 GAL 结构');
+    '手机群聊遇到混合 msg 与普通文本时必须整体回退到既有群聊解析');
 assert.deepEqual(parseGroupResponse(
     '<msg side="left">Alice|GAL 发言</msg>\nBob：保留发言',
-    ['Alice', 'Bob'], { galBubbleEnabled: true },
+    ['Alice', 'Bob'],
 ), [{ name: 'Alice', sentences: ['Alice|GAL 发言'] }, { name: 'Bob', sentences: ['保留发言'] }],
-    'GAL 混合格式必须整体降级到既有群聊解析，不能吞掉裸文本');
+    '手机群聊混合 msg 与普通格式时必须整体降级到既有解析，不能吞掉裸文本');
 const independentSingleUserPrompt = buildIndependentSingleUserPrompt(promptFixture);
 const independentGroupUserPrompt = buildIndependentGroupUserPrompt(promptFixture);
 assert.doesNotMatch(independentSingleUserPrompt, /主线正文证据/);
@@ -1823,6 +1835,8 @@ assert.equal(JSON.parse(localValues.get('ST_SMS_API_PROFILES'))[0].apiUrl, 'http
 const makeClassList = initial => {
     const values = new Set(initial);
     return {
+        add: value => values.add(value),
+        remove: value => values.delete(value),
         contains: value => values.has(value),
         toggle: (value, force) => { if (force) values.add(value); else values.delete(value); return !!force; },
     };
@@ -2412,14 +2426,24 @@ window.__pmTheme = { preset: 'default', customRight: '', customLeft: '', borderC
 await window.__pmShowConfig('look');
 assert.deepEqual(Object.keys(THEME_PRESETS), ['default', 'dark', 'pink', 'mint', 'frost'],
     '颜色预设必须保留蓝、紫、粉、薄荷、磨砂');
-assert.equal(THEME_PRESETS.pink.right, '#E7A9B9', '粉色日间必须使用沉稳粉色右气泡');
-assert.equal(THEME_PRESETS.pink.rightDark, '#FFC4D4', '粉色夜间必须保留原柔粉右气泡');
-assert.equal(THEME_PRESETS.mint.right, '#9FBE8C', '薄荷日间必须使用暖鼠尾草绿色');
+assert.deepEqual(Object.fromEntries(Object.entries(THEME_PRESETS).map(([name, preset]) => [name, preset.rightText])),
+    { default: '#fff', dark: '#fff', pink: '#fff', mint: '#fff', frost: '#fff' }, '内置主题右气泡文字必须统一为白色');
+assert.deepEqual(Object.fromEntries(Object.entries(THEME_PRESETS).map(([name, preset]) => [name, {
+    right: preset.right,
+    rightDark: preset.rightDark,
+    accent: preset.accent,
+}])), {
+    default: { right: '#1677d2', rightDark: undefined, accent: '#1677d2' },
+    dark: { right: '#5856d6', rightDark: undefined, accent: '#5856d6' },
+    pink: { right: '#E7A9B9', rightDark: '#FFC4D4', accent: '#FFC4D4' },
+    mint: { right: '#9FBE8C', rightDark: '#B6D39D', accent: '#9FBE8C' },
+    frost: { right: 'rgba(111, 172, 218, 0.62)', rightDark: undefined, accent: '#6FAEDA' },
+}, '统一右气泡白字不得改动任何内置主题背景或强调色');
 assert.equal(THEME_PRESETS.mint.left, '#F3EBDD', '薄荷日间必须搭配米色左气泡');
 assert.equal(THEME_PRESETS.frost.frost, true, '磨砂预设必须启用玻璃效果标记');
 assert.deepEqual(Object.fromEntries(Object.entries(THEME_PRESETS).map(([name, preset]) => [name, preset.auxiliary])), {
-    default: '#B85C19', dark: '#A85A00', pink: '#287C78',
-    mint: '#7C476D', frost: '#A94F3D',
+    default: '#005CBF', dark: '#64D2FF', pink: '#E07A93',
+    mint: '#739E59', frost: '#4B8EC4',
 }, '每个主题必须提供与强调色角色不同的稳定辅助色');
 for (const preset of Object.values(THEME_PRESETS)) assert.notEqual(preset.auxiliary.toLowerCase(), preset.accent.toLowerCase(),
     '主题辅助色不得与强调色相同');
@@ -2590,6 +2614,99 @@ try {
         entries: { [createWorldBookEntryKey('测试书', 2)]: false },
         columns: { 纪要: { chat: false } }, mainChatMessages: 2,
     };
+    const independentWorldBookContext = {
+        ...worldBookContext,
+        chat: [{ is_user: false, name: '角色', mes: '完全不含世界书关键词的可见正文' }],
+    };
+    assert.equal(await buildWorldBookContext(independentWorldBookContext, {
+        module: 'chat', config: worldBookTestConfig,
+    }), '', '默认 chat 激活模式仍必须依赖可见聊天关键词');
+    assert.equal(await buildWorldBookContext(independentWorldBookContext, {
+        module: 'chat', config: worldBookTestConfig, bookNames: ['测试书'], activationMode: 'selected',
+    }), '允许的世界书内容', 'selected 模式必须在显式选择书籍后脱离聊天关键词激活允许条目');
+    assert.equal(await buildWorldBookContext(independentWorldBookContext, {
+        module: 'todayTrend', config: worldBookTestConfig, bookNames: ['测试书'], activationMode: 'selected',
+    }), '允许的世界书内容\n\n关闭栏目不得出现', 'todayTrend 读取必须使用自己的栏目权限，不误用 chat 栏目开关');
+    assert.equal(await buildWorldBookContext(independentWorldBookContext, {
+        module: 'todayTrend', config: { entries: { [createWorldBookEntryKey('测试书', 2)]: false }, columns: { 纪要: { todayTrend: false } } },
+        bookNames: ['测试书'], activationMode: 'selected',
+    }), '允许的世界书内容', 'todayTrend 栏目关闭后必须排除对应栏目条目');
+    assert.equal(await buildWorldBookContext({
+        ...independentWorldBookContext,
+        async loadWorldInfo(name) { return { entries: {
+            [name]: { uid: name, content: `${name}正文`, constant: true },
+        } }; },
+    }, {
+        module: 'todayTrend', config: { books: { 测试书: true, 其他启用书: true } },
+        bookNames: ['测试书'], activationMode: 'selected',
+    }), '测试书正文', 'selected 模式必须限制在调用方显式选择的书籍范围内');
+    let unselectedBookLoads = 0;
+    assert.equal(await buildWorldBookContext({
+        ...independentWorldBookContext,
+        async loadWorldInfo() { unselectedBookLoads += 1; throw new Error('未选书不得读取'); },
+    }, {
+        module: 'chat', config: worldBookTestConfig, bookNames: ['未选书'], activationMode: 'selected',
+    }), '', 'selected 模式不得读取未显式选择且不可读的世界书');
+    assert.equal(unselectedBookLoads, 0, '未选世界书必须在 loadWorldInfo 前被排除');
+    await assert.rejects(
+        () => buildWorldBookContext(independentWorldBookContext, {
+            module: 'chat', config: worldBookTestConfig, activationMode: 'selected',
+        }),
+        error => error instanceof TypeError && /必须显式指定书籍/.test(error.message),
+        'selected 模式缺少显式书籍名单时必须可诊断拒绝');
+    await assert.rejects(
+        () => buildWorldBookContext(independentWorldBookContext, {
+            module: 'chat', config: worldBookTestConfig, bookNames: ['测试书'], activationMode: 'unsupported',
+        }),
+        error => error instanceof TypeError && /激活模式无效/.test(error.message),
+        '非法世界书激活模式必须可诊断拒绝');
+    assert.equal(await buildWorldBookContext({
+        chatMetadata: { world_info: ['独立预算书'] },
+        async loadWorldInfo() { return { entries: {
+            first: { uid: 'first', content: '甲'.repeat(700), constant: true, insertion_order: 1 },
+            second: { uid: 'second', content: '乙'.repeat(400), constant: true, insertion_order: 2 },
+        } }; },
+    }, {
+        module: 'todayTrend', config: { maxChars: 24000 }, bookNames: ['独立预算书'], activationMode: 'selected', maxChars: 1000,
+    }), '甲'.repeat(700), 'selected 模式必须保持完整条目边界和 maxChars 字符预算');
+    assert.equal(await buildWorldBookContext({
+        chatMetadata: { world_info: ['独立接管书'] },
+        async loadWorldInfo() { return { entries: {
+            ordinary: { uid: 'ordinary', content: '宿主禁用普通条目不得出现', disable: true },
+            managed: { uid: 'managed', content: '插件接管栏目条目', disable: true, comment: 'TavernDB-ACU-CustomExport-纪要-1' },
+        } }; },
+    }, {
+        module: 'todayTrend', config: {}, bookNames: ['独立接管书'], activationMode: 'selected',
+    }), '插件接管栏目条目', 'selected 模式不得绕过宿主禁用条目与插件接管栏目规则');
+    const selectedAbort = new AbortController();
+    selectedAbort.abort('selected-cancelled');
+    await assert.rejects(
+        () => buildWorldBookContext(independentWorldBookContext, {
+            module: 'todayTrend', config: worldBookTestConfig, bookNames: ['测试书'], activationMode: 'selected', signal: selectedAbort.signal,
+        }),
+        error => error?.name === 'AbortError',
+        'selected 模式必须保留 AbortSignal 取消语义');
+    const privateMemberWorldBookConfig = {
+        columns: { 小明日记: { chat: false } },
+        characters: { '小明-avatar': { columns: { 小明日记: { chat: true } } } },
+        groups: { 'group-private': { allowMemberPrivateMemory: true } },
+    };
+    const selectedPrivateContext = {
+        chat: [{ mes: '完全不含私有触发词的正文' }], chatMetadata: { world_info: ['测试书'] },
+        getWorldInfoNames() { throw new Error('不得调用'); },
+        async loadWorldInfo() { return { entries: {
+            private: { uid: 'private-member', content: 'selected 私有正文', comment: 'TavernDB-ACU-CustomExport-小明日记-1' },
+        } }; },
+    };
+    assert.equal(await buildWorldBookContext(selectedPrivateContext, {
+        module: 'chat', scope: { kind: 'group', id: 'group-without-private' }, memberIds: ['小明-avatar'],
+        config: privateMemberWorldBookConfig, bookNames: ['测试书'], activationMode: 'selected',
+    }), '', 'selected 模式不得绕过成员私有记忆授权边界');
+    assert.equal(await buildWorldBookContext(selectedPrivateContext, {
+        module: 'chat', scope: { kind: 'group', id: 'group-private' }, memberIds: ['小明-avatar'],
+        config: privateMemberWorldBookConfig, bookNames: ['测试书'], activationMode: 'selected',
+    }), '【成员私有记忆：仅小明-avatar知晓，不得让其他成员知晓、转述或据此发言】\nselected 私有正文',
+    'selected 模式必须保留已显式授权的成员私有记忆边界提示');
     const selectedWorldBookText = await buildWorldBookContext(worldBookContext, {
         module: 'chat', config: worldBookTestConfig,
     });
@@ -2600,11 +2717,6 @@ try {
         }, characters: { 'alice.png': { entries: { [createWorldBookEntryKey('测试书', 1)]: false } } } },
     }), '允许的世界书内容', '群聊不得继承角色私人条目关闭配置');
     const privateMemberWorldBookEntry = { bookName: '测试书', uid: 'private-member', column: '小明日记' };
-    const privateMemberWorldBookConfig = {
-        columns: { 小明日记: { chat: false } },
-        characters: { '小明-avatar': { columns: { 小明日记: { chat: true } } } },
-        groups: { 'group-private': { allowMemberPrivateMemory: true } },
-    };
     assert.equal(isMemberPrivateWorldBookEntryAllowed(privateMemberWorldBookConfig, privateMemberWorldBookEntry, '小明-avatar'), true,
         '成员私有栏目必须只在成员显式启用聊天读取时可被群聊授权');
     assert.equal(isMemberPrivateWorldBookEntryAllowed(privateMemberWorldBookConfig, privateMemberWorldBookEntry, '小红-avatar'), false,
@@ -3323,20 +3435,45 @@ window.visualViewport = {
     },
 };
 window.__pmTheme.phoneScale = 1;
-const resizeHandleListeners = new Map();
-const resizeHandle = {
-    addEventListener(type, listener) { resizeHandleListeners.set(type, listener); },
-    removeEventListener(type, listener) {
-        if (resizeHandleListeners.get(type) === listener) resizeHandleListeners.delete(type);
-    },
-};
-const unbindPhoneResizeFixture = foundationDeps.bindPhoneResize(foundationPhone, resizeHandle);
+function createResizeHandle(corner) {
+    const listeners = new Map();
+    return {
+        dataset: { resizeCorner: corner },
+        listeners,
+        addEventListener(type, listener) { listeners.set(type, listener); },
+        removeEventListener(type, listener) {
+            if (listeners.get(type) === listener) listeners.delete(type);
+        },
+        setPointerCapture(pointerId) { this.capturedPointerId = pointerId; },
+        releasePointerCapture(pointerId) { this.releasedPointerId = pointerId; },
+    };
+}
+const resizeHandles = ['nw', 'ne', 'sw', 'se'].map(createResizeHandle);
+const unbindPhoneResizeFixture = foundationDeps.bindPhoneResize(foundationPhone, resizeHandles);
+const seResizeHandle = resizeHandles.find(handle => handle.dataset.resizeCorner === 'se');
+seResizeHandle.listeners.get('pointerdown')({ button: 0, pointerId: 7, clientX: 100, clientY: 100, currentTarget: seResizeHandle, cancelable: true, preventDefault() {} });
+resizeWindowListeners.get('pointermove')({ pointerId: 7, clientX: 130, clientY: 130, cancelable: true, preventDefault() {} });
+assert.ok(window.__pmTheme.phoneScale > 1, '右下角向外拖动必须放大手机比例');
+resizeWindowListeners.get('pointerup')({ pointerId: 7 });
+assert.equal(seResizeHandle.releasedPointerId, 7, '结束缩放必须释放活动角的指针捕获');
+window.__pmTheme.phoneScale = 1;
+const nwResizeHandle = resizeHandles.find(handle => handle.dataset.resizeCorner === 'nw');
+nwResizeHandle.listeners.get('pointerdown')({ button: 0, pointerId: 8, clientX: 100, clientY: 100, currentTarget: nwResizeHandle, cancelable: true, preventDefault() {} });
+resizeWindowListeners.get('pointermove')({ pointerId: 8, clientX: 70, clientY: 70, cancelable: true, preventDefault() {} });
+assert.ok(window.__pmTheme.phoneScale > 1, '左上角向外拖动必须与右下角保持同向放大');
+resizeWindowListeners.get('pointerup')({ pointerId: 8 });
+for (const handle of resizeHandles) {
+    assert.equal(handle.listeners.has('pointerdown'), true, `${handle.dataset.resizeCorner} 角必须注册缩放事件`);
+}
 const widthBeforeKeyboard = foundationPhoneStyleValues.get('--pm-phone-width');
 window.visualViewport.height = 400;
 visualViewportListeners.get('resize')();
 assert.equal(foundationPhoneStyleValues.get('--pm-phone-width'), widthBeforeKeyboard, 'VisualViewport 键盘 resize 不得改变手机宽度');
 assert.equal(foundationPhoneStyleValues.get('--pm-phone-height'), '328px', 'VisualViewport 键盘 resize 必须只压缩手机高度');
 unbindPhoneResizeFixture();
+for (const handle of resizeHandles) {
+    assert.equal(handle.listeners.has('pointerdown'), false, `${handle.dataset.resizeCorner} 角解绑必须移除缩放事件`);
+}
 assert.equal(resizeWindowListeners.has('resize'), false, '解绑必须移除 window resize 监听器');
 assert.equal(visualViewportListeners.has('resize'), false, '解绑必须移除 VisualViewport resize 监听器');
 delete window.visualViewport;
@@ -3577,6 +3714,10 @@ const lifecyclePhone = {
         if (selector === '.pm-status-bar') return lifecycleStatusBar;
         const control = { disabled: false, addEventListener(type, listener) { lifecyclePhoneListeners.set(`${selector}:${type}`, listener); }, removeEventListener() {}, setPointerCapture() {} };
         return control;
+    },
+    querySelectorAll(selector) {
+        assert.equal(selector, '.pm-phone-resize-handle', '生命周期必须查询四角缩放 handle');
+        return [];
     },
 };
 const lifecycleFixtureState = {
@@ -5098,6 +5239,130 @@ await assert.rejects(
 assert.deepEqual(idbValues.get('ST_SMS_DATA_V2'), window.__pmHistories,
     '严格镜像模式在 IndexedDB 已写入而 localStorage 失败时必须向调用方报告失败，以便事务补偿');
 
+const fingerprintHistorySnapshot = value => {
+    let hash = 2166136261;
+    for (let index = 0; index < value.length; index += 1) {
+        hash ^= value.charCodeAt(index);
+        hash = Math.imul(hash, 16777619);
+    }
+    return `${value.length}:${(hash >>> 0).toString(16).padStart(8, '0')}`;
+};
+localValues.delete(HISTORY_RECOVERY_KEY);
+const idbPrimaryHistory = { idb: { Alice: [{ content: 'idb-primary' }] } };
+const staleLocalHistory = { local: { Alice: [{ content: 'stale-local' }] } };
+idbValues.set('ST_SMS_DATA_V2', structuredClone(idbPrimaryHistory));
+localValues.set('ST_SMS_DATA_V2', JSON.stringify(staleLocalHistory));
+assert.equal(await loadHistoriesFromIDB({ requireConfirmedPrimary: true }), true);
+assert.deepEqual(window.__pmHistories, idbPrimaryHistory, '无恢复标记时必须继续以 IndexedDB 主记录为准');
+assert.deepEqual(JSON.parse(localValues.get('ST_SMS_DATA_V2')), idbPrimaryHistory,
+    '无恢复标记时必须继续镜像已确认的 IndexedDB 主记录');
+
+const recoveryHistory = { recovered: { Alice: [{ content: 'newer-local-snapshot' }] } };
+const recoveryRaw = JSON.stringify(recoveryHistory);
+localValues.set('ST_SMS_DATA_V2', recoveryRaw);
+localValues.set(HISTORY_RECOVERY_KEY, JSON.stringify({
+    version: 1, token: 'valid-recovery-token', fingerprint: fingerprintHistorySnapshot(recoveryRaw),
+}));
+idbValues.set('ST_SMS_DATA_V2', structuredClone(idbPrimaryHistory));
+assert.equal(await loadHistoriesFromIDB({ requireConfirmedPrimary: true }), true);
+assert.deepEqual(window.__pmHistories, recoveryHistory, '有效恢复标记必须优先采用更新的本地快照');
+assert.deepEqual(idbValues.get('ST_SMS_DATA_V2'), recoveryHistory, '有效恢复快照必须回写修复 IndexedDB 主记录');
+assert.equal(localValues.has(HISTORY_RECOVERY_KEY), false, 'IndexedDB 修复成功后必须清除对应恢复标记');
+
+const previousRecoveryWarn = console.warn;
+const recoveryWarnings = [];
+console.warn = (...args) => recoveryWarnings.push(args);
+try {
+    localValues.set(HISTORY_RECOVERY_KEY, '{broken');
+    localValues.set('ST_SMS_DATA_V2', JSON.stringify(recoveryHistory));
+    idbValues.set('ST_SMS_DATA_V2', structuredClone(idbPrimaryHistory));
+    assert.equal(await loadHistoriesFromIDB({ requireConfirmedPrimary: true }), true);
+    assert.deepEqual(window.__pmHistories, idbPrimaryHistory, '损坏恢复标记必须回退已确认的 IndexedDB 主记录');
+    assert.deepEqual(idbValues.get('ST_SMS_DATA_V2'), idbPrimaryHistory, '损坏恢复标记不得删除或覆盖 IndexedDB 主记录');
+    assert.ok(recoveryWarnings.some(args => String(args[0]).includes('恢复标记无效')),
+        '损坏恢复标记必须留下可诊断警告');
+} finally {
+    console.warn = previousRecoveryWarn;
+}
+
+localValues.delete(HISTORY_RECOVERY_KEY);
+const staleHistorySaveBlocker = blockIDBOperation('put', 'ST_SMS_DATA_V2');
+const staleHistory = { stale: { Alice: [{ content: 'stale-async-save' }] } };
+const staleHistorySave = saveHistoriesStrict(staleHistory);
+await staleHistorySaveBlocker.entered;
+const unloadHistorySaveBlocker = blockIDBOperation('put', 'ST_SMS_DATA_V2');
+window.__pmHistories = {
+    current: { Alice: Array.from({ length: 12 }, (_, index) => ({ content: `current-${index}` })) },
+};
+localStorageControl.failSetCounts.set('ST_SMS_DATA_V2', 1);
+saveHistoriesBeforeUnload();
+const unloadLocalRaw = localValues.get('ST_SMS_DATA_V2');
+const unloadMarker = JSON.parse(localValues.get(HISTORY_RECOVERY_KEY));
+assert.equal(JSON.parse(unloadLocalRaw).current.Alice.length, 10, '卸载完整快照写满时必须回退最近十条记录');
+assert.equal(unloadMarker.fingerprint, fingerprintHistorySnapshot(unloadLocalRaw),
+    '恢复标记指纹必须对应实际成功写入的 slim 快照');
+staleHistorySaveBlocker.release();
+await staleHistorySave;
+await unloadHistorySaveBlocker.entered;
+assert.equal(localValues.get('ST_SMS_DATA_V2'), unloadLocalRaw, '较旧异步保存完成后不得覆盖更新的卸载快照');
+assert.deepEqual(JSON.parse(localValues.get(HISTORY_RECOVERY_KEY)), unloadMarker,
+    '较旧异步保存完成后不得清除更新的恢复标记');
+unloadHistorySaveBlocker.release();
+await awaitDirectoryOperations(['histories']);
+assert.equal(localValues.has(HISTORY_RECOVERY_KEY), false, '卸载快照同步到 IndexedDB 后必须清除对应恢复标记');
+
+localValues.delete(HISTORY_RECOVERY_KEY);
+window.__pmHistories = {
+    markerRetry: { Alice: Array.from({ length: 12 }, (_, index) => ({ content: `marker-retry-${index}` })) },
+};
+const markerRetryUnloadBlocker = blockIDBOperation('put', 'ST_SMS_DATA_V2');
+localStorageControl.failSetCounts.set(HISTORY_RECOVERY_KEY, 1);
+saveHistoriesBeforeUnload();
+const markerRetryLocalRaw = localValues.get('ST_SMS_DATA_V2');
+const markerRetryMarker = JSON.parse(localValues.get(HISTORY_RECOVERY_KEY));
+assert.equal(JSON.parse(markerRetryLocalRaw).markerRetry.Alice.length, 10,
+    '恢复标记首次写失败时必须缩减本地快照，为标记重试腾出空间');
+assert.equal(markerRetryMarker.fingerprint, fingerprintHistorySnapshot(markerRetryLocalRaw),
+    '恢复标记重试成功后，指纹必须绑定实际写入的 slim 快照');
+await markerRetryUnloadBlocker.entered;
+markerRetryUnloadBlocker.release();
+await awaitDirectoryOperations(['histories']);
+assert.equal(localValues.has(HISTORY_RECOVERY_KEY), false, '标记重试成功的卸载快照写入 IDB 后必须清除标记');
+
+localValues.delete(HISTORY_RECOVERY_KEY);
+window.__pmHistories = { staleMarkerless: { Alice: [{ content: 'stale-before-marker-failure' }] } };
+const markerlessStaleSaveBlocker = blockIDBOperation('put', 'ST_SMS_DATA_V2');
+const markerlessStaleSave = saveHistoriesStrict();
+await markerlessStaleSaveBlocker.entered;
+const markerlessUnloadBlocker = blockIDBOperation('put', 'ST_SMS_DATA_V2');
+window.__pmHistories = {
+    markerlessCurrent: { Alice: Array.from({ length: 12 }, (_, index) => ({ content: `markerless-current-${index}` })) },
+};
+localStorageControl.failSetCounts.set(HISTORY_RECOVERY_KEY, 2);
+const markerWriteWarnings = [];
+console.warn = (...args) => markerWriteWarnings.push(args);
+try {
+    saveHistoriesBeforeUnload();
+} finally {
+    console.warn = previousRecoveryWarn;
+}
+const markerlessUnloadRaw = localValues.get('ST_SMS_DATA_V2');
+assert.equal(JSON.parse(markerlessUnloadRaw).markerlessCurrent.Alice.length, 10,
+    '恢复标记持续写失败时仍必须保留最新可写入的 slim 快照');
+assert.equal(localValues.has(HISTORY_RECOVERY_KEY), false, '恢复标记两次写入失败时不得留下伪成功标记');
+assert.equal(markerWriteWarnings.some(args => args[0] === '[phone-mode] beforeunload: 短信历史恢复标记无法写入'), true,
+    '恢复标记持续写失败必须留下可诊断警告');
+markerlessStaleSaveBlocker.release();
+await markerlessStaleSave;
+await markerlessUnloadBlocker.entered;
+assert.equal(localValues.get('ST_SMS_DATA_V2'), markerlessUnloadRaw,
+    '无恢复标记时，较旧异步保存完成后也不得覆盖更新的卸载快照');
+assert.equal(localValues.has(HISTORY_RECOVERY_KEY), false, '较旧异步保存不得制造或清理不存在的恢复标记');
+markerlessUnloadBlocker.release();
+await awaitDirectoryOperations(['histories']);
+assert.equal(localValues.get('ST_SMS_DATA_V2'), markerlessUnloadRaw,
+    '无恢复标记的卸载保存完成后必须保留最新本地快照');
+
 const oldStorageId = 'sms_alice.png__chat-old';
 const newStorageId = 'sms_alice.png__chat-copy';
 const oldHistory = [{ role: 'user', content: '旧会话私有内容' }];
@@ -5275,9 +5540,37 @@ const currentBackup = {
     },
     ambientStatus: { enabled: true },
     branchLineage: validBranchLineage,
+    userGeneration: createEmptyUserGenerationStore(),
+    desktopIcons: { chat: 'data:image/png;base64,AAAA' },
 };
 const parsedLegacyBackup = parseBackupData({ histories: { story: {} } }, currentBackup);
 assert.deepEqual(parsedLegacyBackup.histories, { story: {} });
+assert.deepEqual(parsedLegacyBackup.userGeneration, createEmptyUserGenerationStore(),
+    'v1-v15 备份缺少 User 库时必须兼容为空库');
+const validV15Backup = {
+    schemaVersion: 15,
+    budgetConfig: structuredClone(currentBackup.budgetConfig),
+    galBubbleEnabled: false, todayTrend: createEmptyTodayTrendStore(),
+    worldBookConfig: normalizeWorldBookConfig(null), branchLineage: structuredClone(validBranchLineage),
+};
+assert.deepEqual(parseBackupData(validV15Backup, currentBackup).userGeneration, createEmptyUserGenerationStore(),
+    'v15 备份不得因缺少后加入的 User 库字段而拒绝导入');
+assert.deepEqual(parseBackupData({ ...validV15Backup, schemaVersion: 16 }, currentBackup).userGeneration,
+    createEmptyUserGenerationStore(), 'v16 备份缺少 User 库时必须兼容为空库');
+const importedUserGeneration = { version: 1, items: [{ id: 'user-1', title: '魅魔旅者', summary: '', content: '成年魅魔旅者。', sourceMessageId: 'message-1', createdAt: 1, updatedAt: 1, order: 0 }] };
+const validV16Backup = { ...validV15Backup, schemaVersion: 16, userGeneration: importedUserGeneration };
+const parsedV16Backup = parseBackupData(validV16Backup, currentBackup);
+assert.deepEqual(parsedV16Backup.userGeneration, importedUserGeneration, 'v16 User 库必须规范化后完整往返');
+assert.deepEqual(parsedV16Backup.desktopIcons, {}, 'v1-v16 备份缺少桌面图标时必须兼容为空映射');
+assert.throws(() => parseBackupData({ ...validV16Backup, schemaVersion: 17 }, currentBackup),
+    /备份版本 17 缺少 desktopIcons/);
+const importedDesktopIcons = { chat: 'data:image/png;base64,AAAA', community: 'data:image/png;base64,AAAA' };
+assert.deepEqual(parseBackupData({ ...validV16Backup, schemaVersion: 17, desktopIcons: importedDesktopIcons }, currentBackup).desktopIcons,
+    importedDesktopIcons, 'v17 桌面图标必须规范化后完整往返');
+assert.throws(() => parseBackupData({ ...validV16Backup, schemaVersion: 17, desktopIcons: { unknown: 'data:image/png;base64,AAAA' } }, currentBackup),
+    /desktopIcons 包含未知图标/);
+assert.throws(() => parseBackupData({ ...validV16Backup, schemaVersion: 17, desktopIcons: { chat: 'data:image/jpeg;base64,AAAA' } }, currentBackup),
+    /Base64 PNG/);
 assert.equal(parsedLegacyBackup.desktopBg, currentBackup.desktopBg, 'v1-v5 备份不得覆盖后加入的桌面背景');
 assert.deepEqual(parsedLegacyBackup.interactiveScenes, currentBackup.interactiveScenes);
 assert.deepEqual(parsedLegacyBackup.phoneUiState, currentBackup.phoneUiState);
@@ -5410,8 +5703,8 @@ assert.throws(() => parseBackupData({
 assert.equal(parseBackupData({
     ...schema16BackupBase, schemaVersion: 15,
 }, currentBackup).todayTrendV2, null, 'schema 15 及更早备份不得伪造 todayTrendV2');
-assert.throws(() => parseBackupData(schema16BackupBase, currentBackup), /缺少 todayTrendV2/,
-    'schema 16 缺少 todayTrendV2 必须拒绝导入');
+assert.equal(parseBackupData(schema16BackupBase, currentBackup).todayTrendV2, null,
+    'schema 16 缺少 todayTrendV2 时必须兼容为 null');
 assert.throws(() => parseBackupData({
     ...schema16BackupBase,
     todayTrendV2: { v2Store: schema16V2Store, migrationBackup: null, storeRevision: 2 },
@@ -6245,6 +6538,8 @@ const createBackupTransactionFixture = (sceneId, ambientStatusEnabled) => ({
     calendarWeather: { version: 1, location: { name: sceneId, latitude: 35, longitude: 139, country: 'JP', timezone: 'Asia/Tokyo' }, lastSuccess: null },
     calendarCycles: { version: 1, scopes: { story: { enabled: true, lastPeriodStart: '2026-07-01', cycleLength: sceneId === 'scene-old' ? 28 : 30, periodLength: 5, overrides: {} } } },
     branchLineage: structuredClone(validBranchLineage),
+    userGeneration: createEmptyUserGenerationStore(),
+    desktopIcons: {},
 });
 const originalBackupFixture = createBackupTransactionFixture('scene-old', true);
 const importedBackupFixture = createBackupTransactionFixture('scene-new', false);
@@ -6636,7 +6931,7 @@ const cleanupStorage = {
 };
 const cleanupIdb = new Map([
     ...PLUGIN_IDB_STATIC_KEYS.map(key => [key, { key }]),
-    [`${PLUGIN_IDB_DYNAMIC_PREFIXES[0]}orphan`, { key: 'dynamic' }],
+    ...PLUGIN_IDB_DYNAMIC_PREFIXES.map(prefix => [`${prefix}orphan`, { key: `dynamic:${prefix}` }]),
     ['HOST_EXTENSION_IDB', { key: 'keep-idb' }],
 ]);
 const cleanupResult = await clearPluginData({
@@ -6647,14 +6942,15 @@ const cleanupResult = await clearPluginData({
     deleteIdb: async key => cleanupIdb.delete(key),
 });
 assert.equal(cleanupResult.localKeys, PLUGIN_LOCAL_STORAGE_KEYS.length);
-assert.equal(cleanupResult.idbKeys, PLUGIN_IDB_STATIC_KEYS.length + 1);
+assert.equal(cleanupResult.idbKeys, PLUGIN_IDB_STATIC_KEYS.length + PLUGIN_IDB_DYNAMIC_PREFIXES.length);
 assert.equal(cleanupLocal.get('HOST_EXTENSION_DATA'), 'keep-local');
 assert.equal(cleanupIdb.get('HOST_EXTENSION_IDB').key, 'keep-idb');
 for (const key of PLUGIN_LOCAL_STORAGE_KEYS) assert.equal(cleanupLocal.has(key), false);
+assert.equal(cleanupLocal.has(HISTORY_RECOVERY_KEY), false, '插件全量清理必须删除短信历史恢复标记');
 assert.equal(cleanupLocal.has(CALENDAR_OUTFIT_STORAGE_KEY), false, '清理成功必须删除穿搭数据');
 assert.equal(cleanupLocal.get('ST_SMS_MIGRATED_V3'), '1', '历史迁移哨兵不得被插件全量清理删除');
 for (const key of PLUGIN_IDB_STATIC_KEYS) assert.equal(cleanupIdb.has(key), false);
-assert.equal(cleanupIdb.has(`${PLUGIN_IDB_DYNAMIC_PREFIXES[0]}orphan`), false);
+for (const prefix of PLUGIN_IDB_DYNAMIC_PREFIXES) assert.equal(cleanupIdb.has(`${prefix}orphan`), false);
 
 const rollbackLocal = new Map([
     [PLUGIN_LOCAL_STORAGE_KEYS[0], 'old-local'],
@@ -8348,6 +8644,8 @@ try {
     globalThis.document = { getElementById: () => null };
     const autoPokeStorageValues = new Map();
     let failAutoPokeCounterPersist = false;
+    let historyPersistedHook = null;
+    let historyPersistedContext = null;
     globalThis.localStorage = {
         getItem: key => autoPokeStorageValues.get(key) ?? null,
         setItem(key, value) {
@@ -8355,6 +8653,11 @@ try {
                 throw new Error('auto-poke-counter-persist-failed');
             }
             autoPokeStorageValues.set(key, String(value));
+            if (key === 'ST_SMS_DATA_V2') {
+                historyPersistedHook?.({
+                    histories: JSON.parse(value), ...historyPersistedContext,
+                });
+            }
         },
         removeItem: key => autoPokeStorageValues.delete(key),
     };
@@ -8363,9 +8666,10 @@ try {
         return {
             begin() { const task = { signal: { aborted: false } }; tasks.add(task); return task; },
             isActive: task => tasks.has(task), finish: task => tasks.delete(task),
+            cancelAll() { tasks.clear(); },
         };
     };
-    const createAutoPokeFixture = ({ callAI, stateOverrides = {}, switchContact } = {}) => {
+    const createAutoPokeFixture = ({ callAI, stateOverrides = {}, switchContact, bubbleCalls, onBubble, onTaskBegin, onHistoryPersisted, typingCalls, noteCalls } = {}) => {
         const generation = createTaskController();
         const automatic = createTaskController();
         const state = {
@@ -8374,6 +8678,8 @@ try {
             groupRandomNpcEnabled: false, groupNature: '', phoneActive: false,
             ...stateOverrides,
         };
+        historyPersistedHook = onHistoryPersisted;
+        historyPersistedContext = { generation, automatic, state };
         globalThis.window = {
             __pmPokeConfig: { story: {
                 Alice: { autoPoke: { enabled: true, probability: 100, counter: 1 } },
@@ -8396,9 +8702,19 @@ try {
                 mainChatText: '', worldBookText: '', userName: '用户', userDesc: '',
             }),
             callAI: callAI || (async () => '自动回复'),
-            applyBidirectionalInjection() {}, addBubble() {}, addNote() {}, rebaseRenderedHistory() {},
-            showTyping() {}, hideTyping() {}, makeOverlay() {}, showGroupForm() {},
-            beginGeneration: () => generation.begin(), isGenerationTaskActive: task => generation.isActive(task),
+            applyBidirectionalInjection() {},
+            addBubble: (...args) => {
+                bubbleCalls?.push(args);
+                onBubble?.({ args, generation, automatic, state });
+            },
+            addNote: note => noteCalls?.push(note), rebaseRenderedHistory() {},
+            showTyping() {}, hideTyping: () => typingCalls?.push(true), makeOverlay() {}, showGroupForm() {},
+            beginGeneration: () => {
+                const task = generation.begin();
+                onTaskBegin?.({ task, generation, automatic, state });
+                return task;
+            },
+            isGenerationTaskActive: task => generation.isActive(task),
             finishGeneration: task => generation.finish(task), isAutoPokeAllowed: () => true, armAutoPoke() {},
             beginAutomaticTask: () => automatic.begin(), isAutomaticTaskActive: task => automatic.isActive(task),
             finishAutomaticTask: task => automatic.finish(task),
@@ -8407,7 +8723,304 @@ try {
     };
 
     idbControl.abortAll = false;
-    createAutoPokeFixture();
+    const manualGalBubbleCalls = [];
+    const manualGalState = createAutoPokeFixture({
+        callAI: async () => '<msg side="left">Alice|GAL 手动拍一拍回复</msg>',
+        stateOverrides: { phoneActive: true },
+        bubbleCalls: manualGalBubbleCalls,
+    });
+    window.__pmGalBubbleOperational = false;
+    await window.__pmPoke('Alice');
+    assert.equal(window.__pmHistories.story.Alice.at(-1).content, 'GAL 手动拍一拍回复',
+        '酒馆 GAL 开关关闭时，手机私聊拍一拍仍必须适配 msg 文本并提交台词正文');
+    assert.equal(manualGalState.conversationHistory, window.__pmHistories.story.Alice,
+        '手动私聊拍一拍提交后必须只更新当前会话的运行态历史');
+    assert.deepEqual(window.__pmHistories.story.Legacy, [{ role: 'user', content: 'Legacy 的旧消息' }],
+        '手动私聊拍一拍不得写入其他联系人的独立会话历史');
+    assert.equal(manualGalBubbleCalls.length, 1,
+        '手机私聊拍一拍无论酒馆 GAL 开关状态都必须交给原生消息渲染器生成气泡');
+    assert.equal(manualGalBubbleCalls[0][0], 'GAL 手动拍一拍回复');
+    assert.equal(manualGalBubbleCalls[0][1], 'left');
+    assert.equal(manualGalBubbleCalls[0][4].sender, 'Alice');
+    assert.ok(manualGalBubbleCalls[0][4].messageId && manualGalBubbleCalls[0][4].bubbleId,
+        '手动私聊拍一拍气泡必须带可定位的消息与气泡标识');
+
+    const manualPlainBubbleCalls = [];
+    createAutoPokeFixture({
+        callAI: async () => '普通拍一拍回复',
+        stateOverrides: { phoneActive: true },
+        bubbleCalls: manualPlainBubbleCalls,
+    });
+    window.__pmGalBubbleOperational = false;
+    await window.__pmPoke('Alice');
+    assert.equal(window.__pmHistories.story.Alice.at(-1).content, '普通拍一拍回复',
+        '酒馆 GAL 开关关闭时，普通私聊拍一拍必须保持原有历史正文');
+    assert.equal(manualPlainBubbleCalls.length, 1,
+        '酒馆 GAL 开关关闭时，普通私聊拍一拍必须保持原生气泡渲染');
+    assert.equal(manualPlainBubbleCalls[0][0], '普通拍一拍回复');
+    assert.equal(manualPlainBubbleCalls[0][1], 'left');
+
+    const manualGroupMsgBubbleCalls = [];
+    createAutoPokeFixture({
+        callAI: async () => '<msg side="left">Alice|关闭开关群聊台词</msg>',
+        stateOverrides: {
+            phoneActive: true, isGroupChat: true, currentPersona: '__group_team',
+            currentGroupKey: '__group_team', groupMembers: ['Alice'], groupDisplayName: '测试群',
+            conversationHistory: [{ role: 'user', content: '群聊旧消息' }],
+        },
+        bubbleCalls: manualGroupMsgBubbleCalls,
+    });
+    window.__pmGalBubbleOperational = false;
+    await window.__pmPokeGroup();
+    assert.equal(window.__pmHistories.story.__group_team.at(-1).content, 'Alice：关闭开关群聊台词',
+        '酒馆 GAL 开关关闭时，手机群聊拍一拍仍必须适配完整 msg 文本');
+    assert.equal(manualGroupMsgBubbleCalls.length, 1,
+        '酒馆 GAL 开关关闭时，手机群聊拍一拍必须保持原生气泡渲染');
+    assert.equal(manualGroupMsgBubbleCalls[0][0], '关闭开关群聊台词');
+    assert.equal(manualGroupMsgBubbleCalls[0][1], 'left');
+    assert.equal(manualGroupMsgBubbleCalls[0][2], 'Alice');
+
+    const interruptedManualBubbleCalls = [];
+    const interruptedManualState = createAutoPokeFixture({
+        callAI: async () => '<msg side="left">Alice|取消前气泡 / 取消后不渲染</msg>',
+        stateOverrides: { phoneActive: true },
+        bubbleCalls: interruptedManualBubbleCalls,
+        onBubble: ({ generation }) => generation.cancelAll(),
+    });
+    window.__pmGalBubbleOperational = true;
+    await window.__pmPoke('Alice');
+    assert.equal(interruptedManualBubbleCalls.length, 1,
+        '手动私聊拍一拍在首个气泡渲染后取消时不得继续渲染后续句子');
+    assert.equal(interruptedManualBubbleCalls[0][0], '取消前气泡');
+    assert.equal(window.__pmHistories.story.Alice.at(-1).content, '取消前气泡',
+        '手动私聊拍一拍在渲染期间取消时，历史只能保留已显示的气泡正文');
+    assert.equal(interruptedManualState.conversationHistory, window.__pmHistories.story.Alice,
+        '手动私聊拍一拍在渲染期间取消时不得让运行态历史与目标会话持久化历史分叉');
+
+    const manualPersistFailureCalls = [];
+    createAutoPokeFixture({
+        callAI: async () => '<msg side="left">Alice|不应显示或持久化</msg>',
+        stateOverrides: { phoneActive: true },
+        bubbleCalls: manualPersistFailureCalls,
+    });
+    window.__pmGalBubbleOperational = true;
+    idbControl.abortAll = true;
+    await window.__pmPoke('Alice');
+    idbControl.abortAll = false;
+    assert.equal(manualPersistFailureCalls.length, 0,
+        '手动私聊拍一拍严格持久化失败时不得留下未持久化气泡');
+    assert.deepEqual(window.__pmHistories.story.Alice, [{ role: 'user', content: 'Alice 的旧消息' }],
+        '手动私聊拍一拍严格持久化失败时必须恢复原目标会话历史');
+
+    const privateBeforeFirstBubbleCalls = [];
+    createAutoPokeFixture({
+        callAI: async () => '<msg side="left">Alice|私聊首泡前取消</msg>',
+        stateOverrides: { phoneActive: true },
+        bubbleCalls: privateBeforeFirstBubbleCalls,
+        onTaskBegin: ({ generation }) => queueMicrotask(() => generation.cancelAll()),
+    });
+    window.__pmGalBubbleOperational = true;
+    await window.__pmPoke('Alice');
+    assert.equal(privateBeforeFirstBubbleCalls.length, 0,
+        '手动私聊拍一拍在首个气泡前取消时不得渲染气泡');
+    assert.deepEqual(window.__pmHistories.story.Alice, [{ role: 'user', content: 'Alice 的旧消息' }],
+        '手动私聊拍一拍在首个气泡前取消时不得写入未显示的台词');
+
+    const privatePostCommitCancelCalls = [];
+    const privatePostCommitCancelState = createAutoPokeFixture({
+        callAI: async () => '<msg side="left">Alice|私聊已提交未渲染</msg>',
+        stateOverrides: { phoneActive: true, conversationHistory: [{ role: 'user', content: 'Alice 的旧消息' }] },
+        bubbleCalls: privatePostCommitCancelCalls,
+        onHistoryPersisted: ({ histories, generation }) => {
+            if (histories.story.Alice.at(-1)?.content === '私聊已提交未渲染') generation.cancelAll();
+        },
+    });
+    window.__pmGalBubbleOperational = true;
+    await window.__pmPoke('Alice');
+    assert.equal(privatePostCommitCancelCalls.length, 0,
+        '手动私聊拍一拍在严格保存后、气泡渲染前取消时不得渲染气泡');
+    assert.deepEqual(window.__pmHistories.story.Alice, [{ role: 'user', content: 'Alice 的旧消息' }],
+        '手动私聊拍一拍在严格保存后取消时必须恢复目标会话历史');
+    assert.equal(privatePostCommitCancelState.conversationHistory, window.__pmHistories.story.Alice,
+        '手动私聊拍一拍在严格保存后取消时必须恢复当前会话运行态历史');
+    assert.deepEqual(idbValues.get('ST_SMS_DATA_V2').story.Alice, [{ role: 'user', content: 'Alice 的旧消息' }],
+        '手动私聊拍一拍在严格保存后取消时必须补偿 IndexedDB 历史');
+    assert.deepEqual(JSON.parse(autoPokeStorageValues.get('ST_SMS_DATA_V2')).story.Alice, [{ role: 'user', content: 'Alice 的旧消息' }],
+        '手动私聊拍一拍在严格保存后取消时必须补偿 localStorage 历史');
+
+    window.__pmGalBubbleOperational = false;
+
+    const groupBeforeFirstBubbleCalls = [];
+    createAutoPokeFixture({
+        callAI: async () => 'Alice：首泡前取消的群聊台词',
+        stateOverrides: {
+            phoneActive: true, isGroupChat: true, currentPersona: '__group_team',
+            currentGroupKey: '__group_team', groupMembers: ['Alice'], groupDisplayName: '测试群',
+            conversationHistory: [{ role: 'user', content: '群聊旧消息' }],
+        },
+        bubbleCalls: groupBeforeFirstBubbleCalls,
+        onTaskBegin: ({ generation }) => queueMicrotask(() => generation.cancelAll()),
+    });
+    window.__pmGalBubbleOperational = true;
+    await window.__pmPokeGroup();
+    assert.equal(groupBeforeFirstBubbleCalls.length, 0,
+        '手动群聊拍一拍在首个气泡前取消时不得渲染气泡');
+    assert.deepEqual(window.__pmHistories.story.__group_team, [{ role: 'user', content: '群聊旧消息' }],
+        '手动群聊拍一拍在首个气泡前取消时不得写入未显示的台词');
+
+    const interruptedGroupBubbleCalls = [];
+    const interruptedGroupState = createAutoPokeFixture({
+        callAI: async () => 'Alice：群聊取消前气泡 / 群聊取消后不渲染',
+        stateOverrides: {
+            phoneActive: true, isGroupChat: true, currentPersona: '__group_team',
+            currentGroupKey: '__group_team', groupMembers: ['Alice'], groupDisplayName: '测试群',
+            conversationHistory: [{ role: 'user', content: '群聊旧消息' }],
+        },
+        bubbleCalls: interruptedGroupBubbleCalls,
+        onBubble: ({ generation }) => generation.cancelAll(),
+    });
+    window.__pmGalBubbleOperational = true;
+    await window.__pmPokeGroup();
+    assert.equal(interruptedGroupBubbleCalls.length, 1,
+        '手动群聊拍一拍在首个气泡渲染后取消时不得继续渲染后续句子');
+    assert.equal(interruptedGroupBubbleCalls[0][0], '群聊取消前气泡');
+    assert.equal(window.__pmHistories.story.__group_team.length, 2,
+        '手动群聊拍一拍取消后历史只能包含已显示的气泡条目');
+    assert.equal(window.__pmHistories.story.__group_team.at(-1).content, 'Alice：群聊取消前气泡',
+        '手动群聊拍一拍取消后不得提交未显示的后续句子');
+    assert.equal(interruptedGroupState.conversationHistory, window.__pmHistories.story.__group_team,
+        '手动群聊拍一拍取消后不得让运行态历史与目标会话持久化历史分叉');
+
+    const groupPersistFailureCalls = [];
+    createAutoPokeFixture({
+        callAI: async () => 'Alice：不应显示或持久化的群聊台词',
+        stateOverrides: {
+            phoneActive: true, isGroupChat: true, currentPersona: '__group_team',
+            currentGroupKey: '__group_team', groupMembers: ['Alice'], groupDisplayName: '测试群',
+            conversationHistory: [{ role: 'user', content: '群聊旧消息' }],
+        },
+        bubbleCalls: groupPersistFailureCalls,
+    });
+    window.__pmGalBubbleOperational = true;
+    idbControl.abortAll = true;
+    await window.__pmPokeGroup();
+    idbControl.abortAll = false;
+    assert.equal(groupPersistFailureCalls.length, 0,
+        '手动群聊拍一拍严格持久化失败时不得留下未持久化气泡');
+    assert.deepEqual(window.__pmHistories.story.__group_team, [{ role: 'user', content: '群聊旧消息' }],
+        '手动群聊拍一拍严格持久化失败时必须恢复原目标会话历史');
+
+    const groupPostCommitCancelCalls = [];
+    const groupPostCommitCancelState = createAutoPokeFixture({
+        callAI: async () => 'Alice：群聊已提交未渲染',
+        stateOverrides: {
+            phoneActive: true, isGroupChat: true, currentPersona: '__group_team',
+            currentGroupKey: '__group_team', groupMembers: ['Alice'], groupDisplayName: '测试群',
+            conversationHistory: [{ role: 'user', content: '群聊旧消息' }],
+        },
+        bubbleCalls: groupPostCommitCancelCalls,
+        onHistoryPersisted: ({ histories, generation }) => {
+            if (histories.story.__group_team.at(-1)?.content === 'Alice：群聊已提交未渲染') generation.cancelAll();
+        },
+    });
+    window.__pmGalBubbleOperational = true;
+    await window.__pmPokeGroup();
+    assert.equal(groupPostCommitCancelCalls.length, 0,
+        '手动群聊拍一拍在严格保存后、气泡渲染前取消时不得渲染气泡');
+    assert.deepEqual(window.__pmHistories.story.__group_team, [{ role: 'user', content: '群聊旧消息' }],
+        '手动群聊拍一拍在严格保存后取消时必须恢复目标会话历史');
+    assert.equal(groupPostCommitCancelState.conversationHistory, window.__pmHistories.story.__group_team,
+        '手动群聊拍一拍在严格保存后取消时必须恢复当前会话运行态历史');
+    assert.deepEqual(idbValues.get('ST_SMS_DATA_V2').story.__group_team, [{ role: 'user', content: '群聊旧消息' }],
+        '手动群聊拍一拍在严格保存后取消时必须补偿 IndexedDB 历史');
+    assert.deepEqual(JSON.parse(autoPokeStorageValues.get('ST_SMS_DATA_V2')).story.__group_team, [{ role: 'user', content: '群聊旧消息' }],
+        '手动群聊拍一拍在严格保存后取消时必须补偿 localStorage 历史');
+
+    const previousManualPokeConsoleError = console.error;
+    const backgroundManualPokeLogs = [];
+    console.error = (...args) => backgroundManualPokeLogs.push(args);
+    try {
+        const backgroundPrivateAbortTypingCalls = [];
+        const backgroundPrivateAbortNoteCalls = [];
+        let backgroundPrivateAbortState;
+        backgroundPrivateAbortState = createAutoPokeFixture({
+            callAI: async () => {
+                backgroundPrivateAbortState.currentPersona = 'Legacy';
+                backgroundPrivateAbortState.conversationHistory = window.__pmHistories.story.Legacy;
+                const error = new Error('后台私聊已取消');
+                error.name = 'AbortError';
+                throw error;
+            },
+            stateOverrides: { phoneActive: true, conversationHistory: [{ role: 'user', content: 'Alice 的旧消息' }] },
+            typingCalls: backgroundPrivateAbortTypingCalls,
+            noteCalls: backgroundPrivateAbortNoteCalls,
+        });
+        await window.__pmPoke('Alice');
+        assert.equal(backgroundPrivateAbortTypingCalls.length, 0,
+            '后台私聊拍一拍取消时不得隐藏当前会话的输入状态');
+        assert.equal(backgroundPrivateAbortNoteCalls.length, 0,
+            '后台私聊拍一拍取消时不得向当前会话插入失败提示');
+
+        const backgroundPrivateFailureTypingCalls = [];
+        const backgroundPrivateFailureNoteCalls = [];
+        let backgroundPrivateFailureState;
+        backgroundPrivateFailureState = createAutoPokeFixture({
+            callAI: async () => {
+                backgroundPrivateFailureState.currentPersona = 'Legacy';
+                backgroundPrivateFailureState.conversationHistory = window.__pmHistories.story.Legacy;
+                return '<msg side="left">Alice|后台私聊保存失败</msg>';
+            },
+            stateOverrides: { phoneActive: true, conversationHistory: [{ role: 'user', content: 'Alice 的旧消息' }] },
+            typingCalls: backgroundPrivateFailureTypingCalls,
+            noteCalls: backgroundPrivateFailureNoteCalls,
+        });
+        idbControl.abortAll = true;
+        await window.__pmPoke('Alice');
+        idbControl.abortAll = false;
+        assert.equal(backgroundPrivateFailureTypingCalls.length, 0,
+            '后台私聊拍一拍保存失败时不得隐藏当前会话的输入状态');
+        assert.equal(backgroundPrivateFailureNoteCalls.length, 0,
+            '后台私聊拍一拍保存失败时不得向当前会话插入失败提示');
+        assert.ok(backgroundManualPokeLogs.some(([message, context]) => message === '[phone-mode] __pmPoke: 后台手动拍一拍失败'
+            && context?.storageId === 'story' && context?.saveKey === 'Alice'),
+        '后台私聊拍一拍保存失败必须记录可诊断的目标会话信息');
+
+        const backgroundGroupFailureTypingCalls = [];
+        const backgroundGroupFailureNoteCalls = [];
+        let backgroundGroupFailureState;
+        backgroundGroupFailureState = createAutoPokeFixture({
+            callAI: async () => {
+                backgroundGroupFailureState.currentGroupKey = '__group_other';
+                backgroundGroupFailureState.conversationHistory = window.__pmHistories.story.Legacy;
+                return 'Alice：后台群聊保存失败';
+            },
+            stateOverrides: {
+                phoneActive: true, isGroupChat: true, currentPersona: '__group_team',
+                currentGroupKey: '__group_team', groupMembers: ['Alice'], groupDisplayName: '测试群',
+                conversationHistory: [{ role: 'user', content: '群聊旧消息' }],
+            },
+            typingCalls: backgroundGroupFailureTypingCalls,
+            noteCalls: backgroundGroupFailureNoteCalls,
+        });
+        idbControl.abortAll = true;
+        await window.__pmPokeGroup();
+        idbControl.abortAll = false;
+        assert.equal(backgroundGroupFailureTypingCalls.length, 0,
+            '后台群聊拍一拍保存失败时不得隐藏当前会话的输入状态');
+        assert.equal(backgroundGroupFailureNoteCalls.length, 0,
+            '后台群聊拍一拍保存失败时不得向当前会话插入失败提示');
+        assert.ok(backgroundManualPokeLogs.some(([message, context]) => message === '[phone-mode] __pmPokeGroup: 后台手动拍一拍失败'
+            && context?.storageId === 'story' && context?.saveKey === '__group_team'),
+        '后台群聊拍一拍保存失败必须记录可诊断的目标会话信息');
+    } finally {
+        idbControl.abortAll = false;
+        console.error = previousManualPokeConsoleError;
+    }
+
+    createAutoPokeFixture({
+        callAI: async () => '<msg side="left">Alice|GAL 自动拍一拍回复</msg>',
+    });
+    window.__pmGalBubbleOperational = true;
     const successfulPreviousHistory = window.__pmHistories.story.Alice;
     assert.equal(await window.__pmAutoPoke('Alice'), true,
         '真实安装后的自动戳一戳必须能提交历史和计数器');
@@ -8960,7 +9573,20 @@ try {
         },
     });
     await productionTrendCommitter.ready();
-    const productionFoundationState = { phoneWindow: null, phoneActive: true, conversationHistory: [] };
+    const productionLatestHistory = [{ role: 'user', content: 'production-latest-source' }];
+    const productionFoundationState = {
+        phoneWindow: null,
+        phoneActive: true,
+        activeStorageId: branchIds.source,
+        currentPersona: 'Alice',
+        isGroupChat: false,
+        currentGroupKey: '',
+        groupMembers: [],
+        groupExtras: [],
+        groupColorMap: {},
+        groupDisplayName: '',
+        conversationHistory: structuredClone(productionLatestHistory),
+    };
     const productionEventContext = {
         ...productionContext,
         eventTypes: {
@@ -8985,15 +9611,31 @@ try {
         getStorageId: () => productionTargetId, getUserPersona: () => ({ name: '用户' }),
         commitTodayTrendStore: productionTrendCommitter.commitStore,
         commitTodayTrendScope: productionTrendCommitter.commitScope,
+        applyBidirectionalInjection: () => {},
         cancelCommunityGeneration: reason => productionCleanupCalls.push(['community', reason]),
         cancelCalendarTasks: reason => productionCleanupCalls.push(['calendar', reason]),
     };
     installPhoneFoundation(productionFoundationState, productionFoundationDeps);
+    installConversation(productionFoundationState, productionFoundationDeps);
+    const productionPersistCurrentHistory = productionFoundationDeps.persistCurrentHistory;
+    const productionPreflightCalls = [];
+    productionFoundationDeps.persistCurrentHistory = (...args) => {
+        productionPreflightCalls.push({
+            storageId: productionFoundationState.activeStorageId,
+            saveKey: productionFoundationState.currentPersona,
+            activeScopes: getActiveDirectoryBranchScopes('pokeConfig'),
+        });
+        return productionPersistCurrentHistory(...args);
+    };
     productionFoundationDeps.hookGenerationEvent();
     assert.equal(productionListeners.get('production_chat_changed')?.length, 1,
         '生产继承回归必须通过真实 CHAT_CHANGED 监听器进入分支事务');
+    window.__pmHistories = {
+        [branchIds.source]: { Alice: structuredClone(productionLatestHistory) },
+        unrelated: { Bob: [{ content: 'unrelated-history' }] },
+    };
     idbValues.set('ST_SMS_DATA_V2', {
-        [branchIds.source]: { Alice: [{ content: 'production-source' }] },
+        [branchIds.source]: { Alice: [{ content: 'production-stale-source' }] },
         unrelated: { Bob: [{ content: 'unrelated-history' }] },
     });
     await pmIDBSet('ST_INTERACTIVE_SCENES_V1', { version: 2, scopes: {} });
@@ -9020,10 +9662,24 @@ try {
         communitySelectionsByStorage: { [branchIds.source]: { 'scene-source': { mode: 'all' } } },
     }));
     const productionTrendStatusBefore = await todayTrendV2Authority.status();
+    const historyCommitBlocker = blockIDBOperation('put', 'ST_SMS_DATA_V2');
     const lineageCommitBlocker = blockIDBOperation('put', BRANCH_LINEAGE_STORE_KEY);
     const productionBranch = productionListeners.get('production_chat_changed')[0](productionTargetId);
     let productionFailure = null;
     productionBranch.catch(error => { productionFailure = error; });
+    await historyCommitBlocker.entered;
+    try {
+        assert.deepEqual(productionPreflightCalls, [{
+            storageId: branchIds.source, saveKey: 'Alice', activeScopes: [],
+        }], 'CHAT_CHANGED 必须在登记分支 target scope 前提交旧活动会话');
+        assert.equal(idbValues.get('ST_SMS_DATA_V2')[branchIds.source].Alice[0].content, 'production-stale-source',
+            '父历史异步提交受阻时 IndexedDB 仍应保持旧值，以证明队列屏障正在生效');
+        assert.equal(Object.hasOwn(idbValues.get('ST_SMS_DATA_V2'), productionTargetId), false,
+            '父历史保存队列释放前不得读取旧来源并提前写入目标 scope');
+        assert.deepEqual(productionCleanupCalls, [], '父历史保存队列释放前不得提前清理旧会话');
+    } finally {
+        historyCommitBlocker.release();
+    }
     const productionInterlock = await Promise.race([
         lineageCommitBlocker.entered.then(() => ({ entered: true })),
         productionBranch.then(result => ({ entered: false, result })),
@@ -9121,6 +9777,8 @@ try {
         '真实 CHAT_CHANGED 链路必须记录已完成的生产继承结果');
     assert.equal(productionFoundationDeps.runtime.lastBranchInheritance?.targetId, productionTargetId,
         '真实 CHAT_CHANGED 链路必须记录继承目标 scope');
+    assert.equal(idbValues.get('ST_SMS_DATA_V2')[productionTargetId].Alice[0].content, 'production-latest-source',
+        '分支目标必须继承 preflight 刚提交的最新父会话，而不是保存队列前的陈旧主记录');
     window.__pmDiagEnabled = true;
     assert.equal(installDiagnosticApi(productionFoundationDeps), true,
         '真实 listener fixture 打开诊断开关后必须安装现场诊断面');
@@ -9149,6 +9807,28 @@ try {
     assert.deepEqual(productionCleanupCalls.slice(-3), [
         ['community', 'host-chat-changed'], ['calendar', 'host-chat-changed'], ['end-phone', true],
     ], '继承跳过完成后也必须恰好执行一次聊天切换清理');
+
+    const preflightFailedTargetId = getStorageIdFor('alice.png', 'production-preflight-failed-branch');
+    currentProductionEventContext = { ...productionEventContext, chatId: 'production-preflight-failed-branch' };
+    productionFoundationState.phoneActive = true;
+    const successfulProductionPersistCurrentHistory = productionFoundationDeps.persistCurrentHistory;
+    productionFoundationDeps.persistCurrentHistory = () => false;
+    const cleanupBeforePreflightFailure = productionCleanupCalls.length;
+    const preflightFailedBranch = await productionListeners.get('production_chat_changed')[0](preflightFailedTargetId);
+    assert.equal(preflightFailedBranch.status, 'failed', '活动会话 preflight 提交失败时必须阻断分支事务');
+    assert.equal(productionFoundationDeps.runtime.lastBranchInheritance?.status, 'failed',
+        'preflight 提交失败必须记录可诊断的失败状态');
+    assert.equal(productionFoundationDeps.runtime.lastBranchInheritance?.targetId, preflightFailedTargetId,
+        'preflight 提交失败诊断必须保留已解析的目标 scope');
+    assert.equal(Object.hasOwn(idbValues.get('ST_SMS_DATA_V2'), preflightFailedTargetId), false,
+        'preflight 提交失败不得写入任何目标历史 scope');
+    for (const store of ['pokeConfig', 'characterBehavior', 'bidirectional', 'budget', 'todayTrend']) {
+        assert.deepEqual(getActiveDirectoryBranchScopes(store), [], `preflight 失败不得登记 ${store} 的 target scope`);
+    }
+    assert.deepEqual(productionCleanupCalls.slice(cleanupBeforePreflightFailure), [
+        ['community', 'host-chat-changed'], ['calendar', 'host-chat-changed'], ['end-phone', true],
+    ], 'preflight 失败后聊天切换清理仍必须且只能执行一次');
+    productionFoundationDeps.persistCurrentHistory = successfulProductionPersistCurrentHistory;
 
     const failedProductionTargetId = getStorageIdFor('alice.png', 'production-failed-branch');
     const failedTrendStatusBefore = await todayTrendV2Authority.status();

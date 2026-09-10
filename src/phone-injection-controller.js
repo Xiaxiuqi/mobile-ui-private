@@ -1,4 +1,5 @@
 import { applyContextInjections, buildContextInjectionPrompts, clearExtensionPrompts } from './phone-injection.js';
+import { enabledStoryOraclePlans } from './story-oracle-model.js';
 
 export function createPhoneInjectionController({ state, runtime, deps, getCtx, getStorageId, getUserPersona }) {
     let injectionQueue = Promise.resolve();
@@ -26,7 +27,10 @@ export function createPhoneInjectionController({ state, runtime, deps, getCtx, g
             ? state.currentGroupKey : state.currentPersona;
         let interactiveStore;
         try { interactiveStore = await deps.getInteractiveStore?.(); } catch (error) { interactiveStore = null; }
+        let storyOracleStore;
+        try { storyOracleStore = await deps.getStoryOracleStore?.(); } catch (error) { storyOracleStore = null; }
         if (epoch !== runtime.injectionEpoch || getStorageId() !== storageId) return null;
+        const storyOraclePlans = enabledStoryOraclePlans(storyOracleStore, storageId);
         return {
             context, runtime, currentStorageId: storageId, currentActorName, currentConversationKey,
             injectionConfig: window.__pmInjectionConfig, selectedByStorage: window.__pmBidirectional,
@@ -42,6 +46,7 @@ export function createPhoneInjectionController({ state, runtime, deps, getCtx, g
             calendarOutfits: getCalendarData('getCalendarOutfitStore'),
             todayTrendStore: todayTrendStore === undefined
                 ? runtime.todayTrend?.pendingInjectionStore ?? runtime.todayTrend?.store : todayTrendStore,
+            storyOraclePlans,
         };
     }
 
