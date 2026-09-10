@@ -41,6 +41,9 @@ Thumbs.db
 *.swp
 *.tmp
 
+# Local Limcode planning and progress artifacts
+/.limcode/
+
 # Local AI analysis and one-off investigation artifacts
 /_reference_snapshots/
 /*.diff
