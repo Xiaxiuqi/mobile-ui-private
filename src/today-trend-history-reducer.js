@@ -57,7 +57,11 @@ function normalizeIdArray(value, label, max) {
 
 function normalizeStage(value) {
     exact(value, ['text', 'time', 'timeLabel'], 'history stage');
-    return { text: text(value.text, 'history stage.text', 600), time: nullableTime(value.time, 'history stage.time'),
+    // Producer admission only; persisted canonical stages retain their legacy read limit.
+    if (typeof value.text === 'string' && value.text.length > 240) {
+        fail('TT_HISTORY_LIMIT_EXCEEDED', 'history stage.text 新阶段最多240字（UTF-16 code units），拒绝截断');
+    }
+    return { text: text(value.text, 'history stage.text', 240), time: nullableTime(value.time, 'history stage.time'),
         timeLabel: nullableText(value.timeLabel, 'history stage.timeLabel', 40) };
 }
 

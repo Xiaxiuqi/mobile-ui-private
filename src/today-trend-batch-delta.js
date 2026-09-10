@@ -46,8 +46,8 @@ export function materializeTodayTrendBatchDelta(value, scope, timestamp) {
     const stagesFor = (id, stages, path) => {
         if (!Array.isArray(stages) || !stages.length) throw new Error(`${path} [${id}]: 阶段增量必须为非空字符串数组`);
         stages.forEach((text, index) => {
-            if (typeof text !== 'string' || !text.trim() || text.length > 600) {
-                throw new Error(`${path}[${index}] [${id}]: 阶段必须为非空字符串，最多600字`);
+            if (typeof text !== 'string' || !text.trim() || text.length > 240) {
+                throw new Error(`${path}[${index}] [${id}]: 阶段必须为非空字符串，最多240字`);
             }
         });
         const producer = producers.get(id) || { eventId: id, stages: [], daySummaries: [], periodSummaries: [] };

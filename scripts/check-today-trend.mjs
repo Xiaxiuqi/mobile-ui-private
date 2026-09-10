@@ -4714,6 +4714,83 @@ const newlyArchived = createdCanonical.globalEnvelope.payload.scopes.chat.payloa
 assert.deepEqual(newlyArchived.stages.map(stage => stage.text), ['新事件开始', '新事件继续', '新事件结束']);
 assert.equal(newlyArchived.stages.every(stage => stage.storyDate === '2025-04-15'), true);
 assert.equal(Object.hasOwn(newlyArchived, 'initialStage'), false, '传输字段不能持久化');
+const multiCreateDto = batchEmpty();
+for (const id of ['batch-multi-a', 'batch-multi-b']) {
+    multiCreateDto.dynamics.create.push({ ...createBatch.dynamics.create[0], id, relatedEventIds: [], initialStage: `${id}开始` });
+    multiCreateDto.dynamics.appendStages.push({ eventId: id, stages: [`${id}调查`, `${id}核实`] });
+}
+multiCreateDto.dynamics.appendStages.push({ eventId: 'service', stages: ['旧事件本批新增进展'] });
+let multiCreateCalls = 0;
+const multiCreateController = createTodayTrendGenerationController({ getCtx: () => ({}),
+    gather: async () => ({ source: { includeExistingChat: false } }), now: () => 100,
+    callAI: async (system, user) => {
+        multiCreateCalls++;
+        assert.ok(system.includes(todayTrendTitleNamingGuide()));
+        assert.match(user, /本轮优先事实输入/);
+        assert.doesNotMatch(user, /世界书独立推演模式/);
+        return JSON.stringify(multiCreateDto);
+    } });
+const multiInputBefore = JSON.stringify(createInput);
+const multiGenerated = await multiCreateController.generate({ ...createInput,
+    historyBatch: [{ role: 'assistant', content: '两个事件先后开始、调查并核实；旧事件有新进展。' }] });
+assert.equal(multiCreateCalls, 1);
+assert.equal(JSON.stringify(createInput), multiInputBefore);
+const multiCanonical = applyTodayTrendGenerationToV2(migratedValidV2, 'chat', multiGenerated.scope, multiGenerated.history,
+    { trustedStoryDate: '2025-04-15', assistantCount: 8, generatedAt: 100, archives: multiGenerated.archives });
+const multiPayload = multiCanonical.globalEnvelope.payload.scopes.chat.payload;
+for (const id of ['batch-multi-a', 'batch-multi-b']) {
+    const expected = [`${id}开始`, `${id}调查`, `${id}核实`];
+    const event = multiPayload.dynamics.active.find(event => event.id === id);
+    assert.deepEqual(event.stages.map(stage => stage.text), expected);
+    assert.equal(event.latestStage, expected.at(-1));
+    assert.equal(event.createdAt, 100);
+    assert.equal(event.updatedAt, 100);
+    assert.equal(event.stages.every(stage => stage.storyDate === '2025-04-15'), true);
+    assert.equal(event.stages.every(stage => stage.sourceFloorStart === 8 && stage.sourceFloorEnd === 8), true);
+    assert.deepEqual(event.stages.map(stage => stage.sourceStageStart), [1, 2, 3]);
+    assert.deepEqual(event.stages.map(stage => stage.sourceStageEnd), [1, 2, 3]);
+    assert.deepEqual(multiGenerated.history.events.find(event => event.eventId === id).stages,
+        expected.map(text => ({ text, time: null, timeLabel: null })));
+}
+assert.deepEqual(multiPayload.dynamics.active.find(event => event.id === 'service').stages.slice(0, -1),
+    migratedValidV2.globalEnvelope.payload.scopes.chat.payload.dynamics.active.find(event => event.id === 'service').stages);
+assert.deepEqual(multiPayload.dynamics.archived, migratedValidV2.globalEnvelope.payload.scopes.chat.payload.dynamics.archived);
+assert.equal(JSON.stringify(migratedValidV2), beforeBatch);
+
+
+// Exercise the actual prompt (including its executable DTO example), not source grep.
+for (const includeExistingChat of [true, false]) {
+    for (const historyBatch of [null, [], [{ role: 'assistant', content: '本批事实标记' }]]) {
+        const envelope = buildTodayTrendGenerationEnvelope({ ...createInput, historyBatch,
+            context: { source: { includeExistingChat }, mainChatText: '普通正文标记', latestChatText: '较晚正文标记' } });
+        assert.ok(envelope.systemPrompt.includes(todayTrendTitleNamingGuide()));
+        for (const instruction of ['不要为了填满字段而编造变化', '真实新增进展', '不改写或截短旧历史', '遵守本轮有效的模块规则', '不能替代阶段']) {
+            assert.ok(envelope.systemPrompt.includes(instruction), instruction);
+        }
+        const mode = JSON.parse(envelope.userPrompt.match(/<generation_mode encoding="json-string">\n(.*?)\n<\/generation_mode>/s)[1]);
+        if (Array.isArray(historyBatch)) {
+            assert.match(mode, /history_batch_data 是本轮优先事实输入/);
+            assert.doesNotMatch(envelope.userPrompt, /独立推演模式|聊天正文未作为|输出.*null|必须.*null|普通正文标记|较晚正文标记/);
+            assert.doesNotMatch(envelope.systemPrompt, /完整替换值|dynamics 非 null|latestStage 必须等于|顶层只能有 preset 和 scope/);
+            assert.match(envelope.systemPrompt, /多个新建事件都可分别这样表达/);
+            assert.match(envelope.systemPrompt, /旧241–600字阶段只读保留/);
+            if (historyBatch.length) assert.match(envelope.userPrompt, /本批事实标记/);
+            const example = JSON.parse(envelope.systemPrompt.split('\n').find(line => line.startsWith('{"world"')));
+            const materialized = materializeTodayTrendBatchDelta(example, batchBase, 100);
+            assert.equal(materialized.parsed.dynamics.active.at(-1).stages.length, 3);
+        } else {
+            assert.match(envelope.userPrompt, /普通正文标记/);
+            assert.match(envelope.userPrompt, /没有变化的模块输出 null/);
+            assert.match(envelope.systemPrompt, /完整替换值/);
+            assert.match(envelope.systemPrompt, /latestStage 必须等于 stages 最后一项/);
+            assert.equal(mode.includes('世界书独立推演模式'), !includeExistingChat);
+            assert.equal(mode.includes('聊天正文未作为'), !includeExistingChat);
+            assert.doesNotMatch(mode, /历史批/);
+        }
+    }
+}
+
+
 for (const invalid of [null, {}, '', ' ', 42, '字'.repeat(601)]) {
     const dto = structuredClone(createBatch);
     dto.dynamics.create[0].initialStage = invalid;
@@ -4722,6 +4799,58 @@ for (const invalid of [null, {}, '', ' ', 42, '字'.repeat(601)]) {
     dto.dynamics.appendStages[0].stages = [invalid];
     assert.throws(() => materializeTodayTrendBatchDelta(dto, batchBase, 100), /appendStages\[batch-new\].stages\[0\]/);
 }
+// Local new-write limit is independent of the legacy canonical read contract.
+for (const stageText of ['字'.repeat(240), '😀'.repeat(120)]) {
+    const dto = structuredClone(createBatch);
+    dto.dynamics.create[0].initialStage = stageText;
+    dto.dynamics.appendStages[0].stages = [stageText];
+    const result = materializeTodayTrendBatchDelta(dto, batchBase, 100);
+    assert.deepEqual(result.parsed.history.events[0].stages.map(stage => stage.text), [stageText, stageText]);
+    assert.equal(normalizeTodayTrendHistoryProducer(phase5Producer('service', [phase5Stage(stageText)]))
+        .events[0].stages[0].text, stageText);
+}
+for (const stageText of ['字'.repeat(241), '😀'.repeat(120) + '字', '字'.repeat(600)]) {
+    const dto = structuredClone(createBatch);
+    const beforeScope = JSON.stringify(batchBase);
+    dto.dynamics.create[0].initialStage = stageText;
+    assert.throws(() => materializeTodayTrendBatchDelta(dto, batchBase, 100), /initialStage.*240/);
+    dto.dynamics.create[0].initialStage = '合法先行创建';
+    dto.dynamics.appendStages[0].stages = ['合法先行阶段', stageText];
+    assert.throws(() => materializeTodayTrendBatchDelta(dto, batchBase, 100), /appendStages.*240/);
+    assert.equal(JSON.stringify(batchBase), beforeScope, '超长后续阶段不得部分修改输入');
+    assert.throws(() => applyTodayTrendGenerationToV2(migratedValidV2, 'chat',
+        phase5GeneratedScope(migratedValidV2, stageText), phase5Producer('service', [phase5Stage(stageText)])),
+    error => error.code === 'TT_HISTORY_LIMIT_EXCEEDED' && /240/.test(error.message));
+    assert.equal(JSON.stringify(migratedValidV2), beforeBatch, 'producer 超长不得半写 canonical');
+    const controller = createTodayTrendGenerationController({ getCtx: () => ({}), gather: async () => ({}),
+        buildGeneration: () => ({ systemPrompt: '', userPrompt: '' }), callAI: async () => JSON.stringify(dto), now: () => 100 });
+    const beforeInput = JSON.stringify(createInput);
+    await assert.rejects(() => controller.generate(createInput), /240/);
+    assert.equal(JSON.stringify(createInput), beforeInput);
+}
+for (const length of [241, 600]) {
+    const legacy = structuredClone(migratedValidV2);
+    const event = legacy.globalEnvelope.payload.scopes.chat.payload.dynamics.active.find(item => item.id === 'service');
+    event.stages.at(-1).text = '旧'.repeat(length);
+    event.latestStage = event.stages.at(-1).text;
+    const prefix = structuredClone(event.stages);
+    const scope = phase5GeneratedScope(legacy, '新'.repeat(240));
+    const updated = applyTodayTrendGenerationToV2(legacy, 'chat', scope,
+        phase5Producer('service', [phase5Stage('新'.repeat(240))]), { assistantCount: 8, generatedAt: 100 });
+    const stages = updated.globalEnvelope.payload.scopes.chat.payload.dynamics.active.find(item => item.id === 'service').stages;
+    assert.deepEqual(stages.slice(0, -1), prefix, '旧241–600阶段读取追加必须保留原前缀');
+    assert.equal(stages.at(-1).text.length, 240);
+}
+for (const field of ['daySummaries', 'periodSummaries']) {
+    const summary = field === 'daySummaries' ? { summaryText: '摘'.repeat(240), keyStages: [] }
+        : { summaryText: '摘'.repeat(240), startDate: '2025-04-15', endDate: '2025-04-16', childSummaryRefs: [] };
+    const producer = phase5Producer('service', []);
+    producer.events[0][field].push(summary);
+    assert.equal(normalizeTodayTrendHistoryProducer(producer).events[0][field][0].summaryText.length, 240);
+    summary.summaryText += '摘';
+    assert.throws(() => normalizeTodayTrendHistoryProducer(producer), /summaryText/);
+}
+
 const objectProtocol = structuredClone(createBatch);
 delete objectProtocol.dynamics.create[0].initialStage;
 objectProtocol.dynamics.create[0].stages = [phase5Stage('旧协议')];
