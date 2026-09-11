@@ -48,7 +48,6 @@ const guardWorldCapacity = (previous, upserts) => {
         error.code = 'TT_WORLD_CAPACITY';
         throw error;
     };
-    if (existing >= 22 && newUnique > 0) reject();
     if (existing + newUnique > 24) reject();
 };
 

@@ -4684,8 +4684,9 @@ const worldCapacityError = (existing, added) => error => {
     return true;
 };
 for (const [count, mode, added, rejected] of [
-    [22, 'empty', 0, false], [22, 'update', 0, false], [22, 'new', 1, true], [22, 'new', 3, true],
-    [23, 'update', 0, false], [23, 'new', 1, true], [24, 'update', 0, false], [24, 'new', 1, true],
+    [22, 'empty', 0, false], [22, 'update', 0, false], [22, 'new', 1, false], [22, 'new', 2, false], [22, 'new', 3, true],
+    [23, 'update', 0, false], [23, 'new', 1, false],
+    [24, 'empty', 0, false], [24, 'update', 0, false], [24, 'new', 1, true],
     [21, 'new', 1, false], [21, 'update', 0, false], [21, 'new', 3, false], [21, 'new', 4, true],
 ]) {
     const scope = worldCapacityScope(count);
@@ -4708,18 +4709,22 @@ for (const count of [21, 22, 23, 24]) {
     assert.ok(systemPrompt.includes(JSON.stringify(scope.world.items.map(item => item.id))));
     assert.match(systemPrompt, /长期宏观索引.*不是逐批事件日志.*不能复制逐条事件.*禁止为本批凑数/);
     assert.match(systemPrompt, /无法由已有条目覆盖、长期跨事件的宏观变化/);
-    if (count === 21) assert.doesNotMatch(systemPrompt, /近上限硬约束/);
-    else assert.match(systemPrompt, /近上限硬约束.*禁止新增任何新 ID.*只允许更新已有 ID 或返回空 world\.upserts=\[\].*即使已有 24 项，仍允许更新已有 ID/);
+    assert.match(systemPrompt, /新增后总数不得超过 24 项/);
+    assert.doesNotMatch(systemPrompt, /未到 22 项|至少 22 项|近上限硬约束/);
+    if (count < 24) {
+        assert.match(systemPrompt, /当前未满 24 项，允许基于本批明确事实在容量内新增 ID，不要求凑满/);
+        assert.doesNotMatch(systemPrompt, /容量硬约束|禁止新增任何新 ID/);
+    } else assert.match(systemPrompt, /容量硬约束.*当前已达到 24 项.*禁止新增任何新 ID.*只允许更新已有 ID 或返回空 world\.upserts=\[\].*仍允许更新已有 ID/);
 }
-const capacityControllerScope = worldCapacityScope(22);
+const capacityControllerScope = worldCapacityScope(24);
 const capacityControllerBefore = structuredClone(capacityControllerScope);
 const capacityControllerDto = batchEmpty();
 capacityControllerDto.world.upserts = [{ id: 'private-world-new', name: '敏感名称标记', summary: '敏感正文标记' }];
 const capacityController = createTodayTrendGenerationController({ getCtx: () =>({}), gather: async () => ({}),
     buildGeneration: () => ({ systemPrompt: '', userPrompt: '' }), callAI: async () => JSON.stringify(capacityControllerDto), now: () => 100 });
-await assert.rejects(() => capacityController.generate({ scope: capacityControllerScope, preset: valid.presets.preset, historyBatch: [] }), worldCapacityError(22, 1));
+await assert.rejects(() => capacityController.generate({ scope: capacityControllerScope, preset: valid.presets.preset, historyBatch: [] }), worldCapacityError(24, 1));
 assert.deepEqual(capacityControllerScope, capacityControllerBefore);
-console.log('S6 world capacity: 12 materialize cases, 4 history prompts, generation error passthrough passed');
+console.log('S6 world capacity: 14 materialize cases, 4 history prompts, generation error passthrough passed');
 
 const batchDto = batchEmpty();
 batchDto.dynamics.appendStages.push({ eventId: 'service', stages: ['批量最终进展'] });
@@ -8064,4 +8069,160 @@ await new Promise(resolve => setTimeout(resolve, 0));
 assert.equal(phase11ControllerContainer.innerHTML, phase11BeforeDestroyHtml, 'controller destroy 后 retention in-flight 回调不得写 DOM');
 globalThis.FormData = phase11OriginalFormData;
 
+// === 动态事件追踪容量契约：normal 与 history 分别注入 ===
+const capacityScope = {
+    world: { items: [] },
+    reputation: { circles: [] },
+    factions: [],
+    dynamics: {
+        active: [
+            { id: 'cap-a', type: 'normal', lifecycle: 'active', outcome: null, finalResult: null, stages: [], latestStage: '' },
+            { id: 'cap-b', type: 'incident', lifecycle: 'active', outcome: null, finalResult: null, stages: [], latestStage: '' },
+            { id: 'cap-c', type: 'rumor', lifecycle: 'active', outcome: null, finalResult: null, stages: [], latestStage: '' },
+            { id: 'cap-d', type: 'underground', lifecycle: 'active', outcome: null, finalResult: null, stages: [], latestStage: '' },
+        ],
+        archived: [],
+    },
+    dynamicsSettings: {
+        trackingLimit: 3,
+        autoComplete: false,
+        archiveCompleted: false,
+        incident: { enabled: false },
+    },
+};
+const capacityPreset = {
+    moduleRules: { world: '', reputation: '', faction: '', dynamics: '' },
+    moduleSchemas: { worldItems: '', reputationCircles: '', factionGuidance: '' },
+    dynamicsRules: { general: '', incident: '', rumor: '', underground: '' },
+};
+const capacityContext = {
+    characterName: '容量测试角色',
+    storageId: 'capacity-test',
+    user: { name: '', description: '' },
+    character: { description: '', personality: '', scenario: '', firstMessage: '', exampleMessages: [] },
+    source: { includeExistingChat: true, userRequirements: '' },
+    worldBookText: '',
+    mainChatText: '',
+    latestChatText: '',
+};
+const normalCapacityPrompt = buildCanonicalTodayTrendGenerationEnvelope({
+    context: capacityContext, preset: capacityPreset, scope: capacityScope, assistantCount: 0,
+});
+assert.match(normalCapacityPrompt.systemPrompt, /动态事件追踪容量：active=4\/3/, '普通路径必须按 scope.dynamics.active 真实计数动态投影 active/trackingLimit');
+assert.match(normalCapacityPrompt.systemPrompt, /剩余 0/, '普通路径必须投影 remaining=0');
+assert.match(normalCapacityPrompt.systemPrompt, /normal=1 incident=1 rumor=1 underground=1/, '普通路径必须按四类共享 active 动态统计');
+assert.match(normalCapacityPrompt.systemPrompt, /已满/, '普通路径在 active>limit 时必须进入已满分支');
+assert.match(normalCapacityPrompt.systemPrompt, /明确事实支持的真实终局/, '普通路径已满必须要求本轮出现明确事实支持的真实终局');
+assert.match(normalCapacityPrompt.systemPrompt, /不得为了腾位改 type/, '普通路径已满必须禁止为了腾位改 type');
+assert.match(normalCapacityPrompt.systemPrompt, /地下线 absorbed/, '普通路径必须保留地下线 absorbed 承接');
+assert.doesNotMatch(normalCapacityPrompt.systemPrompt, /自动删除/, '普通路径不得包含自动删除事件');
+assert.doesNotMatch(normalCapacityPrompt.systemPrompt, /自动归档/, '普通路径不得包含自动归档事件');
+const historyCapacityPrompt = buildCanonicalTodayTrendGenerationEnvelope({
+    context: capacityContext, preset: capacityPreset, scope: capacityScope, assistantCount: 0,
+    historyBatch: [{ role: 'user', content: '测试消息' }],
+});
+assert.match(historyCapacityPrompt.systemPrompt, /动态事件追踪容量：active=4\/3/, '历史批路径必须按 scope.dynamics.active 真实计数动态投影 active/trackingLimit');
+assert.match(historyCapacityPrompt.systemPrompt, /剩余 0/, '历史批路径必须投影 remaining=0');
+assert.match(historyCapacityPrompt.systemPrompt, /normal=1 incident=1 rumor=1 underground=1/, '历史批路径必须按四类共享 active 动态统计');
+assert.match(historyCapacityPrompt.systemPrompt, /已满/, '历史批路径在 active>limit 时必须进入已满分支');
+assert.match(historyCapacityPrompt.systemPrompt, /appendStages/, '历史批路径未满必须以 appendStages 表达追加，禁止切碎');
+assert.match(historyCapacityPrompt.systemPrompt, /本批 create 不得在本批被 archive/, '历史批路径已满必须禁止 archive 引用本批 create');
+assert.match(historyCapacityPrompt.systemPrompt, /history_batch_data 明确支持真实终局/, '历史批路径已满必须要求 history_batch_data 支持真实终局');
+assert.match(historyCapacityPrompt.systemPrompt, /本批 create 必须为 \[\]/, '历史批路径已满条件不满足时 create 必须为 []');
+assert.doesNotMatch(historyCapacityPrompt.systemPrompt, /自动删除/, '历史批路径不得包含自动删除事件');
+assert.doesNotMatch(historyCapacityPrompt.systemPrompt, /自动归档/, '历史批路径不得包含自动归档事件');
+assert.match(historyCapacityPrompt.systemPrompt, /当前世界态势 0\/24 项/, '世界 S6 硬 24 项容量参考必须保留');
+assert.match(historyCapacityPrompt.systemPrompt, /当前未满 24 项，允许基于本批明确事实在容量内新增 ID，不要求凑满/, '世界 S6 未满 24 项分支文案必须保留');
+// === 动态事件追踪容量契约：未满分支（active<trackingLimit）独立因果新建 + 同主题追加/关联 ===
+const notFullCapacityScope = {
+    world: { items: [] },
+    reputation: { circles: [] },
+    factions: [],
+    dynamics: {
+        active: [
+            { id: 'nf-a', type: 'normal', lifecycle: 'active', outcome: null, finalResult: null, stages: [], latestStage: '' },
+            { id: 'nf-b', type: 'incident', lifecycle: 'active', outcome: null, finalResult: null, stages: [], latestStage: '' },
+            { id: 'nf-c', type: 'rumor', lifecycle: 'active', outcome: null, finalResult: null, stages: [], latestStage: '' },
+            { id: 'nf-d', type: 'underground', lifecycle: 'active', outcome: null, finalResult: null, stages: [], latestStage: '' },
+        ],
+        archived: [],
+    },
+    dynamicsSettings: {
+        trackingLimit: 5,
+        autoComplete: false,
+        archiveCompleted: false,
+        incident: { enabled: false },
+    },
+};
+const notFullNormalPrompt = buildCanonicalTodayTrendGenerationEnvelope({
+    context: capacityContext, preset: capacityPreset, scope: notFullCapacityScope, assistantCount: 0,
+});
+assert.match(notFullNormalPrompt.systemPrompt, /动态事件追踪容量：active=4\/5/, '未满分支普通路径必须按真实计数动态投影 active/trackingLimit');
+assert.match(notFullNormalPrompt.systemPrompt, /剩余 1/, '未满分支普通路径必须投影 remaining=1');
+assert.match(notFullNormalPrompt.systemPrompt, /normal=1 incident=1 rumor=1 underground=1/, '未满分支普通路径必须按四类共享 active 动态统计');
+assert.match(notFullNormalPrompt.systemPrompt, /未满/, '未满分支普通路径必须进入未满分支');
+assert.match(notFullNormalPrompt.systemPrompt, /只按实际独立因果新建事件/, '未满分支普通路径新建必须仅限独立因果');
+assert.match(notFullNormalPrompt.systemPrompt, /同主题、同一因果链或同一进程必须保持既有 ID 并在原事件上追加真实阶段或相关关联/, '未满分支普通路径同主题必须保持既有 ID 并追加真实阶段或相关关联');
+assert.doesNotMatch(notFullNormalPrompt.systemPrompt, /已满/, '未满分支普通路径不得进入已满分支');
+assert.doesNotMatch(notFullNormalPrompt.systemPrompt, /自动删除|自动归档/, '未满分支普通路径不得包含自动删除或自动归档');
+const notFullHistoryPrompt = buildCanonicalTodayTrendGenerationEnvelope({
+    context: capacityContext, preset: capacityPreset, scope: notFullCapacityScope, assistantCount: 0,
+    historyBatch: [{ role: 'user', content: '测试消息' }],
+});
+assert.match(notFullHistoryPrompt.systemPrompt, /动态事件追踪容量：active=4\/5/, '未满分支历史批路径必须按真实计数动态投影 active/trackingLimit');
+assert.match(notFullHistoryPrompt.systemPrompt, /剩余 1/, '未满分支历史批路径必须投影 remaining=1');
+assert.match(notFullHistoryPrompt.systemPrompt, /normal=1 incident=1 rumor=1 underground=1/, '未满分支历史批路径必须按四类共享 active 动态统计');
+assert.match(notFullHistoryPrompt.systemPrompt, /未满/, '未满分支历史批路径必须进入未满分支');
+assert.match(notFullHistoryPrompt.systemPrompt, /create 仅在确有全新独立因果时新建事件/, '未满分支历史批路径新建必须仅限独立因果');
+assert.match(notFullHistoryPrompt.systemPrompt, /同主题或同一因果链必须保持既有 ID 并使用 appendStages 追加真实阶段/, '未满分支历史批路径同主题必须通过 appendStages 追加既有事件');
+assert.match(notFullHistoryPrompt.systemPrompt, /appendStages\.eventId 只能指向既有 active 或本批 create 的事件/, '未满分支历史批路径 appendStages.eventId 必须指向既有 active 或本批 create');
+assert.doesNotMatch(notFullHistoryPrompt.systemPrompt, /已满/, '未满分支历史批路径不得进入已满分支');
+assert.doesNotMatch(notFullHistoryPrompt.systemPrompt, /本批 create 不得在本批被 archive/, '未满分支历史批路径不得套用已满硬约束');
+assert.doesNotMatch(notFullHistoryPrompt.systemPrompt, /自动删除|自动归档/, '未满分支历史批路径不得包含自动删除或自动归档');
+// === 动态事件追踪容量契约：trackingLimit 非法/缺失 → 禁止 create，禁止字面量 24 回退 ===
+const makeInvalidLimitScope = (mutator) => {
+    const clone = {
+        world: { items: [] },
+        reputation: { circles: [] },
+        factions: [],
+        dynamics: {
+            active: [
+                { id: 'inv-a', type: 'normal', lifecycle: 'active', outcome: null, finalResult: null, stages: [], latestStage: '' },
+                { id: 'inv-b', type: 'incident', lifecycle: 'active', outcome: null, finalResult: null, stages: [], latestStage: '' },
+                { id: 'inv-c', type: 'rumor', lifecycle: 'active', outcome: null, finalResult: null, stages: [], latestStage: '' },
+                { id: 'inv-d', type: 'underground', lifecycle: 'active', outcome: null, finalResult: null, stages: [], latestStage: '' },
+            ],
+            archived: [],
+        },
+        dynamicsSettings: {
+            autoComplete: false,
+            archiveCompleted: false,
+            incident: { enabled: false },
+        },
+    };
+    if (mutator) mutator(clone);
+    return clone;
+};
+const invalidLimitCases = [
+    { name: '缺失', scope: makeInvalidLimitScope() },
+    { name: '0', scope: makeInvalidLimitScope((s) => { s.dynamicsSettings.trackingLimit = 0; }) },
+    { name: '负数', scope: makeInvalidLimitScope((s) => { s.dynamicsSettings.trackingLimit = -1; }) },
+    { name: '非整数', scope: makeInvalidLimitScope((s) => { s.dynamicsSettings.trackingLimit = 5.5; }) },
+    { name: '字符串', scope: makeInvalidLimitScope((s) => { s.dynamicsSettings.trackingLimit = '5'; }) },
+];
+for (const { name, scope } of invalidLimitCases) {
+    const normalPrompt = buildCanonicalTodayTrendGenerationEnvelope({
+        context: capacityContext, preset: capacityPreset, scope, assistantCount: 0,
+    });
+    const historyPrompt = buildCanonicalTodayTrendGenerationEnvelope({
+        context: capacityContext, preset: capacityPreset, scope, assistantCount: 0,
+        historyBatch: [{ role: 'user', content: '测试消息' }],
+    });
+    assert.doesNotMatch(normalPrompt.systemPrompt, /动态事件追踪容量[^\n]*\/24/, `trackingLimit=${name} 普通路径容量行禁止出现 /24 字面量回退`);
+    assert.doesNotMatch(historyPrompt.systemPrompt, /动态事件追踪容量[^\n]*\/24/, `trackingLimit=${name} 历史批路径容量行禁止出现 /24 字面量回退`);
+    assert.match(normalPrompt.systemPrompt, /trackingLimit 设置无效或缺失/, `trackingLimit=${name} 普通路径必须显式声明设置无效`);
+    assert.match(historyPrompt.systemPrompt, /trackingLimit 设置无效或缺失/, `trackingLimit=${name} 历史批路径必须显式声明设置无效`);
+    assert.match(normalPrompt.systemPrompt, /本轮禁止 create 新事件/, `trackingLimit=${name} 普通路径必须本轮禁止 create`);
+    assert.match(historyPrompt.systemPrompt, /本批 create 必须为 \[\]/, `trackingLimit=${name} 历史批路径本批 create 必须为 []`);
+}
 console.log('Today trend contracts verified.');
