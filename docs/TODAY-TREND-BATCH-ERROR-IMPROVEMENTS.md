@@ -296,3 +296,15 @@ S2（type/outcome 表 + 日期反例）、S3（字段错误契约）、S4（多�
 - 六项顺序验证均exit=0：npm.cmd run build（Done in 20ms）；node scripts/check-today-trend.mjs（Today trend contracts verified.）；node scripts/check-behavior.mjs（Behavior configuration verified.）；node scripts/check-contracts.mjs（1550865 bytes；Static contracts verified.）；node --check index.js（无输出）；根cwd git -C public/mobile-ui-private diff --check（仅LF/CRLF warnings）。测试故障注入警告原样保留。
 - 风险/待验收：预检与原权威校验并存，后续规则变更须同步维护；超过20条仅保留前20条而摘要计数仍为全部；当前测试未对normalize注入spy，靠入口throw的控制流证明；真实AI/宿主及全量check未运行。S4不增加outcome校验，不实现retry/correction/第二次AI。
 - 回滚仅逆向本轮三个源码/测试文件新增hunk、文档追加，再build并重跑六项；不得回退整个累计脏文件。既有S1/S2/S3和未跟踪UPSTREAM文档保留，不操作索引或用户数据。
+
+
+## S6 世界态势容量修复（world-cap-1）
+
+- 助手，taskId=world-cap-prompt-and-guard；sliceId=world-cap-guard；implementationId=world-cap-1；basedOnReportId=null（未提供）。起始 HEAD=26a71675600b929a7c8a4ac3f27643ab05abe1ea，索引为空，仅未跟踪 UPSTREAM-MERGE-STATUS.md；该文档未触碰。
+- envelopes.js:105–106 仅历史批新增长期宏观索引、非逐批日志、禁止逐条复制/凑数、未满22时新ID须无法由已有条目覆盖且长期跨事件；动态当前N/24及最多24个已有ID的JSON.stringify清单。N>=22禁止任何新ID，只更新已有ID或空upserts；24项仍可更新已有ID。
+- batch-delta.js:40–53 私有guard：existing=previous.length，newUnique为string ID中不在existingIds的唯一集合大小；existing>=22且newUnique>0拒绝，否则existing+newUnique>24拒绝。246–247在validateBatch成功后立即执行，早于world物化。独立TT_WORLD_CAPACITY仅固定中文和计数，不创建details/cause/raw，不带原ID/名称/正文。generation.js:363原样透传。
+- check-today-trend.mjs:4671–4723新增12组真实materialize：22空/旧ID更新通过，22新增1/3拒绝；23及24旧ID更新通过/新增1拒绝；21新增1/3及旧ID更新通过/新增4拒绝。成功和拒绝scope均不变；错误code、计数、中文恢复指引、隐私字段缺失均断言。另4组N=21/22/23/24历史prompt、1组generation透传通过。
+- 顺序验证全部exit=0：node --check src/today-trend-batch-delta.js、node --check src/prompts/today-trend/envelopes.js（均无输出）；npm.cmd run build（Done in 20ms）；node scripts/check-today-trend.mjs（S6矩阵通过，Today trend contracts verified.）；node scripts/check-behavior.mjs（Behavior configuration verified.）；node scripts/check-contracts.mjs（1552826 bytes，Static contracts verified.）；node --check index.js（无输出）；根cwd git -C public/mobile-ui-private diff --check（仅LF/CRLF warnings）。测试故障注入日志未屏蔽。
+- S4 validateBatch/TT_BATCH_VALIDATION聚合及M4/M5断言未改，S1–S4既有行为保留；S5 retry/correction未实施；UI/schema/model text=600/阶段240/用户数据未改。公共签名与磁盘格式不变，无迁移；普通生成不受新增guard约束。
+- 风险：模型仍可能违反宏观语义，离线测试不证明真实AI事实判断；未运行真实宿主/AI或全量check。仅授权内层六文件进入中文提交“限制今日风向世界态势新增容量”；根三份计划追加不进内层索引。提交结果以实施报告为准。
+- 回滚方案（未执行）：仅逆向本修复源码/测试和追加文档，再build重生index.js并重跑验证；保留既有提交、UPSTREAM文档及用户数据，禁止reset/checkout。

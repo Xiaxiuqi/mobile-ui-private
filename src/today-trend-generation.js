@@ -360,7 +360,7 @@ export function createTodayTrendGenerationController({
         } catch (error) {
             if (error?.name === 'AbortError') throw error;
             if (typeof error?.code === 'string'
-                && (error.code === 'TT_BATCH_VALIDATION' || error.code.startsWith('TT_HISTORY_') || error.code.startsWith('TT_DATE_'))) throw error;
+                && (error.code === 'TT_BATCH_VALIDATION' || error.code === 'TT_WORLD_CAPACITY' || error.code.startsWith('TT_HISTORY_') || error.code.startsWith('TT_DATE_'))) throw error;
             throw new Error(`今日风向生成失败：${generationErrorMessage(error)}`, { cause: error });
         }
     };

@@ -4668,6 +4668,59 @@ const batchEmpty = () => ({ world: { upserts: [] }, reputation: { upserts: [] },
     dynamics: { create: [], appendStages: [], archive: [] }, history: { events: [] } });
 const batchBase = buildReadOnlyShadow(migratedValidV2).scopes.chat;
 assert.deepEqual(materializeTodayTrendBatchDelta(batchEmpty(), batchBase, 100).parsed.dynamics, batchBase.dynamics);
+// S6: world capacity is independent of S4 validation and never mutates its input.
+const worldCapacityScope = count => {
+    const scope = structuredClone(buildReadOnlyShadow(migratedValidV2).scopes.chat);
+    scope.world.items = Array.from({ length: count }, (_, i) => ({ id: `private-world-${i}`, name: '敏感名称标记', summary: '敏感正文标记' }));
+    return scope;
+};
+const worldCapacityError = (existing, added) => error => {
+    assert.equal(error.code, 'TT_WORLD_CAPACITY');
+    assert.ok(error.message.includes(`现有 ${existing} 项`));
+    assert.ok(error.message.includes(`新增 ${added} 项`));
+    assert.match(error.message, /上限 24 项.*只能更新已有 ID.*空 world\.upserts=\[\]/);
+    assert.doesNotMatch(error.message, /private-world|敏感名称标记|敏感正文标记/);
+    for (const key of ['details', 'cause', 'raw']) assert.equal(Object.hasOwn(error, key), false);
+    return true;
+};
+for (const [count, mode, added, rejected] of [
+    [22, 'empty', 0, false], [22, 'update', 0, false], [22, 'new', 1, true], [22, 'new', 3, true],
+    [23, 'update', 0, false], [23, 'new', 1, true], [24, 'update', 0, false], [24, 'new', 1, true],
+    [21, 'new', 1, false], [21, 'update', 0, false], [21, 'new', 3, false], [21, 'new', 4, true],
+]) {
+    const scope = worldCapacityScope(count);
+    const before = structuredClone(scope);
+    const dto = batchEmpty();
+    dto.world.upserts = mode === 'update' ? [{ ...scope.world.items[0], summary: '更新后的宏观变化' }]
+        : Array.from({ length: added }, (_, i) => ({ id: `private-world-new-${i}`, name: '敏感名称标记', summary: '敏感正文标记' }));
+    if (rejected) assert.throws(() => materializeTodayTrendBatchDelta(dto, scope, 100), worldCapacityError(count, added));
+    else {
+        const result = materializeTodayTrendBatchDelta(dto, scope, 100).parsed.world.items;
+        assert.equal(result.length, count + added);
+        assert.deepEqual(result, mode === 'update' ? [dto.world.upserts[0], ...before.world.items.slice(1)] : [...before.world.items, ...dto.world.upserts]);
+    }
+    assert.deepEqual(scope, before, '容量矩阵成功或拒绝均不得改写 scope');
+}
+for (const count of [21, 22, 23, 24]) {
+    const scope = worldCapacityScope(count);
+    const { systemPrompt } = buildTodayTrendGenerationEnvelope({ context: {}, preset: valid.presets.preset, scope, historyBatch: [] });
+    assert.ok(systemPrompt.includes(`当前世界态势 ${count}/24 项`));
+    assert.ok(systemPrompt.includes(JSON.stringify(scope.world.items.map(item => item.id))));
+    assert.match(systemPrompt, /长期宏观索引.*不是逐批事件日志.*不能复制逐条事件.*禁止为本批凑数/);
+    assert.match(systemPrompt, /无法由已有条目覆盖、长期跨事件的宏观变化/);
+    if (count === 21) assert.doesNotMatch(systemPrompt, /近上限硬约束/);
+    else assert.match(systemPrompt, /近上限硬约束.*禁止新增任何新 ID.*只允许更新已有 ID 或返回空 world\.upserts=\[\].*即使已有 24 项，仍允许更新已有 ID/);
+}
+const capacityControllerScope = worldCapacityScope(22);
+const capacityControllerBefore = structuredClone(capacityControllerScope);
+const capacityControllerDto = batchEmpty();
+capacityControllerDto.world.upserts = [{ id: 'private-world-new', name: '敏感名称标记', summary: '敏感正文标记' }];
+const capacityController = createTodayTrendGenerationController({ getCtx: () =>({}), gather: async () => ({}),
+    buildGeneration: () => ({ systemPrompt: '', userPrompt: '' }), callAI: async () => JSON.stringify(capacityControllerDto), now: () => 100 });
+await assert.rejects(() => capacityController.generate({ scope: capacityControllerScope, preset: valid.presets.preset, historyBatch: [] }), worldCapacityError(22, 1));
+assert.deepEqual(capacityControllerScope, capacityControllerBefore);
+console.log('S6 world capacity: 12 materialize cases, 4 history prompts, generation error passthrough passed');
+
 const batchDto = batchEmpty();
 batchDto.dynamics.appendStages.push({ eventId: 'service', stages: ['批量最终进展'] });
 batchDto.dynamics.archive.push({ eventId: 'service', outcome: 'resolved', finalResult: '批次完成' });

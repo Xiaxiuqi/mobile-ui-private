@@ -37,6 +37,21 @@ const upsert = (previous, delta, path) => {
     return result;
 };
 
+// Independent world capacity policy; never part of S4 field-error aggregation.
+const guardWorldCapacity = (previous, upserts) => {
+    if (!Array.isArray(upserts)) return;
+    const existing = previous.length;
+    const existingIds = new Set(previous.map(item => item.id));
+    const newUnique = new Set(upserts.filter(item => typeof item?.id === 'string' && !existingIds.has(item.id)).map(item => item.id)).size;
+    const reject = () => {
+        const error = new Error(`世界态势容量限制：现有 ${existing} 项，本批新增 ${newUnique} 项，上限 24 项；只能更新已有 ID 或返回空 world.upserts=[]。`);
+        error.code = 'TT_WORLD_CAPACITY';
+        throw error;
+    };
+    if (existing >= 22 && newUnique > 0) reject();
+    if (existing + newUnique > 24) reject();
+};
+
 // New arrays replace the complete module; legacy upserts retain their original merge semantics.
 const factionsFor = (previous, value) => {
     if (value === null) return null;
@@ -229,6 +244,7 @@ const validateBatch = (value, scope) => {
 // Transport only: never persisted. Existing facade/canonical schemas stay unchanged.
 export function materializeTodayTrendBatchDelta(value, scope, timestamp) {
     validateBatch(value, scope);
+    guardWorldCapacity(scope.world.items, value.world.upserts);
     exact(value, ['world', 'reputation', 'factions', 'dynamics', 'history']);
     exact(value.dynamics, ['create', 'appendStages', 'archive'], 'dynamics');
     exact(value.history, ['events'], 'history');
