@@ -236,6 +236,27 @@ export function createTodayTrendScheduler({
     let terminalTask = null;
     let phase = 'idle';
     let lastError = null;
+    let lastErrorDetails = null;
+    const safeBatchError = error => {
+        if (error?.code !== 'TT_BATCH_VALIDATION' || !Array.isArray(error.details) || error.details.length < 1 || error.details.length > 20) return null;
+        const keys = ['object', 'path', 'expected', 'actual'];
+        const slot = /^(?:\$|world|reputation|factions|dynamics|history)(?:\[\d{1,10}\]|\.(?:upserts|create|appendStages|archive|events|id|eventId|details|label|value|relation|status|evaluation|parentId|relatedFactionIds|name|summary|stages|initialStage|type|title|stageLabel|origin|participants|relatedEventIds|outcome|finalResult|daySummaries|periodSummaries|world|reputation|factions|dynamics|history))*$/;
+        const expected = new Set(['exact-fields', 'array', 'unique-id', 'complete-id-set', 'internal-id-or-null',
+            'non-self-id', 'internal-id', 'non-self-non-parent-child-id', 'non-empty-array', 'non-empty-string-max-240', 'new-id', 'active-id', 'archive-enabled']);
+        const actual = new Set(['missing', 'null', 'array', 'object', 'string', 'number', 'boolean',
+            'invalid-id', 'duplicate', 'out-of-range-length', 'self', 'parent-child', 'external', 'unchecked']);
+        const details = [];
+        for (const detail of error.details) {
+            if (!detail || typeof detail !== 'object' || Reflect.ownKeys(detail).length !== 4
+                || keys.some(key => !Object.hasOwn(detail, key) || typeof detail[key] !== 'string')) return null;
+            if (detail.object.length > 240 || detail.path.length > 240 || !slot.test(detail.object) || !slot.test(detail.path)
+                || !expected.has(detail.expected) || !actual.has(detail.actual)) return null;
+            details.push(Object.freeze({
+                object: detail.object, path: detail.path, expected: detail.expected, actual: detail.actual,
+            }));
+        }
+        return Object.freeze({ code: 'TT_BATCH_VALIDATION', details: Object.freeze(details) });
+    };
     const baselines = new Map();
     const observations = new Map();
     const listeners = new Set();
@@ -261,6 +282,7 @@ export function createTodayTrendScheduler({
         phase,
         task: publicTask(activeTask || terminalTask),
         lastError,
+        lastErrorDetails,
         baselines: Object.fromEntries(baselines),
         observationCount: observations.size,
     });
@@ -274,9 +296,10 @@ export function createTodayTrendScheduler({
         }
         return snapshot;
     };
-    const setPhase = (nextPhase, error = lastError) => {
+    const setPhase = (nextPhase, error = lastError, details = null) => {
         phase = nextPhase;
         lastError = error;
+        lastErrorDetails = nextPhase === 'failed' ? details : null;
         if (nextPhase === 'idle' || nextPhase === 'completed') terminalTask = null;
         return publish();
     };
@@ -461,8 +484,8 @@ export function createTodayTrendScheduler({
                     const generated = await controller.generate({
                         signal: task.abortController.signal, scope: batchScope, preset: batchPreset, storageId: id,
                         characterId: batchScope.characterId, characterName: batchScope.characterName,
-                        assistantCount: batchAssistantCount, allowIncident: rollIncident(batchScope.dynamicsSettings?.incident?.enabled
-                            ? (incidentProbability === undefined ? batchScope.dynamicsSettings.incident.probability : incidentProbability) : 0),
+                        assistantCount: batchAssistantCount, allowIncident: false,
+                        allowHistoricalIncidentRecord: batchScope.dynamicsSettings?.incident?.enabled === true,
                         target: null, summaryOnly: false, storyDate: trustedStoryDateFor(id), promptScope: batchPromptScope,
                         historyBatch: buildHistoryBatch(batchChat, historyPlan, batchIndex),
                         onPhase: next => { if (isActive(task)) setPhase(next, null); },
@@ -544,7 +567,8 @@ export function createTodayTrendScheduler({
             const trustedStoryDate = trustedStoryDateFor(id);
             const configuredProbability = scope.dynamicsSettings?.incident?.enabled
                 ? scope.dynamicsSettings.incident.probability : 0;
-            const effectiveIncidentProbability = incidentProbability === undefined ? configuredProbability : incidentProbability;
+            const effectiveIncidentProbability = scope.dynamicsSettings?.incident?.enabled
+                ? (incidentProbability === undefined ? configuredProbability : incidentProbability) : 0;
             const promptScope = getPromptScope ? await getPromptScope(id, canonicalRerollSource) : null;
             if (getPromptScope && typeof promptScope !== 'string') throw new Error('今日风向 canonical prompt scope 不可用');
             if (!isActive(task)) throw cancelled();
@@ -620,7 +644,7 @@ export function createTodayTrendScheduler({
                     setPhase('canceled', null);
                 } else {
                     terminalTask = task;
-                    setPhase('failed', error?.message || '今日风向生成失败');
+                    setPhase('failed', error?.message || '今日风向生成失败', safeBatchError(error));
                 }
             }
             throw error;
@@ -682,7 +706,7 @@ export function createTodayTrendScheduler({
             if (activeTask === task) {
                 terminalTask = task;
                 if (error?.name === 'AbortError' || !isActive(task)) setPhase('canceled', null);
-                else setPhase('failed', error?.message || '今日风向回退失败');
+                else setPhase('failed', error?.message || '今日风向回退失败', safeBatchError(error));
             }
             throw error;
         } finally {

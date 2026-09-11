@@ -171,7 +171,7 @@ function assertTargetedGeneration(parsed, scope, target) {
     if (module === 'dynamics') targetedDynamics(scope.dynamics, parsed.dynamics, target.itemId);
 }
 
-function normalizeGeneration(parsed, { scope, preset, allowIncident }) {
+function normalizeGeneration(parsed, { scope, preset, allowIncident, allowHistoricalIncidentRecord = false }) {
     if (!scope || !preset) throw new TypeError('今日风向生成缺少当前资料');
     const generatedFactions = parsed.factions === null ? null : sanitizeFactionRelations(parsed.factions);
     const normalizeEventLatestStage = event => {
@@ -233,7 +233,8 @@ function normalizeGeneration(parsed, { scope, preset, allowIncident }) {
         [...scope.dynamics.active, ...scope.dynamics.archived].filter(event => event.type === type).map(event => event.id),
     )]));
     const enabledByType = {
-        incident: allowIncident,
+        incident: scope.dynamicsSettings.incident.enabled === true
+            && (allowIncident === true || allowHistoricalIncidentRecord === true),
         rumor: scope.dynamicsSettings.rumor.enabled,
         underground: scope.dynamicsSettings.underground.enabled,
     };
@@ -316,8 +317,13 @@ export function createTodayTrendGenerationController({
                 worldBookNames: input.preset.source?.worldBookNames,
                 includeExistingChat: input.preset.source?.includeExistingChat, userRequirements: input.preset.source?.userRequirements });
             assertActive(input.signal);
+            // Request-only permissions: historical recording never authorizes proactive generation.
+            const historical = Array.isArray(input.historyBatch);
+            const allowIncident = !historical && input.scope.dynamicsSettings?.incident?.enabled === true && input.allowIncident === true;
+            const allowHistoricalIncidentRecord = historical && input.scope.dynamicsSettings?.incident?.enabled === true
+                && input.allowHistoricalIncidentRecord === true;
             const prompts = buildGeneration({ context, preset: input.preset, scope: input.scope, promptScope: input.promptScope,
-                assistantCount: input.assistantCount, allowIncident: input.allowIncident === true, target: input.target,
+                assistantCount: input.assistantCount, allowIncident, allowHistoricalIncidentRecord, target: input.target,
                 storyDate: input.storyDate ?? null, summaryOnly: input.summaryOnly === true, historyBatch: input.historyBatch });
             input.onPhase?.('generating');
             const raw = await callAI(prompts.systemPrompt, prompts.userPrompt, { isolated: true, signal: input.signal });
@@ -339,9 +345,9 @@ export function createTodayTrendGenerationController({
                         outcome: operation.outcome, finalResult: operation.finalResult });
                 }
                 normalizeUpdate(candidate, { scope: input.scope, preset: input.preset,
-                    allowIncident: input.allowIncident === true, now });
+                    allowIncident, allowHistoricalIncidentRecord, now });
                 return { context, scope: normalizeUpdate(parsed, { scope: input.scope, preset: input.preset,
-                    allowIncident: input.allowIncident === true, now }), history: parsed.history,
+                    allowIncident, allowHistoricalIncidentRecord, now }), history: parsed.history,
                     archives: delta.archives, raw };
             }
             if (input.summaryOnly === true
@@ -350,11 +356,11 @@ export function createTodayTrendGenerationController({
             }
             assertTargetedGeneration(parsed, input.scope, input.target);
             return { context, scope: normalizeUpdate(parsed, { scope: input.scope, preset: input.preset,
-                allowIncident: input.allowIncident === true, now }), history: parsed.history ?? null, raw };
+                allowIncident, now }), history: parsed.history ?? null, raw };
         } catch (error) {
             if (error?.name === 'AbortError') throw error;
             if (typeof error?.code === 'string'
-                && (error.code.startsWith('TT_HISTORY_') || error.code.startsWith('TT_DATE_'))) throw error;
+                && (error.code === 'TT_BATCH_VALIDATION' || error.code.startsWith('TT_HISTORY_') || error.code.startsWith('TT_DATE_'))) throw error;
             throw new Error(`今日风向生成失败：${generationErrorMessage(error)}`, { cause: error });
         }
     };

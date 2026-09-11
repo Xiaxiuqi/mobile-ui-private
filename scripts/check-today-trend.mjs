@@ -4684,14 +4684,17 @@ assert.equal(batchArchivedEvent.stages.at(-1).storyDate, '2025-04-15');
 assert.equal(batchArchivedEvent.createdAt, batchBase.dynamics.active.find(event => event.id === 'service').createdAt);
 assert.equal(JSON.stringify(migratedValidV2), beforeBatch, '候选生成不能半写 canonical 输入');
 const archivedScope = buildReadOnlyShadow(batchArchived).scopes.chat;
-assert.throws(() => materializeTodayTrendBatchDelta(batchDto, archivedScope, 200), /active/);
+assert.throws(() => materializeTodayTrendBatchDelta(batchDto, archivedScope, 200), error => {
+    assert.equal(error.message, '历史批增量校验失败：2处字段错误，0处检查未执行');
+    return error.details.every(detail => detail.expected === 'active-id' && detail.actual === 'external');
+});
 const duplicateStageDto = batchEmpty();
 duplicateStageDto.history.events.push({ eventId: 'service', stages: [], daySummaries: [], periodSummaries: [] });
 assert.throws(() => materializeTodayTrendBatchDelta(duplicateStageDto, batchBase, 100), /字段集合/);
 const batchController = createTodayTrendGenerationController({ getCtx: () => ({}), gather: async () => ({}),
     buildGeneration: () => ({ systemPrompt: '', userPrompt: '' }), callAI: async () => JSON.stringify(batchDto), now: () => 100 });
 const batchGenerated = await batchController.generate({ scope: { ...batchBase, dynamicsSettings: batchCandidate.dynamicsSettings }, preset: buildReadOnlyShadow(migratedValidV2).presets[batchBase.presetId],
-    historyBatch: [], storyDate: '2025-04-15', allowIncident: true });
+    historyBatch: [], storyDate: '2025-04-15', allowHistoricalIncidentRecord: true });
 assert.deepEqual(batchGenerated.archives, batchDto.dynamics.archive);
 assert.equal(batchGenerated.history.events[0].stages[0].text, '批量最终进展');
 const batchControllerCanonical = applyTodayTrendGenerationToV2(migratedValidV2, 'chat', batchGenerated.scope,
@@ -4706,7 +4709,7 @@ createBatch.dynamics.archive.push({ eventId: 'batch-new', outcome: 'resolved', f
 const createController = createTodayTrendGenerationController({ getCtx: () => ({}), gather: async () => ({}),
     buildGeneration: () => ({ systemPrompt: '', userPrompt: '' }), callAI: async () => JSON.stringify(createBatch), now: () => 100 });
 const createInput = { scope: { ...batchBase, dynamicsSettings: batchCandidate.dynamicsSettings },
-    preset: buildReadOnlyShadow(migratedValidV2).presets[batchBase.presetId], historyBatch: [], storyDate: '2025-04-15', allowIncident: true };
+    preset: buildReadOnlyShadow(migratedValidV2).presets[batchBase.presetId], historyBatch: [], storyDate: '2025-04-15', allowHistoricalIncidentRecord: true };
 const createdBatch = await createController.generate(createInput);
 const createdCanonical = applyTodayTrendGenerationToV2(migratedValidV2, 'chat', createdBatch.scope, createdBatch.history,
     { trustedStoryDate: '2025-04-15', assistantCount: 8, generatedAt: 100, archives: createdBatch.archives });
@@ -4758,6 +4761,309 @@ assert.deepEqual(multiPayload.dynamics.archived, migratedValidV2.globalEnvelope.
 assert.equal(JSON.stringify(migratedValidV2), beforeBatch);
 
 
+{
+// Prevent partial faction replacement/data loss and empty-world bootstrap regressions.
+// Existing tests covered event deltas, not complete faction input or world initialization.
+// Retire these fixtures only if the batch transport and its replacement semantics are removed.
+const factionFixture = (id, parentId = null) => ({ id, name: id, summary: '资料', parentId,
+    relatedFactionIds: [], details: [{ label: '职责', value: '巡航' }], relation: { status: 'neutral', evaluation: '暂无交互' } });
+const factionBase = { ...createInput.scope, factions: [factionFixture('old')] };
+const factionRequest = async (factions, scope = factionBase) => createTodayTrendGenerationController({
+    getCtx: () => ({}), gather: async () => ({}), now: () => 100,
+    callAI: async () => JSON.stringify({ ...batchEmpty(), factions }),
+}).generate({ ...createInput, scope });
+assert.equal(materializeTodayTrendBatchDelta({ ...batchEmpty(), factions: null }, factionBase, 100).parsed.factions, null);
+assert.deepEqual((await factionRequest(null)).scope.factions, factionBase.factions);
+const replacement = [factionFixture('child', 'parent'), { ...factionFixture('old'), summary: '已更新资料' }, factionFixture('parent')];
+assert.deepEqual((await factionRequest(replacement)).scope.factions, replacement);
+await assert.rejects(() => factionRequest(replacement.filter(item => item.id !== 'old')), /缺失旧 ID/);
+await assert.rejects(() => factionRequest([factionFixture('old', 'missing')]), /factions\[0\].parentId.*父势力不存在/);
+for (const details of [null, {}, 'text']) {
+    await assert.rejects(() => factionRequest([{ ...factionFixture('old'), details }]), /factions\[0\].details.*expected array/);
+}
+await assert.rejects(() => factionRequest([factionFixture('old', 'old')]), /自身|循环/);
+assert.deepEqual((await factionRequest({ upserts: [] })).scope.factions, factionBase.factions);
+assert.deepEqual((await factionRequest({ upserts: [factionFixture('child', 'old')] })).scope.factions,
+    [...factionBase.factions, factionFixture('child', 'old')]);
+await assert.rejects(() => factionRequest({ upserts: [factionFixture('child', 'missing')] }), /parentId.*父势力不存在/);
+// S3 M4: first-error contract through the real controller/materializer, never raw values.
+const m4Secret = 'PRIVATE-ID-NAME-秘密';
+const m4Cases = [
+    [{ ...factionFixture('old'), details: {} }, 'details', 'array', 'object', /details.*expected array/],
+    [Object.fromEntries(Object.entries(factionFixture('old')).filter(([key]) => key !== 'parentId')), 'parentId', 'exact-fields', 'missing', /字段集合/],
+    [factionFixture('old', m4Secret), 'parentId', 'internal-id-or-null', 'external', /parentId.*父势力不存在/],
+    [factionFixture('old', 'old'), 'parentId', 'non-self-id', 'self', /自身|循环/],
+    [{ ...factionFixture('old'), relatedFactionIds: [m4Secret] }, 'relatedFactionIds', 'internal-id', 'external', /外部关联势力不存在/],
+    [{ ...factionFixture('old'), relatedFactionIds: ['old'] }, 'relatedFactionIds', 'non-self-non-parent-child-id', 'self', /禁止自指或直接父子/],
+    [{ ...factionFixture('old'), relatedFactionIds: ['child'] }, 'relatedFactionIds', 'non-self-non-parent-child-id', 'parent-child', /禁止自指或直接父子/],
+    [factionFixture(` ${m4Secret} `), 'id', 'unique-id', 'invalid-id', /ID 无效或重复/],
+];
+const m4Assert = (error, detail, message) => {
+    assert.equal(error.code, 'TT_BATCH_VALIDATION');
+    assert.deepEqual(error.details, Array.isArray(detail) ? detail : [detail]);
+    for (const entry of error.details) {
+        assert.deepEqual(Reflect.ownKeys(entry).sort(), ['actual', 'expected', 'object', 'path']);
+        assert.equal(Object.isFrozen(entry), true);
+    }
+    assert.deepEqual(Object.keys(error.details[0]).sort(), ['actual', 'expected', 'object', 'path']);
+    assert.equal(Object.isFrozen(error.details), true);
+    assert.equal(Object.isFrozen(error.details[0]), true);
+    assert.equal(JSON.stringify(error.details).includes(m4Secret), false);
+    assert.equal(error.message.includes(m4Secret), false);
+    assert.equal(Object.hasOwn(error, 'cause'), false);
+    assert.match(error.message, message);
+    return true;
+};
+for (const [item, field, expected, actual, message] of m4Cases) {
+    item.name = m4Secret;
+    const detail = { object: 'factions[0]', path: `factions[0].${field}`, expected, actual };
+    const skipped = (object, path, expected) => ({ object, path, expected, actual: 'unchecked' });
+    const expectedDetails = [detail];
+    if (field === 'details') expectedDetails.push(skipped('factions[0].details[0]', 'factions[0].details[0]', 'exact-fields'));
+    if (actual === 'missing') expectedDetails.push(
+        skipped('factions[0]', 'factions[0].details', 'array'),
+        skipped('factions[0].relation', 'factions[0].relation', 'exact-fields'),
+        skipped('factions[0]', 'factions[0].parentId', 'internal-id-or-null'),
+        skipped('factions[0]', 'factions[0].relatedFactionIds', 'internal-id'),
+        skipped('factions[1]', 'factions[1].parentId', 'internal-id-or-null'),
+        skipped('factions[1]', 'factions[1].relatedFactionIds', 'internal-id'),
+    );
+    if (actual === 'invalid-id') expectedDetails.push(
+        skipped('factions', 'factions', 'complete-id-set'),
+        skipped('factions[0]', 'factions[0].parentId', 'internal-id-or-null'),
+        skipped('factions[0]', 'factions[0].relatedFactionIds', 'internal-id'),
+        skipped('factions[1]', 'factions[1].parentId', 'internal-id-or-null'),
+        skipped('factions[1]', 'factions[1].relatedFactionIds', 'internal-id'),
+    );
+    await assert.rejects(() => factionRequest([item, factionFixture('child', 'old')]), error => m4Assert(error,
+        expectedDetails, message));
+}
+const m4Controller = payload => createTodayTrendGenerationController({ getCtx:() => ({}), gather: async () => ({}),
+    now: () => 100, callAI: async () => JSON.stringify(payload) });
+// S4 M5: real controller -> materializer, with independent errors and blocked checks.
+const m5Dto = batchEmpty();
+m5Dto.factions = [{ ...factionFixture('old'), name: m4Secret, details: {} }];
+m5Dto.dynamics.create = [{ ...createBatch.dynamics.create[0], id: m4Secret, initialStage: m4Secret.repeat(30) }];
+m5Dto.dynamics.archive = [{ eventId: 'unknown-active', outcome: 'resolved', finalResult: m4Secret }];
+const m5Details = [
+    { object: 'factions[0]', path: 'factions[0].details', expected: 'array', actual: 'object' },
+    { object: 'factions[0].details[0]', path: 'factions[0].details[0]', expected: 'exact-fields', actual: 'unchecked' },
+    { object: 'dynamics.create[0]', path: 'dynamics.create[0].initialStage', expected: 'non-empty-string-max-240', actual: 'out-of-range-length' },
+    { object: 'dynamics.archive[0]', path: 'dynamics.archive[0].eventId', expected: 'active-id', actual: 'external' },
+];
+const m5Before = JSON.stringify(factionBase);
+await assert.rejects(() => m4Controller(m5Dto).generate({ ...createInput, scope: factionBase }), error => {
+    m4Assert(error, m5Details, /^历史批增量校验失败：3处字段错误，1处检查未执行$/);
+    return true;
+});
+assert.equal(JSON.stringify(factionBase), m5Before);
+const m5Dependency = batchEmpty();
+m5Dependency.dynamics.create = null;
+m5Dependency.dynamics.appendStages = [{ eventId: m4Secret, stages: ['有效阶段'] }];
+m5Dependency.dynamics.archive = [{ eventId: m4Secret, outcome: 'resolved', finalResult: m4Secret }];
+m5Dependency.history.events = [{ eventId: m4Secret, daySummaries: [], periodSummaries: [] }];
+await assert.rejects(() => m4Controller(m5Dependency).generate(createInput), error => m4Assert(error, [
+    { object: 'dynamics.create', path: 'dynamics.create', expected: 'array', actual: 'null' },
+    { object: 'dynamics.appendStages[0]', path: 'dynamics.appendStages[0].eventId', expected: 'active-id', actual: 'unchecked' },
+    { object: 'dynamics.archive[0]', path: 'dynamics.archive[0].eventId', expected: 'active-id', actual: 'unchecked' },
+    { object: 'history.events[0]', path: 'history.events[0].eventId', expected: 'active-id', actual: 'unchecked' },
+], /dynamics.create.*必须为数组/));
+let m5Commits = 0;
+let m5Fail = true;
+let m5Store = structuredClone(valid);
+const m5StoreBefore = JSON.stringify(m5Store);
+const m5Scheduler = createTodayTrendScheduler({
+    controller: { generate: async ({ scope }) => m5Fail
+        ? m4Controller(m5Dto).generate({ ...createInput, scope: factionBase }) : { scope } },
+    committer: { invalidateCommits() {}, commitStore: async update => { m5Commits++; m5Store = update(m5Store); return m5Store; } },
+    getStore: async () => m5Store, getStorageId: () => 'chat', getChat: () => [{ mes: m4Secret }], getFloor: () => 2, now: () => 100,
+});
+for (const clear of [() => m5Scheduler.cancel(), () => m5Scheduler.acknowledge()]) {
+    await assert.rejects(() => m5Scheduler.manual(), /历史批增量校验失败：3处字段错误，1处检查未执行/);
+    const state = m5Scheduler.state();
+    assert.deepEqual(state.lastErrorDetails, { code: 'TT_BATCH_VALIDATION', details: m5Details });
+    assert.equal(Object.isFrozen(state.lastErrorDetails), true);
+    assert.equal(Object.isFrozen(state.lastErrorDetails.details), true);
+    assert.equal(state.lastErrorDetails.details.every(Object.isFrozen), true);
+    assert.equal(JSON.stringify(state).includes(m4Secret), false);
+    assert.equal(m5Commits, 0);
+    assert.equal(JSON.stringify(m5Store), m5StoreBefore);
+    assert.equal(JSON.stringify(factionBase), m5Before);
+    clear();
+    assert.equal(m5Scheduler.state().lastErrorDetails, null);
+}
+await assert.rejects(() => m5Scheduler.manual(), /历史批增量校验失败/);
+m5Fail = false;
+await m5Scheduler.manual();
+assert.equal(m5Scheduler.state().lastErrorDetails, null);
+assert.equal(m5Scheduler.state().lastError, null);
+for (const count of [2, 20]) {
+    const details = Array.from({ length: count }, () => ({ ...m5Details[0] }));
+    const scheduler = createTodayTrendScheduler({
+        controller: { generate: async () => { throw Object.assign(new Error('safe failure'), { code: 'TT_BATCH_VALIDATION', details }); } },
+        committer: { invalidateCommits() {}, commitStore: async () => assert.fail('must not commit') },
+        getStore: async () => structuredClone(valid), getStorageId: () => 'chat', getChat: () => [{ mes: '正文' }], getFloor: () => 2,
+    });
+    await assert.rejects(() => scheduler.manual(), /safe failure/);
+    const safe = scheduler.state().lastErrorDetails;
+    assert.deepEqual(safe.details, details);
+    assert.equal(Object.isFrozen(safe), true);
+    assert.equal(Object.isFrozen(safe.details), true);
+    assert.equal(safe.details.every(Object.isFrozen), true);
+    assert.notEqual(safe.details[0], details[0]);
+    details[0].actual = m4Secret;
+    assert.equal(safe.details[0].actual, 'object');
+}
+await assert.rejects(() => m4Controller({ ...batchEmpty(), unexpected: m4Secret }).generate(createInput), error => m4Assert(error,
+    { object: '$', path: '$', expected: 'exact-fields', actual: 'object' }, /字段集合/));
+const m4LongStage = batchEmpty();
+m4LongStage.dynamics.create = [{ id: m4Secret, type: 'normal', title: m4Secret, stageLabel: '阶段', origin: '来源',
+    participants: [], initialStage: '长'.repeat(241), relatedEventIds: [] }];
+await assert.rejects(() => m4Controller(m4LongStage).generate(createInput), error => m4Assert(error,
+    { object: 'dynamics.create[0]', path: 'dynamics.create[0].initialStage', expected: 'non-empty-string-max-240', actual: 'out-of-range-length' }, /最多240字/));
+let m4Failure = true;
+let m4Store = structuredClone(valid);
+let m4Commits = 0;
+const m4Scheduler = createTodayTrendScheduler({
+    controller: { generate: async ({ scope }) => m4Failure
+        ? m4Controller({ ...batchEmpty(), factions: [{ ...factionFixture('old'), details: {} }] }).generate({ ...createInput, scope: factionBase })
+        : { scope } },
+    committer: { invalidateCommits() {}, commitStore: async update => { m4Commits += 1; m4Store = update(m4Store); return m4Store; } },
+    getStore: async () => m4Store, getStorageId: () => 'chat', getChat: () => [{ mes: '正文' }], getFloor: () => 2, now: () => 100,
+});
+await assert.rejects(() => m4Scheduler.manual(), /details.*expected array/);
+assert.equal(m4Commits, 0);
+assert.equal(typeof m4Scheduler.state().lastError, 'string');
+assert.deepEqual(m4Scheduler.state().lastErrorDetails, { code: 'TT_BATCH_VALIDATION', details: [
+    { object: 'factions[0]', path: 'factions[0].details', expected: 'array', actual: 'object' },
+    { object: 'factions[0].details[0]', path: 'factions[0].details[0]', expected: 'exact-fields', actual: 'unchecked' },
+] });
+m4Scheduler.cancel();
+assert.equal(m4Scheduler.state().lastErrorDetails, null);
+await assert.rejects(() => m4Scheduler.manual(), /details.*expected array/);
+assert.notEqual(m4Scheduler.state().lastErrorDetails, null);
+m4Failure = false;
+await m4Scheduler.manual();
+assert.equal(m4Scheduler.state().lastErrorDetails, null);
+assert.equal(m4Scheduler.state().lastError, null);
+const m4SafeDetail = { object: 'factions[0]', path: 'factions[0].details', expected: 'array', actual: 'object' };
+for (const [code, details] of [
+    ['TT_BATCH_VALIDATION_EXTRA', [m4SafeDetail]],
+    ['TT_BATCH_VALIDATION', [{ ...m4SafeDetail, raw: m4Secret }]],
+    ['TT_BATCH_VALIDATION', [{ ...m4SafeDetail, object: m4Secret }]],
+    ['TT_BATCH_VALIDATION', [{ ...m4SafeDetail, path: `factions[${m4Secret}].details` }]],
+    ['TT_BATCH_VALIDATION', [{ ...m4SafeDetail, actual: m4Secret }]],
+    ['TT_BATCH_VALIDATION', [{ ...m4SafeDetail, expected: m4Secret }]],
+    ['TT_BATCH_VALIDATION', Array(21).fill(m4SafeDetail)],
+    ['TT_BATCH_VALIDATION', []],
+]) {
+    const rejectedDetailsScheduler = createTodayTrendScheduler({
+        controller: { generate: async () => { throw Object.assign(new Error('safe failure'), { code, details }); } },
+        committer: { invalidateCommits() {}, commitStore: async () => { assert.fail('invalid candidate must not commit'); } },
+        getStore: async () => structuredClone(valid), getStorageId: () => 'chat',
+        getChat: () => [{ mes: '正文' }], getFloor: () => 2, now: () => 100,
+    });
+    await assert.rejects(() => rejectedDetailsScheduler.manual(), /safe failure/);
+    assert.equal(rejectedDetailsScheduler.state().lastError, 'safe failure');
+    assert.equal(rejectedDetailsScheduler.state().lastErrorDetails, null);
+    assert.equal(JSON.stringify(rejectedDetailsScheduler.state()).includes(m4Secret), false);
+    rejectedDetailsScheduler.acknowledge();
+    assert.equal(rejectedDetailsScheduler.state().lastErrorDetails, null);
+}
+
+const completeFactions = Array.from({ length: 40 }, (_, i) => ({ ...factionFixture(`node-${i}`, i === 0 ? 'node-39' : null),
+    details: [{ label: '完整资料', value: '长'.repeat(400) + (i === 39 ? '末尾父势力资料<&>' : '') }] }));
+const decodeBlock = (prompt, name) => JSON.parse(JSON.parse(prompt.match(new RegExp(`<${name} encoding="json-string">\\n(.*?)\\n</${name}>`, 's'))[1]));
+for (const includeExistingChat of [true, false]) {
+    const largeCanonical = structuredClone(migratedValidV2);
+    largeCanonical.globalEnvelope.payload.scopes.chat.payload.factions = completeFactions;
+    const projection = serializeTodayTrendV2ScopeForGeneration(largeCanonical, 'chat');
+    assert.ok(JSON.parse(projection).factions.length < completeFactions.length, 'fixture must exercise original truncation');
+    const envelope = buildTodayTrendGenerationEnvelope({ ...createInput, scope: { ...createInput.scope, factions: completeFactions },
+        promptScope: projection, context: { source: { includeExistingChat } } });
+    assert.deepEqual(decodeBlock(envelope.userPrompt, 'current_factions'), completeFactions);
+    assert.equal(Object.hasOwn(decodeBlock(envelope.userPrompt, 'current_today_trend'), 'factions'), false);
+    assert.match(envelope.systemPrompt, /空模块从本批历史事实建立初始 world/);
+    assert.match(envelope.systemPrompt, /禁止回填较晚事实/);
+    assert.match(envelope.userPrompt, /world_items_schema/);
+    const example = JSON.parse(envelope.systemPrompt.split('\n').find(line => line.startsWith('{"factions"')));
+    assert.deepEqual((await factionRequest(example.factions, { ...factionBase, factions: [] })).scope.factions, example.factions);
+    assert.equal(decodeBlock(envelope.userPrompt, 'current_factions').at(-1).details[0].value.endsWith('末尾父势力资料<&>'), true);
+    assert.doesNotMatch(envelope.userPrompt, /仅补充 history|本次仅更新/);
+}
+// Raw canonical JSON budget must not be consumed a second time by safe transport escaping.
+for (const suffix of ['', '"\\<>&']) {
+    const canonical = structuredClone(migratedValidV2);
+    const payload = canonical.globalEnvelope.payload.scopes.chat.payload;
+    payload.world = { items: Array.from({ length: 20 }, (_, i) => ({ id: `w${i}`, name: '态势', summary: '汉'.repeat(555) })) };
+    payload.world.items[19].summary += suffix;
+    payload.factions = [];
+    payload.reputation = { circles: [] };
+    payload.dynamics = { active: [], archived: [] };
+    // This isolated empty-event fixture must not retain the migrated archived baseline.
+    payload.fixedCoreBaselineByEvent = {};
+    const projection = serializeTodayTrendV2ScopeForGeneration(canonical, 'chat');
+    const { factions, ...other } = JSON.parse(projection);
+    const raw = JSON.stringify(other);
+    if (!suffix) {
+        assert.equal(projection.length, 11952);
+        assert.equal(raw.length, 11938);
+        assert.equal(JSON.stringify(raw).length, 12194);
+    }
+    assert.deepEqual(other.world, payload.world);
+    const scope = buildReadOnlyShadow(canonical).scopes.chat;
+    assert.deepEqual(scope.factions, payload.factions);
+    const envelope = buildTodayTrendGenerationEnvelope({ ...createInput, scope, promptScope: projection, context: {} });
+    assert.deepEqual(decodeBlock(envelope.userPrompt, 'current_today_trend'), other);
+    assert.deepEqual(decodeBlock(envelope.userPrompt, 'current_factions'), factions);
+    const encoded = envelope.userPrompt.match(/<current_today_trend encoding="json-string">\n(.*?)\n<\/current_today_trend>/s)[1];
+    assert.doesNotMatch(encoded, /[<>&]/);
+    assert.ok(encoded.length <= 6 * raw.length + 2);
+    // Exercise the actual remaining-content cap exactly, then one raw code unit over.
+    other.world.items[19].summary += '汉'.repeat(12000 - raw.length);
+    assert.equal(JSON.stringify(other).length, 12000);
+    const boundary = buildTodayTrendGenerationEnvelope({ ...createInput, scope, promptScope: JSON.stringify(other), context: {} });
+    assert.deepEqual(decodeBlock(boundary.userPrompt, 'current_today_trend'), other);
+    other.world.items[19].summary += '汉';
+    assert.throws(() => buildTodayTrendGenerationEnvelope({ ...createInput, scope, promptScope: JSON.stringify(other), context: {} }),
+        /current_today_trend.*12000.*原始 JSON.*拒绝截断/);
+}
+const facadeCanonical = structuredClone(migratedValidV2);
+facadeCanonical.globalEnvelope.payload.scopes.chat.payload.factions = completeFactions;
+assert.deepEqual(buildReadOnlyShadow(facadeCanonical).scopes.chat.factions, completeFactions,
+    'scopeFacadeFields must preserve every faction field, including trailing details and parent references');
+const capFaction = factionFixture('cap');
+capFaction.summary = '<>&"\\';
+capFaction.summary += '汉'.repeat(240000 - JSON.stringify([capFaction]).length);
+const capScope = { ...createInput.scope, factions: [capFaction] };
+assert.equal(JSON.stringify(capScope.factions).length, 240000);
+assert.deepEqual(decodeBlock(buildTodayTrendGenerationEnvelope({ ...createInput, scope: capScope, context: {} }).userPrompt, 'current_factions'), capScope.factions);
+capFaction.summary += '汉';
+assert.throws(() => buildTodayTrendGenerationEnvelope({ ...createInput, scope: capScope, context: {} }), /current_factions.*240000.*原始 JSON.*拒绝截断/);
+assert.throws(() => buildTodayTrendGenerationEnvelope({ ...createInput, context: {},
+    scope: { ...createInput.scope, factions: [{ ...factionFixture('huge'), summary: 'x'.repeat(240001) }] } }), /current_factions.*拒绝截断/);
+assert.throws(() => buildTodayTrendGenerationEnvelope({ ...createInput, context: {}, promptScope: '{broken' }), SyntaxError);
+assert.throws(() => buildTodayTrendGenerationEnvelope({ ...createInput, context: {},
+    promptScope: JSON.stringify({ world: { items: [{ summary: 'x'.repeat(12001) }] } }) }), /current_today_trend.*拒绝截断/);
+const worldReset = replaceTodayTrendV2ScopeWithBatchReset(batchReadyValidV2, 'chat', 100);
+const worldEmptyScope = buildReadOnlyShadow(worldReset).scopes.chat;
+assert.deepEqual(worldEmptyScope.world.items, []);
+const worldInitial = { id: 'regional-shipping', name: '区域航运', summary: '本批公告确认区域航运恢复。' };
+const worldController = createTodayTrendGenerationController({ getCtx: () => ({}), gather: async () => ({}), now: () => 101,
+    callAI: async (system) => { assert.match(system, /空模块从本批历史事实建立初始 world/);
+        return JSON.stringify({ ...batchEmpty(), factions: null, world: { upserts: [worldInitial] } }); } });
+const worldGenerated = await worldController.generate({ ...createInput, scope: worldEmptyScope,
+    historyBatch: [{ role: 'assistant', content: '港务公告确认区域航运恢复。' }] });
+const worldCanonical = applyTodayTrendGenerationToV2(worldReset, 'chat', worldGenerated.scope, worldGenerated.history,
+    { trustedStoryDate: '2025-04-15', assistantCount: 1, generatedAt: 101, archives: worldGenerated.archives });
+const worldUiScope = resolveTodayTrendV2UiScope(worldCanonical, 'chat');
+assert.deepEqual(worldUiScope.world.items, [worldInitial]);
+assert.match(renderTodayTrendWorldView({ scope: worldUiScope }), /区域航运/);
+assert.deepEqual(materializeTodayTrendBatchDelta(batchEmpty(), worldGenerated.scope, 102).parsed.world.items, [worldInitial]);
+assert.deepEqual(materializeTodayTrendBatchDelta(batchEmpty(), worldEmptyScope, 102).parsed.world.items, []);
+}
+
+
 // Exercise the actual prompt (including its executable DTO example), not source grep.
 for (const includeExistingChat of [true, false]) {
     for (const historyBatch of [null, [], [{ role: 'assistant', content: '本批事实标记' }]]) {
@@ -4770,7 +5076,8 @@ for (const includeExistingChat of [true, false]) {
         const mode = JSON.parse(envelope.userPrompt.match(/<generation_mode encoding="json-string">\n(.*?)\n<\/generation_mode>/s)[1]);
         if (Array.isArray(historyBatch)) {
             assert.match(mode, /history_batch_data 是本轮优先事实输入/);
-            assert.doesNotMatch(envelope.userPrompt, /独立推演模式|聊天正文未作为|输出.*null|必须.*null|普通正文标记|较晚正文标记/);
+            assert.doesNotMatch(envelope.userPrompt, /独立推演模式|聊天正文未作为|普通正文标记|较晚正文标记/);
+            assert.match(envelope.userPrompt, /factions 无变化为 null/);
             assert.doesNotMatch(envelope.systemPrompt, /完整替换值|dynamics 非 null|latestStage 必须等于|顶层只能有 preset 和 scope/);
             assert.match(envelope.systemPrompt, /多个新建事件都可分别这样表达/);
             assert.match(envelope.systemPrompt, /旧241–600字阶段只读保留/);
@@ -4790,14 +5097,74 @@ for (const includeExistingChat of [true, false]) {
     }
 }
 
+// S2: historical batch systemPrompt must declare type→outcome mapping table and new-event daySummaries=[] anti-example
+{
+    const s2Envelope = buildTodayTrendGenerationEnvelope({ ...createInput,
+        historyBatch: [{ role: 'assistant', content: 'S2 验证历史批' }],
+        context: { source: { includeExistingChat: true }, mainChatText: '正文', latestChatText: '最新' } });
+    const s2Prompt = s2Envelope.systemPrompt;
+    const outcomeTableMatch = s2Prompt.match(/type→outcome 对照[\s\S]{0,500}?不是通用完结。/);
+    assert.ok(outcomeTableMatch, '历史批 systemPrompt 必须包含 type→outcome 对照表');
+    const outcomeTable = outcomeTableMatch[0];
+    const commonOutcomes = ['resolved', 'failed', 'terminated', 'inconclusive'];
+    const commonClause = outcomeTable.match(/normal、incident 仅可取 ([^；]*)；/);
+    assert.ok(commonClause, 'normal、incident 必须明确共用仅可取集合');
+    const rumorClause = outcomeTable.match(/rumor 仅可取 ([^；]*)；/);
+    assert.ok(rumorClause, 'rumor 必须明确仅可取集合');
+    assert.match(outcomeTable, /underground 可取上述四项或 absorbed（absorbed 须由 active incident 通过 relatedEventIds 关联承接）/,
+        'underground 必须继承上述完整四项并仅增加 absorbed 及承接条件');
+    for (const [type, actual, expected] of [
+        ['normal', commonClause[1].split('|'), commonOutcomes],
+        ['incident', commonClause[1].split('|'), commonOutcomes],
+        ['rumor', rumorClause[1].split('|'), ['confirmed', 'debunked']],
+        ['underground', [...commonClause[1].split('|'), 'absorbed'], [...commonOutcomes, 'absorbed']],
+    ]) {
+        assert.deepEqual(actual, expected, `${type} 允许集合必须完整且不得增加其他结果`);
+        for (const outcome of expected) assert.ok(actual.includes(outcome), `${type} 必须允许 ${outcome}`);
+    }
+    assert.match(outcomeTable, /absorbed[\s\S]{0,150}active[\s\S]{0,30}incident[\s\S]{0,30}relatedEventIds/, '映射表必须说明 absorbed 须由 active incident 通过 relatedEventIds 承接');
+    assert.match(outcomeTable, /不得为迁就结果而改 type/, '映射表必须禁止为迁就结果而改 type');
+    assert.match(outcomeTable, /confirmed 仅表示传闻被证实，不是通用完结/, '映射表必须说明 confirmed 仅表示传闻被证实');
+    // 与 model.js:127-132 一致性：rumor 不含 resolved 等；normal/incident 不含 confirmed/debunked/absorbed；underground 不含 confirmed/debunked
+    // 直接排除全角分号；双反斜杠的 Unicode 拼写不是分号边界。
+    const illegalRumorPatterns = [
+        ['resolved', /rumor[^；]*resolved/], ['failed', /rumor[^；]*failed/],
+        ['terminated', /rumor[^；]*terminated/], ['inconclusive', /rumor[^；]*inconclusive/],
+        ['absorbed', /rumor[^；]*absorbed/],
+    ];
+    for (const [outcome, pattern] of illegalRumorPatterns) {
+        assert.doesNotMatch(outcomeTable, pattern, `rumor 子句不得包含 ${outcome}`);
+        const mutant = outcomeTable.replace(rumorClause[0], `rumor 仅可取 confirmed|debunked|${outcome}；`);
+        assert.notEqual(mutant, outcomeTable, '变异必须实际改变测试字符串，不改生产 prompt');
+        assert.match(mutant, pattern, `反向正则必须命中非法 rumor ${outcome} 变异`);
+        assert.doesNotMatch(`rumor 仅可取 confirmed|debunked；其他类型 ${outcome}`, pattern,
+            '反向正则不得跨越全角分号命中下一子句');
+    }
+    assert.doesNotMatch(outcomeTable, /normal[^；]*confirmed/, 'normal 子句不得包含 confirmed');
+    assert.doesNotMatch(outcomeTable, /normal[^；]*debunked/, 'normal 子句不得包含 debunked');
+    assert.doesNotMatch(outcomeTable, /normal[^；]*absorbed/, 'normal 子句不得包含 absorbed');
+    assert.doesNotMatch(outcomeTable, /incident[^；]*confirmed/, 'incident 子句不得包含 confirmed');
+    assert.doesNotMatch(outcomeTable, /incident[^；]*debunked/, 'incident 子句不得包含 debunked');
+    assert.doesNotMatch(outcomeTable, /incident[^；]*absorbed/, 'incident 子句不得包含 absorbed');
+    assert.doesNotMatch(outcomeTable, /underground[^；]*confirmed/, 'underground 子句不得包含 confirmed');
+    assert.doesNotMatch(outcomeTable, /underground[^；]*debunked/, 'underground 子句不得包含 debunked');
+    // 新建事件 daySummaries=[] 反例
+    const newEventRule = s2Prompt.match(/新建事件在本批 create[^。]*。/)?.[0];
+    assert.ok(newEventRule, '历史批必须明确本批 create 的新建事件规则');
+    assert.match(newEventRule, /create 没有旧日开放阶段/, 'create 必须明确无旧日开放阶段');
+    assert.match(newEventRule, /即使同批追加多个阶段/, '必须明确覆盖同批多阶段');
+    assert.match(newEventRule, /daySummaries 也必须为 \[\]/, '新建事件封日摘要必须为空数组');
+    assert.match(newEventRule, /禁止自行推断日期/, '新建事件规则必须禁止推断日期');
+}
+
 
 for (const invalid of [null, {}, '', ' ', 42, '字'.repeat(601)]) {
     const dto = structuredClone(createBatch);
     dto.dynamics.create[0].initialStage = invalid;
-    assert.throws(() => materializeTodayTrendBatchDelta(dto, batchBase, 100), /create\[batch-new\].initialStage/);
+    assert.throws(() => materializeTodayTrendBatchDelta(dto, batchBase, 100), /create\[0\].initialStage/);
     dto.dynamics.create[0].initialStage = '开始';
     dto.dynamics.appendStages[0].stages = [invalid];
-    assert.throws(() => materializeTodayTrendBatchDelta(dto, batchBase, 100), /appendStages\[batch-new\].stages\[0\]/);
+    assert.throws(() => materializeTodayTrendBatchDelta(dto, batchBase, 100), /appendStages\[0\].stages\[0\]/);
 }
 // Local new-write limit is independent of the legacy canonical read contract.
 for (const stageText of ['字'.repeat(240), '😀'.repeat(120)]) {
@@ -4854,15 +5221,15 @@ for (const field of ['daySummaries', 'periodSummaries']) {
 const objectProtocol = structuredClone(createBatch);
 delete objectProtocol.dynamics.create[0].initialStage;
 objectProtocol.dynamics.create[0].stages = [phase5Stage('旧协议')];
-assert.throws(() => materializeTodayTrendBatchDelta(objectProtocol, batchBase, 100), /create\[batch-new\].*initialStage/);
+assert.throws(() => materializeTodayTrendBatchDelta(objectProtocol, batchBase, 100), /create\[0\].*initialStage/);
 const duplicateCreate = structuredClone(createBatch);
 duplicateCreate.dynamics.create[0].id = 'service';
-assert.throws(() => materializeTodayTrendBatchDelta(duplicateCreate, batchBase, 100), /create\[service\].id/);
+assert.throws(() => materializeTodayTrendBatchDelta(duplicateCreate, batchBase, 100), /create\[0\].id/);
 createBatch.dynamics.create[0].relatedEventIds = ['missing-reference'];
 await assert.rejects(() => createController.generate(createInput));
 createBatch.dynamics.create[0].relatedEventIds = relatedEventIds;
 createBatch.dynamics.create[0].type = 'incident';
-await assert.rejects(() => createController.generate({ ...createInput, allowIncident: false }));
+await assert.rejects(() => createController.generate({ ...createInput, allowHistoricalIncidentRecord: false }));
 createBatch.dynamics.create[0].type = type;
 await assert.rejects(() => createController.generate({ ...createInput,
     scope: { ...createInput.scope, dynamicsSettings: { ...createInput.scope.dynamicsSettings, autoComplete: false, archiveCompleted: false } } }));
@@ -5480,6 +5847,85 @@ assert.equal(phase5LateRuntime.pendingInjectionStore, undefined,
     '取消补偿完成后不得残留 pending injection store');
 await phase5MultiAuthorityWithTrace.release({ readV2: true, serveV2: false });
 
+
+// Historical permission is only a creation gate, not evidence verification or a type/field bypass.
+for (const enabled of [false, true]) {
+    const scope = structuredClone(createInput.scope);
+    scope.dynamicsSettings.incident.enabled = enabled;
+    scope.dynamicsSettings.incident.probability = enabled ? 0 : 100;
+    scope.dynamicsSettings.rumor.enabled = false;
+    scope.dynamicsSettings.underground.enabled = false;
+    scope.dynamics.active.find(event => event.id === 'service').type = 'incident';
+    let dto = batchEmpty();
+    dto.dynamics.appendStages.push({ eventId: 'service', stages: ['已有事故获得明确新进展'] });
+    const controller = createTodayTrendGenerationController({ getCtx: () => ({}), gather: async () => ({}),
+        callAI: async () => JSON.stringify(dto), now: () => 100 });
+    const input = { ...createInput, scope, allowIncident: true, allowHistoricalIncidentRecord: true };
+    const appended = await controller.generate(input);
+    assert.equal(appended.scope.dynamics.active.find(event => event.id === 'service').latestStage, '已有事故获得明确新进展');
+    for (const eventType of ['rumor', 'underground']) {
+        dto.dynamics.create = [{ ...createBatch.dynamics.create[0], id: 's1-other', type: eventType, relatedEventIds: [] }];
+        await assert.rejects(() => controller.generate(input), /本轮未允许生成/);
+    }
+    dto = batchEmpty();
+    assert.deepEqual((await controller.generate(input)).scope.dynamics, scope.dynamics, '空批协议保留，无事实 mock 不生成事件');
+    dto.dynamics.create = [{ ...createBatch.dynamics.create[0], id: 's1-invalid', type: 'incident', initialStage: '长'.repeat(241) }];
+    await assert.rejects(() => controller.generate(input), /240/);
+    dto.dynamics.create[0].initialStage = '本批事故事实';
+    if (!enabled) await assert.rejects(() => controller.generate(input), /未允许生成突发事件/);
+    else {
+        await assert.rejects(() => controller.generate({ ...input, allowHistoricalIncidentRecord: false }), /未允许生成突发事件/);
+        await assert.rejects(() => controller.generate({ ...input, allowHistoricalIncidentRecord: undefined }), /未允许生成突发事件/);
+    }
+}
+
+// S1: real scheduler -> controller -> envelope -> validators, isolated canonical memory only.
+for (const historical of [false, true]) for (const enabled of [false, true]) {
+    for (const probability of [0, 10, 100]) for (const draw of [0.09, 0.10, 0.11]) {
+        let canonical = structuredClone(batchReadyValidV2);
+        const settings = canonical.globalEnvelope.payload.scopes.chat.payload.dynamicsSettings;
+        settings.incident = { ...settings.incident, enabled, probability };
+        let randomCalls = 0, aiCalls = 0, commits = 0;
+        let beforeGeneration;
+        const permitted = enabled && (historical || probability === 100 || (probability === 10 && draw < 0.10));
+        const controller = createTodayTrendGenerationController({ getCtx: () => ({}), gather: async () => ({}), now: () => 100,
+            callAI: async (system, user) => {
+                aiCalls++;
+                beforeGeneration = structuredClone(canonical);
+                if (historical) {
+                    assert.match(user, /本批事故已发生/);
+                    assert.match(system, permitted ? /只能根据本批 history_batch_data 明确发生的事实/ : /禁止新建 incident，包括历史事实补录/);
+                    assert.doesNotMatch(system, /允许合理创建 incident|本轮允许在合理时创建 incident/);
+                    if (permitted) assert.match(system, /不可主动推演或编造 incident/);
+                } else {
+                    assert.match(system, permitted ? /本轮允许在合理时创建 incident/ : /本轮不允许新建 type 为 incident/);
+                    assert.doesNotMatch(system, /本轮允许补录 incident/);
+                }
+                const dto = batchEmpty();
+                dto.dynamics.create.push({ ...createBatch.dynamics.create[0], id: 's1-incident', type: 'incident', relatedEventIds: [], initialStage: '本批事故已发生' });
+                if (historical) return JSON.stringify(dto);
+                const scope = buildReadOnlyShadow(canonical).scopes.chat;
+                const materialized = materializeTodayTrendBatchDelta(dto, scope, 100);
+                return JSON.stringify(materialized.parsed);
+            } });
+        const scheduler = createTodayTrendScheduler({ controller, getStorageId: () => 'chat',
+            getChat: () => [{ role: 'assistant', content: '本批事故已发生' }],
+            getStore: async () => buildReadOnlyShadow(canonical), random: () => { randomCalls++; return draw; },
+            committer: { supportsCanonical: true, invalidateCommits() {}, loadCanonical: async () => structuredClone(canonical),
+                commitStore: async mutate => { canonical = await mutate(structuredClone(canonical)); commits++; return buildReadOnlyShadow(canonical); } } });
+        const run = () => scheduler.manual(historical ? { batchEnabled: true, recentAssistantCount: 1, mergeAssistantCount: 1 } : { floor: 8 });
+        if (permitted) {
+            await run();
+            assert.ok(buildReadOnlyShadow(canonical).scopes.chat.dynamics.active.some(event => event.id === 's1-incident'));
+        } else {
+            await assert.rejects(run, /未允许生成突发事件/);
+            assert.deepEqual(canonical, beforeGeneration, '权限失败不得写入部分候选');
+        }
+        assert.equal(aiCalls, 1);
+        assert.equal(randomCalls, !historical && enabled && probability === 10 ? 1 : 0);
+        assert.equal(commits, (historical ? 1 : 0) + (permitted ? 1 : 0), '历史启动重置与候选提交分开计数');
+    }
+}
 
 const phase3BatchChat = Array.from({ length: 8 }, (_, index) => ({ role: 'assistant', content: `阶段3批次正文${index + 1}` }));
 let phase3BatchCanonical = structuredClone(batchReadyValidV2);
