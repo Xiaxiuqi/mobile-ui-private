@@ -58,6 +58,26 @@ export function createTodayTrendPhoneController({ state, deps, container }) {
             if (!destroyed) await render();
         }
     };
+    let headProgressFrame = 0;
+    const syncHeadProgress = () => {
+        const content = container.querySelector?.('.pm-today-trend-content');
+        if (!content || typeof content.style?.setProperty !== 'function') return;
+        const progress = Math.min(1, Math.max(0, (Number(content.scrollTop) || 0) / 56));
+        content.style.setProperty('--pm-today-trend-head-progress', progress.toFixed(3));
+    };
+    const scheduleHeadProgress = () => {
+        if (typeof requestAnimationFrame !== 'function') { syncHeadProgress(); return; }
+        if (headProgressFrame) return;
+        headProgressFrame = requestAnimationFrame(() => { headProgressFrame = 0; syncHeadProgress(); });
+    };
+    const onHeadScroll = () => scheduleHeadProgress();
+    const bindHeadProgress = () => {
+        const content = container.querySelector?.('.pm-today-trend-content');
+        if (!content || typeof content.addEventListener !== 'function') return;
+        content.addEventListener('scroll', onHeadScroll, { passive: true });
+        syncHeadProgress();
+    };
+
     const render = async view => {
         if (destroyed) return false;
         const epoch = ++renderEpoch;
@@ -85,6 +105,8 @@ export function createTodayTrendPhoneController({ state, deps, container }) {
             view: lastView,
             generation: deps.getTodayTrendGenerationState?.() || {}, currentFloor, error, initializing, initializationDraft, initializationOpen, reinitializing, initializationMode,
             detailById, loadingDetailIds, retentionRevisions, retentionSaving, retentionDraft, diagnosticCopyStatus, assistantCount: currentAssistantCount, batchDraft: scope?.operation?.batchDraft });
+        bindHeadProgress();
+
         const focusSelector = pendingFocusSelector;
         pendingFocusSelector = '';
         restoreFocus(focusSelector, epoch);
@@ -387,6 +409,7 @@ export function createTodayTrendPhoneController({ state, deps, container }) {
     };
     container.addEventListener('click', click, true); container.addEventListener('change', change);
     container.addEventListener('submit', submit);
+
     unsubscribeGeneration = deps.subscribeTodayTrendGeneration?.(generationChanged) || null;
     const destroy = () => {
         if (destroyed) return false;
@@ -402,6 +425,9 @@ export function createTodayTrendPhoneController({ state, deps, container }) {
         container.removeEventListener('click', click, true);
         container.removeEventListener('change', change);
         container.removeEventListener('submit', submit);
+        if (headProgressFrame && typeof cancelAnimationFrame === 'function') cancelAnimationFrame(headProgressFrame);
+        headProgressFrame = 0;
+
         return true;
     };
     return { destroy, render };
