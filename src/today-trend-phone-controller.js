@@ -60,16 +60,23 @@ export function createTodayTrendPhoneController({ state, deps, container }) {
     };
     let headProgressFrame = 0;
     let lastHeadProgress = 0;
+    let headProgressLockUntil = 0;
     const syncHeadProgress = () => {
         const shell = container.querySelector?.('.pm-today-trend-shell');
         if (!shell || typeof shell.style?.setProperty !== 'function') return;
         const content = container.querySelector?.('.pm-today-trend-content');
-        const top = Number(content?.scrollTop) || 0;
-        const next = lastHeadProgress ? (top > 16 ? 1 : 0) : (top > 40 ? 1 : 0);
-        if (next !== lastHeadProgress) {
-            lastHeadProgress = next;
-            shell.style.setProperty('--pm-today-trend-head-progress', String(next));
-        }
+        if (!content) return;
+        const now = typeof performance?.now === 'function' ? performance.now() : Date.now();
+        // 折叠过渡期间不再重算：折叠会缩短滚动高度并让浏览器回夹 scrollTop，重算会在半压位置反复翻转
+        if (now < headProgressLockUntil) return;
+        const top = Number(content.scrollTop) || 0;
+        const slack = (Number(content.scrollHeight) || 0) - (Number(content.clientHeight) || 0);
+        // 可滚动余量不足时禁止折叠，避免折叠后 scrollTop 被回夹到展开区间
+        const next = lastHeadProgress ? (top > 16 ? 1 : 0) : (slack >= 96 && top > 40 ? 1 : 0);
+        if (next === lastHeadProgress) return;
+        lastHeadProgress = next;
+        headProgressLockUntil = now + 260;
+        shell.style.setProperty('--pm-today-trend-head-progress', String(next));
     };
     const scheduleHeadProgress = () => {
         if (typeof requestAnimationFrame !== 'function') { syncHeadProgress(); return; }
