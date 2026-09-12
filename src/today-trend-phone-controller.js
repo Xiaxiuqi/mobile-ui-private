@@ -59,12 +59,17 @@ export function createTodayTrendPhoneController({ state, deps, container }) {
         }
     };
     let headProgressFrame = 0;
+    let lastHeadProgress = 0;
     const syncHeadProgress = () => {
         const shell = container.querySelector?.('.pm-today-trend-shell');
         if (!shell || typeof shell.style?.setProperty !== 'function') return;
         const content = container.querySelector?.('.pm-today-trend-content');
-        const progress = Math.min(1, Math.max(0, (Number(content?.scrollTop) || 0) / 56));
-        shell.style.setProperty('--pm-today-trend-head-progress', progress.toFixed(3));
+        const top = Number(content?.scrollTop) || 0;
+        const next = lastHeadProgress ? (top > 16 ? 1 : 0) : (top > 40 ? 1 : 0);
+        if (next !== lastHeadProgress) {
+            lastHeadProgress = next;
+            shell.style.setProperty('--pm-today-trend-head-progress', String(next));
+        }
     };
     const scheduleHeadProgress = () => {
         if (typeof requestAnimationFrame !== 'function') { syncHeadProgress(); return; }
