@@ -60,10 +60,11 @@ export function createTodayTrendPhoneController({ state, deps, container }) {
     };
     let headProgressFrame = 0;
     const syncHeadProgress = () => {
+        const shell = container.querySelector?.('.pm-today-trend-shell');
+        if (!shell || typeof shell.style?.setProperty !== 'function') return;
         const content = container.querySelector?.('.pm-today-trend-content');
-        if (!content || typeof content.style?.setProperty !== 'function') return;
-        const progress = Math.min(1, Math.max(0, (Number(content.scrollTop) || 0) / 56));
-        content.style.setProperty('--pm-today-trend-head-progress', progress.toFixed(3));
+        const progress = Math.min(1, Math.max(0, (Number(content?.scrollTop) || 0) / 56));
+        shell.style.setProperty('--pm-today-trend-head-progress', progress.toFixed(3));
     };
     const scheduleHeadProgress = () => {
         if (typeof requestAnimationFrame !== 'function') { syncHeadProgress(); return; }
